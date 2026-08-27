@@ -58,6 +58,10 @@ describe('_session/steering', () => {
             sessionId: "session-id",
             prompt: [{type: "text", text: "long running prompt"}],
         });
+        let promptSettled = false;
+        void promptPromise.then(() => {
+            promptSettled = true;
+        });
         await vi.waitFor(() => {
             expect(sessionState.currentTurnId).toBe("turn-id");
         });
@@ -65,7 +69,11 @@ describe('_session/steering', () => {
         await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
             sessionId: "session-id",
             prompt: [{type: "text", text: "also keep backward compatibility"}],
+            _meta: {steering: {idleBehavior: "promptRequired"}},
         })).resolves.toEqual({outcome: "injected"});
+
+        expect(promptSettled).toBe(false);
+        expect(sessionState.currentTurnId).toBe("turn-id");
 
         expect(turnSteerSpy).toHaveBeenCalledWith({
             threadId: "session-id",
@@ -80,7 +88,7 @@ describe('_session/steering', () => {
         await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
     });
 
-    it('starts a new turn when no turn is active', async () => {
+    it('starts a new turn when no turn is active without the idle fallback', async () => {
         const mockFixture = createCodexMockTestFixture();
         const sessionState = createTestSessionState();
         vi.spyOn(mockFixture.getCodexAcpAgent(), "getSessionState").mockReturnValue(sessionState);
@@ -152,6 +160,55 @@ describe('_session/steering', () => {
         });
     });
 
+    it('returns promptRequired when no turn is active with the idle fallback', async () => {
+        const mockFixture = createCodexMockTestFixture();
+        const sessionState = createTestSessionState();
+        vi.spyOn(mockFixture.getCodexAcpAgent(), "getSessionState").mockReturnValue(sessionState);
+        const turnStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "turnStart");
+
+        await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "resend through session/prompt"}],
+            _meta: {steering: {idleBehavior: "promptRequired"}},
+        })).resolves.toEqual({outcome: "promptRequired"});
+
+        expect(turnStartSpy).not.toHaveBeenCalled();
+        expect(sessionState.currentTurnId).toBeNull();
+    });
+
+    it('returns promptRequired when the active turn ends during injection', async () => {
+        const {mockFixture, sessionState, turnCompleted} = startActiveTurn();
+        const turnStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "turnStart")
+            .mockResolvedValue({turn: createTurn("turn-id", "inProgress")});
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(async () => {
+            turnCompleted.resolve({
+                threadId: "session-id",
+                turn: createTurn("turn-id", "completed"),
+            });
+            throw Object.assign(new Error("Internal error"), {
+                data: {details: "no active turn to steer"},
+            });
+        });
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await vi.waitFor(() => {
+            expect(sessionState.currentTurnId).toBe("turn-id");
+        });
+
+        await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "keep this host-owned"}],
+            _meta: {steering: {idleBehavior: "promptRequired"}},
+        })).resolves.toEqual({outcome: "promptRequired"});
+
+        expect(turnStartSpy).toHaveBeenCalledTimes(1);
+        await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
+        expect(sessionState.currentTurnId).toBeNull();
+    });
+
     it('serializes concurrent late steering requests without dropping either prompt', async () => {
         const mockFixture = createCodexMockTestFixture();
         const sessionState = createTestSessionState();
@@ -209,6 +266,24 @@ describe('_session/steering', () => {
 
         await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
             sessionId: "session-id",
+        })).rejects.toThrow(RequestError);
+    });
+
+    it.each([
+        ["null metadata", null],
+        ["array metadata", []],
+        ["scalar metadata", "promptRequired"],
+        ["null steering metadata", {steering: null}],
+        ["array steering metadata", {steering: []}],
+        ["scalar steering metadata", {steering: "promptRequired"}],
+        ["unknown idle behavior", {steering: {idleBehavior: "startNewTurn"}}],
+    ])('rejects malformed steer metadata: %s', async (_label, meta) => {
+        const mockFixture = createCodexMockTestFixture();
+
+        await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "do not silently downgrade"}],
+            _meta: meta,
         })).rejects.toThrow(RequestError);
     });
 

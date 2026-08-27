@@ -2022,8 +2022,9 @@ export class CodexAcpServer {
      * check guards against deleting a queue a later request has since reused).
      *
      * @param params The target session id and the prompt to steer with.
-     * @returns Whether the prompt joined the active turn ("injected"), started a
-     *     new one ("startedNewTurn"), or could not be applied ("failed"); see
+     * @returns Whether the prompt joined the active turn ("injected"), needs a
+     *     host-owned prompt ("promptRequired"), started a new one
+     *     ("startedNewTurn"), or could not be applied ("failed"); see
      *     {@link performSteeringRequest}.
      */
     async executeOrQueueSteeringRequest(params: SessionSteerRequest): Promise<SessionSteeringResponse> {
@@ -2061,11 +2062,13 @@ export class CodexAcpServer {
 
     /**
      * Delivers a steering prompt to the session: injects it into the live turn
-     * when there is one, otherwise starts a new turn.
+     * when there is one, otherwise starts a new turn unless the caller opted
+     * into the host-owned idle fallback.
      *
      * @param params The target session id and the prompt to steer with.
-     * @returns "injected" when the prompt joined an existing turn, otherwise the
-     *     outcome of starting a new turn.
+     * @returns "injected" when the prompt joined an existing turn,
+     *     "promptRequired" when no turn could accept it and the caller owns the
+     *     fallback, otherwise the outcome of starting a new turn.
      */
     private async performSteeringRequest(params: SessionSteerRequest): Promise<SessionSteeringResponse> {
         logger.log("Steering session requested", {
@@ -2082,6 +2085,10 @@ export class CodexAcpServer {
                 logger.log("Steering session injected", {sessionId: params.sessionId, turnId});
                 return {outcome: "injected"};
             }
+        }
+        if (params._meta?.steering?.idleBehavior === "promptRequired") {
+            logger.log("Steering session requires prompt", {sessionId: params.sessionId});
+            return {outcome: "promptRequired"};
         }
         return await this.startNewTurnFromSteering(params);
     }
@@ -2263,9 +2270,29 @@ export class CodexAcpServer {
         if (typeof sessionId !== "string" || !Array.isArray(prompt)) {
             throw RequestError.invalidParams();
         }
+        const meta = params["_meta"];
+        if (meta !== undefined && (meta === null || typeof meta !== "object" || Array.isArray(meta))) {
+            throw RequestError.invalidParams();
+        }
+        const steering = meta === undefined
+            ? undefined
+            : (meta as Record<string, unknown>)["steering"];
+        if (steering !== undefined
+            && (steering === null || typeof steering !== "object" || Array.isArray(steering))) {
+            throw RequestError.invalidParams();
+        }
+        const idleBehavior = steering === undefined
+            ? undefined
+            : (steering as Record<string, unknown>)["idleBehavior"];
+        if (idleBehavior !== undefined && idleBehavior !== "promptRequired") {
+            throw RequestError.invalidParams();
+        }
         return {
             sessionId: sessionId,
             prompt: prompt as acp.ContentBlock[],
+            ...(idleBehavior === "promptRequired"
+                ? {_meta: {steering: {idleBehavior}}}
+                : {}),
         };
     }
 

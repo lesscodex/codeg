@@ -122,10 +122,17 @@ export async function legacySetSessionModel(
 export type SessionSteerRequest = {
     sessionId: SessionId;
     prompt: ContentBlock[];
+    _meta?: SessionSteeringMeta;
+}
+
+export type SessionSteeringMeta = {
+    steering?: {
+        idleBehavior?: "promptRequired";
+    };
 }
 
 export type SessionSteeringResponse = {
-    outcome: "injected" | "startedNewTurn" | "failed";
+    outcome: "injected" | "promptRequired" | "startedNewTurn" | "failed";
 }
 
 export type SessionSteeringExtRequest = {
