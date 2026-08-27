@@ -8,6 +8,7 @@ pub mod binary_cache;
 pub mod browser_tools;
 pub mod chat_authoring;
 pub mod claude_model_picker;
+pub(crate) mod codex_backend;
 pub mod codex_catalog_commit;
 pub mod codex_catalog_refresh;
 pub mod codex_catalog_source;

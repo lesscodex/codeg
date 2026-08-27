@@ -187,7 +187,7 @@ pub(crate) fn is_launch_only_key(key: &str) -> bool {
 /// [`crate::acp::scratch_dir`], or `None` when isolation is off, is not applied
 /// to this agent on this platform, or the directory could not be created (then
 /// the child inherits the ambient temp dir, exactly as it did before).
-fn merge_agent_env(
+pub(crate) fn merge_agent_env(
     env: &[(&'static str, &'static str)],
     runtime_env: &BTreeMap<String, String>,
     scratch: Option<&Path>,
@@ -1081,7 +1081,7 @@ fn codex_config_with_thread_unload_delay(current: Option<&str>) -> Option<String
 /// inherits unless the runtime env sets its own — both passed in rather than
 /// read here so this stays pure (and so its tests don't depend on whatever
 /// `~/.codex/config.toml` or environment the developer happens to have).
-fn apply_codex_env_policy(
+pub(crate) fn apply_codex_env_policy(
     agent_type: AgentType,
     merged: &mut Vec<(String, String)>,
     initial_agent_mode: Option<&str>,
@@ -1160,7 +1160,7 @@ const CODEX_PROMPT_SUGGESTIONS_ENV: &str = "CODEX_ACP_PROMPT_SUGGESTIONS";
 /// user's `true` cannot bring back a call whose answer nothing shows. A
 /// connection that composes leaves the variable as the user set it, and a
 /// user's `false` keeps the prediction off everywhere.
-fn apply_codex_prompt_suggestion_policy(
+pub(crate) fn apply_codex_prompt_suggestion_policy(
     agent_type: AgentType,
     merged: &mut Vec<(String, String)>,
     prompt_suggestions: bool,
@@ -1715,7 +1715,7 @@ impl AgentConnection {
 /// [`binary_cache::cache_dir`] for consistency. Returns `None` — and the
 /// caller injects nothing — when the system cache dir is unknown or the
 /// directory can't be created: diagnostics must never block a connection.
-fn codex_app_server_log_dir() -> Option<String> {
+pub(crate) fn codex_app_server_log_dir() -> Option<String> {
     let dir = dirs::cache_dir()?
         .join("app.codeg")
         .join("acp-logs")
@@ -2100,7 +2100,7 @@ async fn record_hydrated_update(
 /// level. The buffer is what a silent-`EndTurn` diagnosis reads from — see
 /// [`crate::acp::stderr_tail`]. stdin/stdout are NEVER buffered: they carry
 /// JSON-RPC traffic including prompt text and file contents.
-fn agent_debug_callback(
+pub(crate) fn agent_debug_callback(
     agent_name: String,
     stderr_tail: Arc<StderrTail>,
     stdio_debug_enabled: bool,
@@ -2162,6 +2162,23 @@ async fn build_agent(
         agent_type,
         &meta.distribution,
     );
+
+    if agent_type == AgentType::Codex {
+        let agent = crate::acp::codex_backend::build_agent(
+            meta,
+            runtime_env,
+            stderr_tail,
+            scratch,
+            prompt_suggestions,
+        )
+        .await?;
+        let agent = if cwd.is_dir() {
+            agent.with_current_dir(cwd)
+        } else {
+            agent
+        };
+        return Ok((agent, prompt_usage_mode));
+    }
 
     let agent = match meta.distribution {
         AgentDistribution::Npx { cmd, args, env, .. } => {
