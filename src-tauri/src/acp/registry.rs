@@ -475,10 +475,8 @@ pub const CLAUDE_AGENT_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-ac
 /// `_meta.steering.supported`: an adapter that ignores the opt-in falls back
 /// to `startedNewTurn` on the turn-end race — a detached turn no host request
 /// owns, which codeg's turn-scoped runtime must never trigger. codex-acp
-/// ships `_session/steering` but not `promptRequired` — re-verified against
-/// the published 1.3.0 tarball (zero hits, same as 1.1.9) — so it stays
-/// `None` until a release implements the opt-in — then this is a one-line
-/// flip plus tests.
+/// shipped `_session/steering` without `promptRequired` through 1.4.0; the
+/// bundled 1.7.0 adapter contains the opt-in and active-turn lifecycle fix.
 ///
 /// Honoring the opt-in is necessary but not sufficient: the ACTIVE path must
 /// also keep the owning `session/prompt` in flight across the steered work
@@ -511,6 +509,7 @@ pub fn steering_prompt_required_min_version(agent_type: AgentType) -> Option<&'s
         // answers the steer — measured live; see the claude entry's (qq) for
         // what moving the tool cost codeg.
         AgentType::ClaudeCode => Some("0.65.0"),
+        AgentType::Codex => Some("1.7.0"),
         _ => None,
     }
 }
@@ -2577,12 +2576,11 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // the injected `codeg-mcp` server always survives. 1.1.6 adds
             // steering (#309): `_session/steering` injects a user prompt into
             // the LIVE turn (initialize advertises `_meta.steering.supported`)
-            // — codeg keeps codex on the MCP pull channel because 1.1.9 still
-            // lacks the `promptRequired` idle opt-in
-            // (`steering_prompt_required_min_version` → None; flipping it on
-            // is a one-liner once a release implements the opt-in AND its
-            // active `injected` path provably keeps the owning prompt pending
-            // — claude's 0.64.0 didn't, see #934 in the fn comment). 1.1.7
+            // — codeg kept codex on the MCP pull channel because 1.1.9 through
+            // 1.4.0 lacked the `promptRequired` idle opt-in. The bundled 1.7.0
+            // adapter implements the opt-in and keeps the owning prompt
+            // pending across injected work, so the runtime version gate now
+            // enables native steering for it. 1.1.7
             // (#326) emits Plan-mode plan
             // contents as a plain `agent_message_chunk`
             // (`_meta.codex.phase = "final_answer"`, no `<proposed_plan>` tags),
@@ -2652,16 +2650,18 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // switching). New in the bundle and fine on generic cards:
             // synthetic "Guardian Review" tool calls (kind "think") and
             // fuzzyFileSearch ids. Structured plan_update stays inert — its
-            // gate is the TOP-LEVEL `clientCapabilities.plan`, which codeg does
-            // not advertise. 1.3.0 still ships NO steering `promptRequired`
-            // opt-in (tarball grep: zero hits ⇒ the arm below stays None) and
-            // still declares no `engines.node`, so the 20.0.0 floor is
+            // gate is the TOP-LEVEL `clientCapabilities.plan` field, which
+            // codeg does not advertise and sacp 11.0.0 cannot express.
+            // 1.3.0 still shipped NO steering `promptRequired` opt-in; that
+            // behavior remains true through 1.4.0. The bundled 1.7.0 fork
+            // adds the host-owned idle fallback and active-turn lifecycle fix.
+            // It still declares no `engines.node`, so the 20.0.0 floor is
             // retained.
             // 1.4.0 is the codex half of the same AIR `agentFileChangeReport`
             // release as claude-agent-acp 0.69.0 and carries nothing else
             // (tarball-diffed: the only new string literals are that feature's
             // plus the `thread/fork` app-server method it is built on;
-            // `@openai/codex` stays ^0.147.0, so the CLI and its native
+            // `@openai/codex` stayed ^0.147.0, so the CLI and its native
             // team-of-agents surface are unchanged). codex implements the
             // audit by forking the thread (`approvalPolicy: "never"`,
             // `sandbox: "read-only"`, `ephemeral: true`) and running an extra
@@ -2733,10 +2733,10 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // appear in the bundle but come from the vendored
             // `@agentclientprotocol/sdk` 1.4.0 SCHEMA only — codex-acp keeps
             // emitting the `contextCompaction` synthetic tool call, so the
-            // compaction card is untouched. Steering still ships no
-            // `promptRequired` opt-in (tarball grep: zero hits ⇒ the arm below
-            // stays None), and there is still no `engines.node`, so the 20.0.0
-            // floor is retained.
+            // compaction card is untouched. Official tarballs still shipped no
+            // `promptRequired` opt-in; Codeg's repository-packaged fork carries
+            // that idle fallback and the active-turn lifecycle fix. There is
+            // still no `engines.node`, so the 20.0.0 floor is retained.
             //
             // 1.8.0 adds two modules (`src/SessionFork.ts`,
             // `src/TitleGenerator.ts`) and REMOVES no string literal, so every
@@ -2783,9 +2783,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             //
             // Still NOT adopted, unchanged from 1.7.0: native subagent
             // sessions and `agentFileChangeReport` (the AIR array is the same
-            // three names). Steering still ships no `promptRequired` opt-in
-            // (tarball grep: zero hits), and there is still no `engines.node`,
-            // so the 20.0.0 floor is retained.
+            // three names). There is still no `engines.node`, so the 20.0.0
+            // floor is retained.
             //
             // 1.9.0 + 1.10.0 add exactly five wire methods between them (diff of
             // the two bundles' method literals: nothing was REMOVED), of which
@@ -2831,10 +2830,12 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // codeg reads `usage_update` frames and is unaffected.
             //
             // `thread/backgroundTerminals/{list,terminate}` are the app-server
-            // half of (a) and never reach ACP. Steering STILL ships no
-            // `promptRequired` opt-in (tarball grep: zero hits ⇒ the arm below
-            // stays None), `agentFileChangeReport` / native subagent sessions
-            // are still not adopted, and there is still no `engines.node`, so
+            // half of (a) and never reach ACP. The official 1.11.0 tarball
+            // still ships no `promptRequired` opt-in (tarball grep: zero hits);
+            // Codeg's repository-packaged fork carries the idle fallback and
+            // active-turn lifecycle fix forward from 1.7.0.
+            // `agentFileChangeReport` / native subagent sessions are still not
+            // adopted, and there is still no `engines.node`, so
             // the 20.0.0 floor is retained. `@openai/codex` moves ^0.152 →
             // ^0.153.4 (one minor plus patches).
             //
@@ -2899,9 +2900,11 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // change needed.
             //
             // Everything else holds: no literal was removed except the two
-            // model-name tokens, steering still ships no `promptRequired`
-            // (tarball grep: zero hits), `agentFileChangeReport` and native
-            // subagent sessions are still not adopted, there is still no
+            // model-name tokens. The official tarball still ships no
+            // `promptRequired` opt-in (tarball grep: zero hits); Codeg's
+            // repository-packaged fork carries that idle fallback and
+            // active-turn lifecycle fix forward from 1.7.0. `agentFileChangeReport`
+            // and native subagent sessions are still not adopted, there is still no
             // `engines.node` (so the 20.0.0 floor stays), and `@openai/codex`
             // moves ^0.153.3 → ^0.153.4 (a patch).
             //
@@ -5962,21 +5965,24 @@ mod tests {
     }
 
     #[test]
-    fn steering_prompt_required_min_version_gates_claude_only() {
+    fn steering_prompt_required_min_version_gates_claude_and_codex() {
         // The native-steering policy bit: only an adapter that honors the
         // `promptRequired` opt-in AND keeps the owning prompt in flight across
         // a steered turn gets a minimum version. The floor is the release that
         // fixed the latter (claude-agent-acp 0.65.0 / #958), NOT the one that
         // introduced the opt-in — every 0.64.x settles the prompt early (#934).
-        // Everyone else stays None and rides the MCP pull channel; codex-acp
-        // ships steering without the opt-in at all (re-verified on the 1.3.0
-        // tarball). Flipping an agent on here without the runtime
+        // Everyone else stays None and rides the MCP pull channel. Codex's
+        // bundled 1.7.0 adapter is the first version with the complete
+        // contract. Flipping an agent on here without the runtime
         // `agent_info.version` proof is not enough by design.
         assert_eq!(
             steering_prompt_required_min_version(AgentType::ClaudeCode),
             Some("0.65.0")
         );
-        assert_eq!(steering_prompt_required_min_version(AgentType::Codex), None);
+        assert_eq!(
+            steering_prompt_required_min_version(AgentType::Codex),
+            Some("1.7.0")
+        );
         for agent in [
             AgentType::Gemini,
             AgentType::OpenClaw,

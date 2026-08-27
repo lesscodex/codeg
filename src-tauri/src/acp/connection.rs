@@ -5497,11 +5497,11 @@ fn build_grok_set_model_params(
 }
 
 /// Send `_session/steering` (the ACP steering extension) to inject a message
-/// into the RUNNING turn. Untyped because it is an extension method the schema
-/// has no typed request for. Always opts into the 0.64.0
+/// into the RUNNING turn. Untyped like `session/resume` — an extension method
+/// the schema has no typed request for. Always opts into the adapter's
 /// `promptRequired` idle contract; codeg only enables native steering for
 /// adapters proven to honor it AND to keep the owning prompt in flight across
-/// the steered work (claude-agent-acp 0.65.0 / #958 — see
+/// the steered work (claude-agent-acp 0.65.0 / #958, bundled codex-acp 1.7.0 — see
 /// [`synthesize_native_steering`] and `registry::steering_prompt_required_min_version`),
 /// but the caller still handles every outcome in case the proof was wrong.
 async fn send_steer_request(
@@ -8229,8 +8229,8 @@ async fn run_connection(
             // alone can't vouch for the process on the other end of the pipe.
             // The raw advertisement is deliberately NOT stored: exposing it
             // would tempt the frontend to re-derive eligibility and show the
-            // instant channel for adapters (codex) that advertise steering but
-            // would detach a turn on the idle race.
+            // instant channel for adapters that advertise steering without
+            // proving the host-owned idle-race contract.
             let steering_advertised = init_advertises_steering(init_resp.meta.as_ref());
             let native_steering_available = synthesize_native_steering(
                 agent_type,
@@ -25058,6 +25058,8 @@ mod tests {
         let advertised = meta_map(serde_json::json!({"steering": {"supported": true}}));
         let proven = Implementation::new("claude-agent-acp", "0.65.0");
         let stale = Implementation::new("claude-agent-acp", "0.64.1");
+        let codex_proven = Implementation::new("codex-acp", "1.7.0");
+        let codex_stale = Implementation::new("codex-acp", "1.6.2");
 
         // All three gates → native.
         assert!(synthesize_native_steering(
@@ -25065,12 +25067,18 @@ mod tests {
             Some(&advertised),
             Some(&proven)
         ));
-        // Registry policy gate: codex advertises steering but has no
-        // promptRequired minimum — never native, whatever it reports.
+        // Codex's bundled adapter satisfies the policy and runtime gates.
+        assert!(synthesize_native_steering(
+            AgentType::Codex,
+            Some(&advertised),
+            Some(&codex_proven)
+        ));
+        // A pre-fix Codex adapter stays on the pull channel even when it
+        // advertises steering.
         assert!(!synthesize_native_steering(
             AgentType::Codex,
             Some(&advertised),
-            Some(&proven)
+            Some(&codex_stale)
         ));
         // Runtime proof gate: 0.64.1 advertises steering identically but still
         // settles the owning prompt on a mid-generation `injected` (#934, fixed
