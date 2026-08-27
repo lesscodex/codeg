@@ -7,6 +7,7 @@ pub mod background_watch;
 pub mod binary_cache;
 pub mod browser_tools;
 pub mod chat_authoring;
+pub(crate) mod codex_backend;
 pub mod codex_catalog_source;
 pub mod codex_context;
 pub mod codex_goal;

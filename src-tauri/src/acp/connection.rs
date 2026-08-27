@@ -177,7 +177,7 @@ pub fn set_force_command_color(enabled: bool) {
 /// [`crate::acp::scratch_dir`], or `None` when isolation is off or the
 /// directory could not be created (then the child inherits the ambient temp
 /// dir, exactly as it did before).
-fn merge_agent_env(
+pub(crate) fn merge_agent_env(
     env: &[(&'static str, &'static str)],
     runtime_env: &BTreeMap<String, String>,
     scratch: Option<&Path>,
@@ -1007,53 +1007,7 @@ fn merge_antigravity_settings(
     Ok((root != before).then_some(root))
 }
 
-/// Codex-only launch policy: force codex-acp's MCP name-conflict de-duplication
-/// OFF. codeg injects its companion server (`codeg-mcp`) over ACP
-/// `session/new.mcpServers`; codex-acp otherwise drops any ACP-passed server
-/// whose name collides with a `config.toml` entry — global *or* project layer
-/// (the check was widened to project `.codex/config.toml` in codex-acp #322) —
-/// silently stripping codeg-mcp and with it ask_user_question / delegation /
-/// feedback / session_info. The late `retain` + `push` makes the override win
-/// over any user `runtime_env` twin, so the injection is guaranteed to survive.
-/// Codex launch env policy. `initial_agent_mode` is the preset resolved from
-/// `~/.codex/config.toml` by `codex_launch_initial_agent_mode` — passed in rather
-/// than read here so this stays pure (and so its tests don't depend on whatever
-/// `~/.codex/config.toml` the developer happens to have).
-fn apply_codex_env_policy(
-    agent_type: AgentType,
-    merged: &mut Vec<(String, String)>,
-    initial_agent_mode: Option<&str>,
-) {
-    if agent_type != AgentType::Codex {
-        return;
-    }
-    let key = "DISABLE_MCP_CONFIG_FILTERING";
-    merged.retain(|(k, _)| k != key);
-    merged.push((key.to_string(), "true".to_string()));
-
-    // Make `~/.codex/config.toml`'s sandbox/approval choice mean something.
-    // codex-acp re-sends its own approvalPolicy + sandboxPolicy every turn from
-    // an `AgentMode` seeded once per session, so without this the user's config
-    // is silently overridden by the adapter's default `agent` preset (#442).
-    // Same shape as Grok's `--permission-mode` launch flag.
-    //
-    // A pre-existing value in the runtime env WINS: that is an explicit
-    // user-set key, a stronger signal than a config-file inference. A
-    // `preferred_mode_id` / `config_values["mode"]` still overrides this after
-    // connect via `set_config_option` — explicit choice > config inference.
-    let mode_key = "INITIAL_AGENT_MODE";
-    if merged
-        .iter()
-        .any(|(k, v)| k == mode_key && !v.trim().is_empty())
-    {
-        return;
-    }
-    if let Some(mode) = initial_agent_mode {
-        merged.retain(|(k, _)| k != mode_key);
-        merged.push((mode_key.to_string(), mode.to_string()));
-    }
-}
-
+/// Prepend `dir` to the PATH entry of `env`, seeding from `fallback_path` when
 /// Prepend `dir` to the PATH entry of `env`, seeding from `fallback_path` when
 /// `env` has no PATH key of its own. Removes any pre-existing PATH key first
 /// (case-insensitively when `windows`, since Windows env keys are
@@ -1585,23 +1539,6 @@ impl AgentConnection {
     }
 }
 
-/// Build an AcpAgent from registry metadata.
-/// Directory handed to codex-acp via `APP_SERVER_LOGS` so its adapter-side
-/// (ACP ↔ Codex app-server translation) logs land on disk for support.
-///
-/// Roots under the same `<cache>/app.codeg` tree as
-/// [`binary_cache::cache_dir`] for consistency. Returns `None` — and the
-/// caller injects nothing — when the system cache dir is unknown or the
-/// directory can't be created: diagnostics must never block a connection.
-fn codex_app_server_log_dir() -> Option<String> {
-    let dir = dirs::cache_dir()?
-        .join("app.codeg")
-        .join("acp-logs")
-        .join("codex-acp");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.to_string_lossy().into_owned())
-}
-
 /// Pi runs through pi-acp, which spawns the actual `pi` binary at runtime. If
 /// `pi` (or the BYO-pi `PI_ACP_PI_COMMAND` override) isn't resolvable, pi-acp
 /// dies mid-connection with a raw ENOENT. This preflight resolves the command
@@ -1974,7 +1911,7 @@ async fn record_hydrated_update(
 /// level. The buffer is what a silent-`EndTurn` diagnosis reads from — see
 /// [`crate::acp::stderr_tail`]. stdin/stdout are NEVER buffered: they carry
 /// JSON-RPC traffic including prompt text and file contents.
-fn agent_debug_callback(
+pub(crate) fn agent_debug_callback(
     agent_name: String,
     stderr_tail: Arc<StderrTail>,
     stdio_debug_enabled: bool,
@@ -2032,6 +1969,21 @@ async fn build_agent(
     let meta = registry::get_agent_meta(agent_type);
     debug_assert_eq!(meta.agent_type, agent_type);
 
+    if agent_type == AgentType::Codex {
+        let agent = crate::acp::codex_backend::build_agent(
+            meta,
+            runtime_env,
+            stderr_tail,
+            scratch,
+        )
+        .await?;
+        return Ok(if cwd.is_dir() {
+            agent.with_current_dir(cwd)
+        } else {
+            agent
+        });
+    }
+
     let agent = match meta.distribution {
         AgentDistribution::Npx { cmd, args, env, .. } => {
             let mut merged_env = merge_agent_env(env, runtime_env, scratch);
@@ -2074,28 +2026,6 @@ async fn build_agent(
                     crate::commands::acp::pi_project_trust_launch_block(cwd, runtime_env)
                 {
                     return Err(AcpError::PiProjectTrustRequired(message));
-                }
-            }
-            // Resolve the config-derived preset HERE (like Grok's
-            // `grok_launch_permission_mode` below) so the policy helper stays a
-            // pure function over the env list.
-            let codex_initial_mode = if agent_type == AgentType::Codex {
-                crate::commands::acp::codex_launch_initial_agent_mode()
-            } else {
-                None
-            };
-            apply_codex_env_policy(agent_type, &mut merged_env, codex_initial_mode.as_deref());
-            // codex-acp 1.0.0 honors APP_SERVER_LOGS as a directory for its
-            // adapter-side logs. Surface it only under CODEG_ACP_DEBUG so
-            // default runs are unchanged; a directory-creation failure silently
-            // skips injection (diagnostics must never block a connect).
-            let want_codex_logs = agent_type == AgentType::Codex
-                && std::env::var("CODEG_ACP_DEBUG")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-            if want_codex_logs {
-                if let Some(dir) = codex_app_server_log_dir() {
-                    merged_env.push(("APP_SERVER_LOGS".to_string(), dir));
                 }
             }
             let mut parts: Vec<String> = Vec::new();
@@ -26429,91 +26359,6 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert_eq!(report.status, AntigravitySyncStatus::Skipped);
-    }
-
-    #[test]
-    fn codex_env_policy_forces_mcp_filter_off_and_overrides_user_twin() {
-        // Codex gets the flag injected so codex-acp never drops the injected
-        // `codeg-mcp` server on a config.toml name collision.
-        let mut env = vec![("PATH".to_string(), "/usr/bin".to_string())];
-        apply_codex_env_policy(AgentType::Codex, &mut env, None);
-        assert!(env
-            .iter()
-            .any(|(k, v)| k == "DISABLE_MCP_CONFIG_FILTERING" && v == "true"));
-
-        // A user-supplied twin is replaced (not duplicated) so the override wins.
-        let mut with_twin = vec![(
-            "DISABLE_MCP_CONFIG_FILTERING".to_string(),
-            "false".to_string(),
-        )];
-        apply_codex_env_policy(AgentType::Codex, &mut with_twin, None);
-        let hits: Vec<_> = with_twin
-            .iter()
-            .filter(|(k, _)| k == "DISABLE_MCP_CONFIG_FILTERING")
-            .collect();
-        assert_eq!(hits.len(), 1, "no duplicate key");
-        assert_eq!(hits[0].1, "true", "codeg override wins over user twin");
-    }
-
-    #[test]
-    fn codex_env_policy_is_noop_for_other_agents() {
-        for agent in [AgentType::Grok, AgentType::ClaudeCode, AgentType::Gemini] {
-            let mut env = vec![("PATH".to_string(), "/usr/bin".to_string())];
-            apply_codex_env_policy(agent, &mut env, Some("read-only"));
-            assert!(
-                !env.iter().any(|(k, _)| k == "DISABLE_MCP_CONFIG_FILTERING"),
-                "{agent:?} must not receive the codex-only flag"
-            );
-            assert!(
-                !env.iter().any(|(k, _)| k == "INITIAL_AGENT_MODE"),
-                "{agent:?} must not receive codex's approval preset"
-            );
-        }
-    }
-
-    #[test]
-    fn codex_env_policy_injects_the_config_derived_approval_preset() {
-        // Without this, codex-acp seeds its default `agent` preset and re-sends
-        // that approvalPolicy every turn, so the user's ~/.codex/config.toml
-        // sandbox/approval choice is dead (#442).
-        let mut env = vec![("PATH".to_string(), "/usr/bin".to_string())];
-        apply_codex_env_policy(AgentType::Codex, &mut env, Some("read-only"));
-        assert!(env
-            .iter()
-            .any(|(k, v)| k == "INITIAL_AGENT_MODE" && v == "read-only"));
-
-        // Nothing mappable → stay out of the way entirely, leaving codex-acp's
-        // own default rather than pinning a preset the user never chose.
-        let mut none = vec![("PATH".to_string(), "/usr/bin".to_string())];
-        apply_codex_env_policy(AgentType::Codex, &mut none, None);
-        assert!(!none.iter().any(|(k, _)| k == "INITIAL_AGENT_MODE"));
-    }
-
-    #[test]
-    fn codex_env_policy_lets_an_explicit_env_preset_win_over_the_config() {
-        // An explicit runtime-env key is a stronger signal than a config-file
-        // inference, so it must NOT be clobbered (and must not be duplicated).
-        let mut env = vec![(
-            "INITIAL_AGENT_MODE".to_string(),
-            "agent-full-access".to_string(),
-        )];
-        apply_codex_env_policy(AgentType::Codex, &mut env, Some("read-only"));
-        let hits: Vec<_> = env
-            .iter()
-            .filter(|(k, _)| k == "INITIAL_AGENT_MODE")
-            .collect();
-        assert_eq!(hits.len(), 1, "no duplicate key");
-        assert_eq!(hits[0].1, "agent-full-access");
-
-        // A blank twin carries no intent, so the config-derived value fills it.
-        let mut blank = vec![("INITIAL_AGENT_MODE".to_string(), "  ".to_string())];
-        apply_codex_env_policy(AgentType::Codex, &mut blank, Some("read-only"));
-        let hits: Vec<_> = blank
-            .iter()
-            .filter(|(k, _)| k == "INITIAL_AGENT_MODE")
-            .collect();
-        assert_eq!(hits.len(), 1, "blank twin replaced, not duplicated");
-        assert_eq!(hits[0].1, "read-only");
     }
 
     #[test]
