@@ -2667,7 +2667,7 @@ export interface WorkTaskFolderSettings {
   auto_process: boolean
   /** 0 = unlimited. */
   max_concurrent: number
-  merge_strategy: "squash" | "merge"
+  merge_strategy: "squash" | "merge" | "rebase"
   /** Land reviewed tasks automatically: when a task settles into review and is
    *  actually mergeable, the engine dispatches the same merge the button would
    *  (agent-written commit message, worktree per `delete_worktree_default`). */

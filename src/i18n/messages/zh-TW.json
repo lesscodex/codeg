@@ -6234,6 +6234,8 @@
     "strategySquashHint": "任務的所有修改壓縮成一筆提交記錄併入主分支，歷史更簡潔。",
     "strategyMerge": "保留完整提交歷史",
     "strategyMergeHint": "保留任務過程中的每一筆提交，另加一筆合併記錄，每一步都可追溯。",
+    "strategyRebase": "線性歷史",
+    "strategyRebaseHint": "將任務提交變基到基準分支上，然後快進合併。保留每筆提交記錄，不建立合併提交；提交雜湊可能會改變。",
     "mergeInstructions": "補充說明（可選）",
     "mergeInstructionsPlaceholder": "例如：衝突時以本分支為準",
     "mergeDeleteWorktree": "合併後刪除 worktree",

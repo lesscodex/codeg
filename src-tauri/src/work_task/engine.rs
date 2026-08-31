@@ -599,9 +599,9 @@ enum LaunchMode {
         attachments: Vec<serde_json::Value>,
     },
     /// Merge generation: the agent lands the task onto the base branch itself
-    /// (sync base into the worktree, resolve conflicts, merge into base). The
-    /// task sits in `merging` for the whole turn; the engine settles from git
-    /// truth, never from the agent's word.
+    /// (merge or rebase in the worktree, then land on the base). The task sits
+    /// in `merging` for the whole turn; the engine settles from git truth,
+    /// never from the agent's word.
     Merge {
         root_path: String,
         base_branch: String,
@@ -3820,12 +3820,8 @@ impl TaskEngine {
         let settings = work_task_service::settings_get_effective(&self.db.conn, task.folder_id)
             .await
             .unwrap_or_default();
-        let strategy = if settings.merge_strategy == "merge" {
-            "merge"
-        } else {
-            "squash"
-        }
-        .to_string();
+        let strategy = normalize_merge_strategy(&settings.merge_strategy).to_string();
+        let message = if strategy == "rebase" { None } else { message };
         let (root, _wt, base_branch, work_branch) = self.merge_coordinates(&task).await?;
 
         // Dispatch under the per-folder git lock: one merge per project at a
@@ -3904,10 +3900,14 @@ impl TaskEngine {
         let pre_merge_head = task_git::rev_parse(&root.path, "HEAD")
             .await
             .map_err(|e| e.to_string())?;
+        let pre_merge_work_head = task_git::rev_parse(&root.path, &work_branch)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let state = WorkTaskMergeState {
             op: WorkTaskMergeOp::Land,
             pre_merge_head,
+            pre_merge_work_head,
             message: message.clone().unwrap_or_default(),
             strategy: strategy.clone(),
             delete_worktree,
@@ -4043,10 +4043,10 @@ impl TaskEngine {
         live.await.unwrap_or(Ok(())).map(|()| MergeDispatch::Dispatched)
     }
 
-    /// Settle a finished merge generation from git truth: landed ⟺ the base
-    /// HEAD moved and contains the work (branch ancestry for merge commits,
-    /// tree equality for squashes). Anything else goes back to review with the
-    /// reason, after cleaning any half-done merge out of the project folder.
+    /// Settle a finished merge generation from git truth. Rebase requires the
+    /// base HEAD to equal a merge-free work-branch tip based on the recorded
+    /// base; merge/squash retain their ancestry/tree checks. Anything else goes
+    /// back to review after cleaning residue in the right worktree.
     async fn settle_merge_generation(
         self: &Arc<Self>,
         task: &crate::db::entities::work_task::Model,
@@ -4066,6 +4066,9 @@ impl TaskEngine {
         let root = match get_folder_core(&self.db, task.folder_id).await {
             Ok(r) => r,
             Err(e) => {
+                if state.strategy == "rebase" {
+                    self.clean_rebase_residue(task).await;
+                }
                 self.back_to_review(task_id, e.to_string(), None).await;
                 return;
             }
@@ -4089,7 +4092,11 @@ impl TaskEngine {
                 }
             }
             Ok(None) => {
+                if state.strategy == "rebase" {
+                    self.clean_rebase_residue(task).await;
+                } else {
                 self.clean_merge_residue(&root.path).await;
+                }
                 let reason = match stop_reason {
                     "end_turn" => match summary.map(str::trim).filter(|s| !s.is_empty()) {
                         Some(s) => format!(
@@ -4106,6 +4113,9 @@ impl TaskEngine {
                 self.back_to_review(task_id, reason, None).await;
             }
             Err(e) => {
+                if state.strategy == "rebase" {
+                    self.clean_rebase_residue(task).await;
+                }
                 self.back_to_review(task_id, format!("could not verify the merge: {e}"), None)
                     .await;
             }
@@ -4121,15 +4131,52 @@ impl TaskEngine {
         state: &WorkTaskMergeState,
         root_path: &str,
     ) -> Result<Option<String>, String> {
-        let head = task_git::rev_parse(root_path, "HEAD")
+        let head = if state.strategy == "rebase" {
+            let Some(base_branch) = task.base_branch.as_deref() else {
+                return Ok(None);
+            };
+            task_git::rev_parse(root_path, base_branch)
             .await
-            .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+        } else {
+            task_git::rev_parse(root_path, "HEAD")
+                .await
+                .map_err(|e| e.to_string())?
+        };
         if head == state.pre_merge_head {
             return Ok(None);
         }
         let Some(work_branch) = task.work_branch.as_deref() else {
             return Ok(None);
         };
+        if state.strategy == "rebase" {
+            if state.pre_merge_work_head.is_empty() {
+                return Ok(None);
+            }
+            let work_head = task_git::rev_parse(root_path, work_branch)
+                .await
+                .map_err(|e| e.to_string())?;
+            let work_on_base_first_parent =
+                task_git::is_first_parent_ancestor(root_path, &work_head, &head)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            let retained_dispatched_base =
+                task_git::is_ancestor(root_path, &state.pre_merge_head, &head)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            let has_task_merge = task_git::range_has_lineage_merge_commit(
+                root_path,
+                &state.pre_merge_head,
+                &work_head,
+                &state.pre_merge_work_head,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            return Ok(
+                (work_on_base_first_parent && retained_dispatched_base && !has_task_merge)
+                    .then_some(work_head),
+            );
+        }
         let ancestor = task_git::is_ancestor(root_path, work_branch, &head)
             .await
             .unwrap_or(false);
@@ -4146,6 +4193,34 @@ impl TaskEngine {
             || !task_git::staged_clean(root_path).await.unwrap_or(true);
         if residue {
             let _ = task_git::reset_merge(root_path).await;
+        }
+    }
+
+    /// Abort a half-done rebase in the task's linked worktree. Never run this
+    /// against the project root: a rebase landing only owns the task checkout.
+    async fn clean_rebase_residue(&self, task: &crate::db::entities::work_task::Model) {
+        let Some(wt_id) = task.worktree_folder_id else {
+            return;
+        };
+        let Ok(worktree) = get_folder_core(&self.db, wt_id).await else {
+            return;
+        };
+        match task_git::has_rebase(&worktree.path).await {
+            Ok(false) => {}
+            Ok(true) => {
+                if let Err(e) = task_git::abort_rebase(&worktree.path).await {
+                    tracing::warn!(
+                        "[work_task] task {}: could not abort rebase in {}: {e}",
+                        task.id,
+                        worktree.path
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "[work_task] task {}: could not inspect rebase state in {}: {e}",
+                task.id,
+                worktree.path
+            ),
         }
     }
 
@@ -5667,7 +5742,11 @@ impl TaskEngine {
                 }
             }
             Ok(None) => {
+                if state.strategy == "rebase" {
+                    self.clean_rebase_residue(&current).await;
+                } else {
                 self.clean_merge_residue(&root.path).await;
+                }
                 self.back_to_review(
                     task_id,
                     "the merge was interrupted before landing — merge again".to_string(),
@@ -5676,6 +5755,9 @@ impl TaskEngine {
                 .await;
             }
             Err(e) => {
+                if state.strategy == "rebase" {
+                    self.clean_rebase_residue(&current).await;
+                }
                 self.back_to_review(task_id, format!("could not verify the merge: {e}"), None)
                     .await;
             }
@@ -6688,7 +6770,14 @@ fn effective_agent_config(
     )
 }
 
-/// Compose the prompt for a launch mode. Fresh runs replay the task's blocks.
+fn normalize_merge_strategy(value: &str) -> &'static str {
+    match value {
+        "merge" => "merge",
+        "rebase" => "rebase",
+        _ => "squash",
+    }
+}
+
 /// Retry/return compose against the session we actually got: a resumed session
 /// already carries the task context, while a fresh fallback session needs the
 /// full original description again. Every prompt ends with the worktree guard,
@@ -6822,25 +6911,6 @@ async fn compose_prompt(
                 });
                 blocks.extend(original);
             }
-            let land_command = if strategy == "merge" {
-                format!(
-                    "git -C \"{root_path}\" merge --no-ff -m \"<message>\" {work_branch}"
-                )
-            } else {
-                format!(
-                    "git -C \"{root_path}\" merge --squash {work_branch} && \
-                     git -C \"{root_path}\" commit -m \"<message>\""
-                )
-            };
-            // Indented under step 3 rather than left dangling after it: it says
-            // what to substitute for that step's `<message>`, and read as a
-            // fourth line it looked like a fourth instruction.
-            let message_rule = match message {
-                Some(m) => format!("   Use exactly this commit message:\n   {m}"),
-                None => "   For `<message>`, write a concise Conventional Commits \
-                         message yourself, summarizing what this task changed."
-                    .to_string(),
-            };
             // The user's own words get their own paragraph, before the closing
             // rules — those rules stay last on purpose (same reason the standing
             // worktree guard below is the last built-in block): whatever the
@@ -6849,8 +6919,43 @@ async fn compose_prompt(
                 Some(i) => format!("\nAlso follow these instructions from the user:\n{i}\n"),
                 None => String::new(),
             };
-            blocks.push(PromptInputBlock::Text {
-                text: format!(
+            let recipe = if strategy == "rebase" {
+                format!(
+                    "The user accepted this task — land it onto the base branch \
+                     `{base_branch}` now, doing all git operations yourself:\n\
+                     1. Commit any uncommitted changes in this task worktree to the current \
+                     branch (`{work_branch}`).\n\
+                     2. In this task worktree, run `git rebase {base_branch}` and resolve \
+                     every conflict so both the base's changes and this task's intent \
+                     survive; continue the rebase until it completes.\n\
+                     3. In the base checkout at `{root_path}`, run `git merge --ff-only \
+                     {work_branch}` there (from elsewhere, use `git -C \"{root_path}\" \
+                     merge --ff-only {work_branch}`).\n\
+                     {extra}\n\
+                     Do NOT push, do NOT delete this worktree or its branch, and do not \
+                     change anything else on the base branch — leave the checkout at \
+                     `{root_path}` on `{base_branch}`, never switch branches there. \
+                     Finish with one short line saying what landed."
+                )
+            } else {
+                let land_command = if strategy == "merge" {
+                    format!("git -C \"{root_path}\" merge --no-ff -m \"<message>\" {work_branch}")
+                } else {
+                    format!(
+                        "git -C \"{root_path}\" merge --squash {work_branch} && \
+                         git -C \"{root_path}\" commit -m \"<message>\""
+                    )
+                };
+                // Indented under step 3 rather than left dangling after it: it
+                // says what to substitute for that step's `<message>`, and read
+                // as a fourth line it looked like a fourth instruction.
+                let message_rule = match message {
+                    Some(m) => format!("   Use exactly this commit message:\n   {m}"),
+                    None => "   For `<message>`, write a concise Conventional Commits \
+                             message yourself, summarizing what this task changed."
+                        .to_string(),
+                };
+                format!(
                     "The user accepted this task — land it onto the base branch \
                      `{base_branch}` now, doing all git operations yourself:\n\
                      1. Commit any uncommitted changes in this worktree to the current \
@@ -6865,8 +6970,9 @@ async fn compose_prompt(
                      change anything else on the base branch — leave the checkout at \
                      `{root_path}` on `{base_branch}`, never switch branches there. \
                      Finish with one short line saying what landed."
-                ),
-            });
+                )
+            };
+            blocks.push(PromptInputBlock::Text { text: recipe });
         }
     }
 
@@ -8403,6 +8509,17 @@ mod tests {
         }
     }
 
+    fn rebase_merge_mode() -> LaunchMode {
+        LaunchMode::Merge {
+            root_path: "/repo".to_string(),
+            base_branch: "main".to_string(),
+            work_branch: "task/7".to_string(),
+            strategy: "rebase".to_string(),
+            message: Some("ignored for rebase".to_string()),
+            instructions: None,
+        }
+    }
+
     fn return_mode(intent: FollowUpIntent) -> LaunchMode {
         LaunchMode::Return {
             intent,
@@ -9574,6 +9691,37 @@ mod tests {
             "no header without a body"
         );
         assert!(recipe.contains("land it onto the base branch"));
+    }
+
+    #[tokio::test]
+    async fn rebase_prompt_rebases_in_the_worktree_then_fast_forwards_the_base() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let blocks = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &rebase_merge_mode(),
+            &WorkTaskFolderSettings::default(),
+            true,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+
+        let recipe = texts(&blocks).join("\n");
+        assert!(recipe.contains("git rebase main"), "{recipe}");
+        assert!(recipe.contains("merge --ff-only task/7"), "{recipe}");
+        assert!(!recipe.contains("git merge main"), "{recipe}");
+        assert!(!recipe.contains("--squash"), "{recipe}");
+        assert!(!recipe.contains("--no-ff"), "{recipe}");
+        assert!(!recipe.contains("commit -m"), "{recipe}");
+    }
+
+    #[test]
+    fn merge_strategy_normalization_keeps_unknown_values_on_squash() {
+        assert_eq!(normalize_merge_strategy("rebase"), "rebase");
+        assert_eq!(normalize_merge_strategy("merge"), "merge");
+        assert_eq!(normalize_merge_strategy("future"), "squash");
+        assert_eq!(normalize_merge_strategy(" REBASE "), "squash");
     }
 
     #[tokio::test]
@@ -12409,14 +12557,17 @@ mod tests {
     /// Park the fixture's task exactly where a process that died mid-merge left
     /// it: `merging`, pointing at a connection that no longer exists, with that
     /// connection still in the engine's correlation index.
-    async fn interrupt_merge(f: &Delivery, conn_id: &str, delete_worktree: bool) {
+    async fn set_merging_strategy(f: &Delivery, delete_worktree: bool, strategy: &str) -> i32 {
         use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
         let state = WorkTaskMergeState {
             op: WorkTaskMergeOp::Land,
             pre_merge_head: task_git::rev_parse(f.root.to_str().unwrap(), "HEAD")
                 .await
                 .expect("base head"),
-            strategy: "merge".into(),
+            pre_merge_work_head: task_git::rev_parse(f.root.to_str().unwrap(), "task/7")
+                .await
+                .expect("work head"),
+            strategy: strategy.into(),
             delete_worktree,
             ..Default::default()
         };
@@ -12425,14 +12576,57 @@ mod tests {
         let mut active = task.into_active_model();
         active.status = Set(WorkTaskStatus::Merging);
         active.merge_state = Set(Some(serde_json::to_string(&state).expect("state")));
-        active.connection_id = Set(Some(conn_id.to_string()));
         active.update(&f.engine.db.conn).await.expect("to merging");
+        run_seq
+    }
+
+    async fn set_merging_state_raw(f: &Delivery, merge_state: Option<String>) {
+        use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+        let mut active = row(&f.engine, f.task_id).await.into_active_model();
+        active.status = Set(WorkTaskStatus::Merging);
+        active.merge_state = Set(merge_state);
+        active.update(&f.engine.db.conn).await.expect("to merging");
+    }
+
+    async fn interrupt_merge_with_strategy(
+        f: &Delivery,
+        conn_id: &str,
+        delete_worktree: bool,
+        strategy: &str,
+    ) {
+        use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+        let run_seq = set_merging_strategy(f, delete_worktree, strategy).await;
+        let mut active = row(&f.engine, f.task_id).await.into_active_model();
+        active.connection_id = Set(Some(conn_id.to_string()));
+        active
+            .update(&f.engine.db.conn)
+            .await
+            .expect("set connection");
         // Registered at launch, and only a TurnComplete ever takes it out.
         f.engine
             .index
             .lock()
             .await
             .insert(conn_id.into(), (f.task_id, run_seq));
+    }
+
+    async fn interrupt_merge(f: &Delivery, conn_id: &str, delete_worktree: bool) {
+        interrupt_merge_with_strategy(f, conn_id, delete_worktree, "merge").await;
+    }
+
+    fn start_conflicted_rebase(f: &Delivery) -> String {
+        std::fs::write(f.root.join("a.txt"), "base change\n").expect("write");
+        git_run(&f.root, &["commit", "-qam", "base change"]);
+        let base_before = std::fs::read_to_string(f.root.join("a.txt")).expect("base");
+        let out = std::process::Command::new("git")
+            .args(["rebase", "main"])
+            .current_dir(&f.worktree)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("spawn rebase");
+        assert!(!out.status.success(), "the fixture must conflict");
+        base_before
     }
 
     /// The dead generation's index entry has no other way out — `reconcile_once`
@@ -12485,6 +12679,248 @@ mod tests {
             !f.engine.index.lock().await.contains_key(DEAD_CONN),
             "a task back in review has no run to correlate events to"
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_aborts_an_interrupted_rebase_in_the_task_worktree() {
+        const DEAD_CONN: &str = "conn-of-a-conflicted-rebase";
+        let f = delivery_fixture(FakeForge::default()).await;
+
+        interrupt_merge_with_strategy(&f, DEAD_CONN, false, "rebase").await;
+        let base_before = start_conflicted_rebase(&f);
+        assert!(task_git::has_rebase(f.worktree.to_str().unwrap())
+            .await
+            .unwrap());
+
+        f.engine.recover_merging(f.task_id).await;
+
+        let task = row(&f.engine, f.task_id).await;
+        assert_eq!(task.status, WorkTaskStatus::Review);
+        assert!(!task_git::has_rebase(f.worktree.to_str().unwrap())
+            .await
+            .unwrap());
+        assert_eq!(
+            std::fs::read_to_string(f.root.join("a.txt")).expect("base after"),
+            base_before,
+            "rebase recovery must not reset the base checkout"
+        );
+        assert!(!f.engine.index.lock().await.contains_key(DEAD_CONN));
+    }
+
+    #[tokio::test]
+    async fn live_settle_aborts_an_interrupted_rebase_in_the_task_worktree() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        set_merging_strategy(&f, false, "rebase").await;
+        let base_before = start_conflicted_rebase(&f);
+
+        let task = row(&f.engine, f.task_id).await;
+        f.engine
+            .settle_merge_generation(&task, "end_turn", None)
+            .await;
+
+        assert_eq!(
+            row(&f.engine, f.task_id).await.status,
+            WorkTaskStatus::Review
+        );
+        assert!(!task_git::has_rebase(f.worktree.to_str().unwrap())
+            .await
+            .unwrap());
+        assert_eq!(
+            std::fs::read_to_string(f.root.join("a.txt")).expect("base after"),
+            base_before,
+            "rebase cleanup must not reset the base checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_merge_state_does_not_abort_an_unowned_rebase() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        start_conflicted_rebase(&f);
+        set_merging_state_raw(&f, None).await;
+
+        let task = row(&f.engine, f.task_id).await;
+        f.engine
+            .settle_merge_generation(&task, "end_turn", None)
+            .await;
+
+        assert_eq!(
+            row(&f.engine, f.task_id).await.status,
+            WorkTaskStatus::Review
+        );
+        assert!(task_git::has_rebase(f.worktree.to_str().unwrap())
+            .await
+            .unwrap());
+        task_git::abort_rebase(f.worktree.to_str().unwrap())
+            .await
+            .expect("test cleanup");
+    }
+
+    #[tokio::test]
+    async fn corrupt_merge_state_recovery_does_not_abort_an_unowned_rebase() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        start_conflicted_rebase(&f);
+        set_merging_state_raw(&f, Some("{bad merge state".into())).await;
+
+        f.engine.recover_merging(f.task_id).await;
+
+        assert_eq!(
+            row(&f.engine, f.task_id).await.status,
+            WorkTaskStatus::Review
+        );
+        assert!(task_git::has_rebase(f.worktree.to_str().unwrap())
+            .await
+            .unwrap());
+        task_git::abort_rebase(f.worktree.to_str().unwrap())
+            .await
+            .expect("test cleanup");
+    }
+
+    #[tokio::test]
+    async fn recovery_recognizes_rebase_fast_forward_as_landed() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        std::fs::write(f.root.join("base.txt"), "base\n").expect("write");
+        git_run(&f.root, &["add", "-A"]);
+        git_run(&f.root, &["commit", "-q", "-m", "base advance"]);
+        interrupt_merge_with_strategy(&f, "conn-of-rebased-task", false, "rebase").await;
+        git_run(&f.worktree, &["rebase", "main"]);
+        git_run(&f.root, &["merge", "--ff-only", "task/7"]);
+
+        f.engine.recover_merging(f.task_id).await;
+
+        assert_eq!(row(&f.engine, f.task_id).await.status, WorkTaskStatus::Done);
+        assert_eq!(
+            task_git::rev_parse(f.root.to_str().unwrap(), "HEAD")
+                .await
+                .expect("landed head"),
+            task_git::rev_parse(f.worktree.to_str().unwrap(), "HEAD")
+                .await
+                .expect("task head")
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_merge_and_squash_as_rebase_landings() {
+        for landing in ["merge", "squash"] {
+            let f = delivery_fixture(FakeForge::default()).await;
+            interrupt_merge_with_strategy(&f, &format!("conn-{landing}"), false, "rebase").await;
+            if landing == "merge" {
+                git_run(
+                    &f.root,
+                    &["merge", "--no-ff", "-q", "-m", "wrong landing", "task/7"],
+                );
+            } else {
+                git_run(&f.root, &["merge", "--squash", "task/7"]);
+                git_run(&f.root, &["commit", "-q", "-m", "wrong landing"]);
+            }
+
+            f.engine.recover_merging(f.task_id).await;
+
+            assert_eq!(
+                row(&f.engine, f.task_id).await.status,
+                WorkTaskStatus::Review,
+                "{landing} must not satisfy rebase landing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_a_base_merge_followed_by_fast_forward() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        std::fs::write(f.root.join("base.txt"), "base\n").expect("write");
+        git_run(&f.root, &["add", "-A"]);
+        git_run(&f.root, &["commit", "-q", "-m", "base advance"]);
+        interrupt_merge_with_strategy(&f, "conn-merged-base", false, "rebase").await;
+        git_run(
+            &f.worktree,
+            &["merge", "--no-ff", "-q", "-m", "merge base", "main"],
+        );
+        git_run(&f.root, &["merge", "--ff-only", "task/7"]);
+        assert_eq!(
+            task_git::rev_parse(f.root.to_str().unwrap(), "HEAD")
+                .await
+                .expect("base head"),
+            task_git::rev_parse(f.worktree.to_str().unwrap(), "HEAD")
+                .await
+                .expect("work head"),
+            "the negative case reaches the same tip but through a merge commit"
+        );
+
+        f.engine.recover_merging(f.task_id).await;
+
+        assert_eq!(
+            row(&f.engine, f.task_id).await.status,
+            WorkTaskStatus::Review
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_requires_the_recorded_base_branch_to_contain_the_rebased_work() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        interrupt_merge_with_strategy(&f, "conn-wrong-base", false, "rebase").await;
+        git_run(&f.root, &["switch", "-q", "-c", "release"]);
+        git_run(&f.root, &["merge", "--ff-only", "task/7"]);
+
+        f.engine.recover_merging(f.task_id).await;
+
+        assert_eq!(
+            row(&f.engine, f.task_id).await.status,
+            WorkTaskStatus::Review
+        );
+        assert_ne!(
+            task_git::rev_parse(f.root.to_str().unwrap(), "main")
+                .await
+                .expect("base head"),
+            task_git::rev_parse(f.root.to_str().unwrap(), "task/7")
+                .await
+                .expect("work head")
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_accepts_base_merge_that_precedes_the_task_rebase() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        interrupt_merge_with_strategy(&f, "conn-external-base-merge", false, "rebase").await;
+        git_run(&f.root, &["switch", "-q", "-c", "base-side"]);
+        std::fs::write(f.root.join("base-side.txt"), "base side\n").expect("write");
+        git_run(&f.root, &["add", "-A"]);
+        git_run(&f.root, &["commit", "-q", "-m", "base side"]);
+        git_run(&f.root, &["switch", "-q", "main"]);
+        git_run(
+            &f.root,
+            &[
+                "merge",
+                "--no-ff",
+                "-q",
+                "-m",
+                "external base merge",
+                "base-side",
+            ],
+        );
+        git_run(&f.worktree, &["rebase", "main"]);
+        git_run(&f.root, &["merge", "--ff-only", "task/7"]);
+
+        f.engine.recover_merging(f.task_id).await;
+
+        assert_eq!(row(&f.engine, f.task_id).await.status, WorkTaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn recovery_accepts_base_advancement_after_the_task_fast_forward() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        interrupt_merge_with_strategy(&f, "conn-later-base-advance", false, "rebase").await;
+        git_run(&f.root, &["merge", "--ff-only", "task/7"]);
+        let task_tip = task_git::rev_parse(f.root.to_str().unwrap(), "HEAD")
+            .await
+            .expect("task tip");
+        std::fs::write(f.root.join("later.txt"), "later\n").expect("write");
+        git_run(&f.root, &["add", "-A"]);
+        git_run(&f.root, &["commit", "-q", "-m", "later base change"]);
+
+        f.engine.recover_merging(f.task_id).await;
+
+        let task = row(&f.engine, f.task_id).await;
+        assert_eq!(task.status, WorkTaskStatus::Done);
+        assert_eq!(task.merge_commit.as_deref(), Some(task_tip.as_str()));
     }
 
     /// Retiring one generation must not disarm another. The outstanding-request

@@ -6234,6 +6234,8 @@
     "strategySquashHint": "Toutes les modifications de la tâche arrivent dans la branche principale comme une seule entrée d'historique — un historique plus net.",
     "strategyMerge": "Conserver tout l'historique",
     "strategyMergeHint": "Chaque commit réalisé pendant la tâche est conservé, plus une entrée de fusion — chaque étape reste traçable.",
+    "strategyRebase": "Historique linéaire",
+    "strategyRebaseHint": "Rebasez les commits de la tâche sur la branche de base, puis faites un fast-forward. Chaque commit est conservé sans commit de fusion ; les hachages peuvent changer.",
     "mergeInstructions": "Instructions supplémentaires (facultatif)",
     "mergeInstructionsPlaceholder": "ex. en cas de conflit, privilégier cette branche",
     "mergeDeleteWorktree": "Supprimer le worktree après la fusion",

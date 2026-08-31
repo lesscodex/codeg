@@ -204,6 +204,23 @@ pub async fn has_merge_head(path: &str) -> Result<bool, AppCommandError> {
     Ok(out.status.success())
 }
 
+/// Whether a rebase is in progress in this worktree. The private git
+/// directory is worktree-specific, so linked worktrees do not leak state into
+/// the project checkout.
+pub async fn has_rebase(path: &str) -> Result<bool, AppCommandError> {
+    let dir = git_dir(path).await?;
+    Ok(dir.join("rebase-merge").exists() || dir.join("rebase-apply").exists())
+}
+
+/// Abort an interrupted rebase in this worktree.
+pub async fn abort_rebase(path: &str) -> Result<(), AppCommandError> {
+    let out = run_git(path, &["rebase", "--abort"]).await?;
+    if !out.status.success() {
+        return Err(git_command_error("rebase --abort", &out.stderr));
+    }
+    Ok(())
+}
+
 /// Whether `ancestor` is reachable from `descendant`. Exit 0 = yes, 1 = no,
 /// anything else is a real error.
 pub async fn is_ancestor(
@@ -217,6 +234,51 @@ pub async fn is_ancestor(
         Some(1) => Ok(false),
         _ => Err(git_command_error("merge-base --is-ancestor", &out.stderr)),
     }
+}
+
+/// Whether `ancestor` is on `descendant`'s first-parent chain.
+pub async fn is_first_parent_ancestor(
+    path: &str,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, AppCommandError> {
+    let out = run_git(path, &["rev-list", "--first-parent", descendant]).await?;
+    if !out.status.success() {
+        return Err(git_command_error("rev-list --first-parent", &out.stderr));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| line == ancestor))
+}
+
+/// Whether a range contains a merge commit belonging to `lineage_tip` rather
+/// than one that arrived independently on the base branch.
+pub async fn range_has_lineage_merge_commit(
+    path: &str,
+    base: &str,
+    head: &str,
+    lineage_tip: &str,
+) -> Result<bool, AppCommandError> {
+    let range = format!("{base}..{head}");
+    let out = run_git(path, &["rev-list", "--parents", "--min-parents=2", &range]).await?;
+    if !out.status.success() {
+        return Err(git_command_error("rev-list", &out.stderr));
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut commits = line.split_ascii_whitespace();
+        let Some(merge) = commits.next() else {
+            continue;
+        };
+        let Some(first_parent) = commits.next() else {
+            continue;
+        };
+        if is_ancestor(path, merge, lineage_tip).await?
+            || is_ancestor(path, lineage_tip, first_parent).await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Best common ancestor of two revisions — the point a pull request's diff is
@@ -934,6 +996,38 @@ mod tests {
             original_mtime,
             "the real index's contents and timestamp stay untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn rebase_state_uses_each_linked_worktrees_private_git_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir");
+        git_run(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "base\n").expect("write");
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-q", "-m", "base"]);
+        let worktree = dir.path().join("task");
+        git_run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/1",
+                worktree.to_str().expect("path"),
+            ],
+        );
+        let worktree_path = worktree.to_str().expect("path");
+        let private_git_dir = git_dir(worktree_path).await.expect("private git dir");
+
+        std::fs::create_dir(private_git_dir.join("rebase-merge")).expect("rebase-merge");
+        assert!(has_rebase(worktree_path).await.expect("probe rebase-merge"));
+        std::fs::remove_dir(private_git_dir.join("rebase-merge")).expect("remove");
+
+        std::fs::create_dir(private_git_dir.join("rebase-apply")).expect("rebase-apply");
+        assert!(has_rebase(worktree_path).await.expect("probe rebase-apply"));
     }
 
     /// Why removing a task worktree has to consult BOTH probes: each is blind

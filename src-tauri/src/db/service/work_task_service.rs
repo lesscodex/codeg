@@ -4712,6 +4712,17 @@ mod tests {
             s3.stage_prompts.get("merge").map(String::as_str),
             Some("Write the message in Chinese.")
         );
+
+        let mut s4 = s3;
+        s4.merge_strategy = "rebase".into();
+        settings_set(&db.conn, folder_id, &s4).await.unwrap();
+        assert_eq!(
+            settings_get(&db.conn, folder_id)
+                .await
+                .unwrap()
+                .merge_strategy,
+            "rebase"
+        );
     }
 
     #[tokio::test]

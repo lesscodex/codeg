@@ -6234,6 +6234,8 @@
     "strategySquashHint": "タスクのすべての変更が1件の履歴としてメインブランチに取り込まれ、履歴がすっきりします。",
     "strategyMerge": "履歴をすべて残す",
     "strategyMergeHint": "タスク中の各コミットをそのまま残し、マージの記録を1件追加します。各ステップを追跡できます。",
+    "strategyRebase": "リニアな履歴",
+    "strategyRebaseHint": "タスクのコミットをベースブランチにリベースしてから、ファストフォワードします。マージコミットなしで各コミットを残しますが、コミットハッシュは変わる場合があります。",
     "mergeInstructions": "追加の指示（任意）",
     "mergeInstructionsPlaceholder": "例: 競合時はこのブランチ側を優先",
     "mergeDeleteWorktree": "マージ後に worktree を削除",

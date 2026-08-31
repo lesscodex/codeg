@@ -6234,6 +6234,8 @@
     "strategySquashHint": "Alle Änderungen der Aufgabe landen als ein einzelner Eintrag im Verlauf des Hauptbranchs — der Verlauf bleibt übersichtlich.",
     "strategyMerge": "Gesamten Verlauf behalten",
     "strategyMergeHint": "Jeder während der Aufgabe erstellte Commit bleibt erhalten, plus ein Merge-Eintrag — jeder Schritt bleibt nachvollziehbar.",
+    "strategyRebase": "Linearer Verlauf",
+    "strategyRebaseHint": "Die Task-Commits auf den Basis-Branch rebasen und anschließend per Fast-Forward übernehmen. Jeder Commit bleibt ohne Merge-Commit erhalten; Commit-Hashes können sich ändern.",
     "mergeInstructions": "Zusätzliche Anweisungen (optional)",
     "mergeInstructionsPlaceholder": "z. B. bei Konflikten diesen Branch bevorzugen",
     "mergeDeleteWorktree": "Worktree nach dem Merge löschen",
