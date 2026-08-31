@@ -143,6 +143,28 @@ describe("TaskMergeDialog", () => {
     )
   })
 
+  it("hides commit-message controls and sends null for linear history", async () => {
+    settingsMock.mockResolvedValue(
+      settings({ merge_strategy: "rebase", delete_worktree_default: false })
+    )
+    renderDialog()
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("checkbox", { name: /write the commit message/ })
+      ).toBeNull()
+      expect(screen.queryByLabelText("Commit message")).toBeNull()
+    })
+    expect(
+      screen.getByRole("checkbox", { name: /Delete worktree after merge/ })
+    ).not.toBeChecked()
+
+    await userEvent.click(screen.getByRole("button", { name: "Merge" }))
+    await waitFor(() =>
+      expect(mergeMock).toHaveBeenCalledWith(7, null, false, null)
+    )
+  })
+
   // Optional in both directions: typing goes through verbatim, and leaving it
   // alone must not start gating the button the way the commit message does.
   it("sends extra instructions when typed, and never blocks on them", async () => {
