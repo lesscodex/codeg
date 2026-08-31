@@ -1,97 +1,43 @@
+import type { ReactNode } from "react"
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import enMessages from "@/i18n/messages/en.json"
-import type { WorkTask, WorkTaskDraft } from "@/lib/types"
+import type {
+  AgentOptionsSnapshot,
+  PromptInputBlock,
+  WorkTask,
+  WorkTaskDraft,
+  WorkTaskFolderSettings,
+} from "@/lib/types"
 
-const branchesMock = vi.fn()
 const headMock = vi.fn()
 
+const testState = vi.hoisted(() => ({
+  branches: vi.fn(),
+  editorText: "Task description",
+  editorBlocks: [] as PromptInputBlock[],
+  settingsEffective: vi.fn(),
+  templates: vi.fn(),
+  submit: vi.fn(),
+}))
+
+const SNAPSHOT: AgentOptionsSnapshot = {
+  modes: null,
+  available_commands: [],
+  config_options: [],
+}
+
 vi.mock("@/lib/api", () => ({
-  gitListAllBranches: (...args: unknown[]) => branchesMock(...args),
+  gitListAllBranches: (...args: unknown[]) => testState.branches(...args),
   getGitBranch: (...args: unknown[]) => headMock(...args),
-  workTaskSettingsEffective: () =>
-    Promise.resolve({
-      default_agent_type: null,
-      mode_id: null,
-      config_values: {},
-      auto_process: false,
-      max_concurrent: 2,
-      merge_strategy: "squash",
-      auto_merge: false,
-      delete_worktree_default: true,
-      auto_compact_percent: 0,
-    }),
-  workTaskTemplateList: () => Promise.resolve([]),
-  workTaskTemplateSave: () => Promise.resolve(undefined),
-  workTaskTemplateDelete: () => Promise.resolve(undefined),
+  workTaskSettingsEffective: (...args: unknown[]) =>
+    testState.settingsEffective(...args),
+  workTaskTemplateList: (...args: unknown[]) => testState.templates(...args),
+  workTaskTemplateSave: vi.fn(),
+  workTaskTemplateDelete: vi.fn(),
 }))
-
-// The agent surface probes a live CLI; none of it is under test here.
-vi.mock("@/components/chat/agent-selector", () => ({
-  AgentSelector: () => <div data-testid="agent-selector" />,
-}))
-vi.mock("@/components/automations/agent-config-section", () => ({
-  AgentConfigSection: () => <div data-testid="agent-config" />,
-  effectiveSelections: (
-    _snapshot: unknown,
-    modeId: string | null,
-    configValues: Record<string, string>
-  ) => ({ mode_id: modeId, config_values: configValues }),
-  snapshotLabels: () => ({}),
-  useBooleanOptionLabels: () => ({ on: "On", off: "Off" }),
-}))
-vi.mock("@/components/automations/use-agent-options", () => ({
-  useAgentOptions: () => ({
-    snapshot: null,
-    snapshotAgentType: "claude_code",
-    loading: false,
-    error: null,
-    reload: vi.fn(),
-    ensure: () => Promise.resolve(null),
-  }),
-}))
-
-// The real composer is a Tiptap editor; the editor dialog only reads text and
-// prompt blocks back off its handle.
-vi.mock("./task-message-composer", async () => {
-  const { forwardRef, useImperativeHandle, useState } = await import("react")
-  type StubProps = {
-    defaultText?: string
-    ariaLabel?: string
-    onChange?: (text: string) => void
-  }
-  return {
-    TaskMessageComposer: forwardRef(function Stub(
-      props: StubProps,
-      ref: React.Ref<unknown>
-    ) {
-      const [text, setText] = useState(props.defaultText ?? "")
-      useImperativeHandle(
-        ref,
-        () => ({
-          getText: () => text,
-          getPromptBlocks: () => [{ type: "text", text }],
-          hasAttachments: () => false,
-          hasUploadingImage: () => false,
-          focus: () => {},
-        }),
-        [text]
-      )
-      return (
-        <textarea
-          aria-label={props.ariaLabel}
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value)
-            props.onChange?.(e.target.value)
-          }}
-        />
-      )
-    }),
-  }
-})
 
 vi.mock("@/stores/app-workspace-store", () => {
   const state = {
@@ -103,7 +49,7 @@ vi.mock("@/stores/app-workspace-store", () => {
         parent_id: null,
         kind: "regular",
         path: "/tmp/proj",
-        default_agent_type: "claude_code",
+        default_agent_type: null,
       },
     ],
   }
@@ -112,7 +58,126 @@ vi.mock("@/stores/app-workspace-store", () => {
   return { useAppWorkspaceStore: useStore }
 })
 
+vi.mock("@/components/chat/agent-selector", () => ({
+  AgentSelector: (props: {
+    defaultAgentType?: string
+    onSelect: (agent: string) => void
+  }) => (
+    <div>
+      <span data-testid="selected-agent">{props.defaultAgentType}</span>
+      <button type="button" onClick={() => props.onSelect("claude_code")}>
+        choose claude
+      </button>
+    </div>
+  ),
+}))
+
+vi.mock("@/components/automations/agent-config-section", () => ({
+  AgentConfigSection: (props: {
+    modeId: string | null
+    configValues: Record<string, string>
+  }) => (
+    <div
+      data-testid="agent-config"
+      data-mode-id={props.modeId ?? ""}
+      data-config-values={JSON.stringify(props.configValues)}
+    />
+  ),
+  effectiveSelections: (
+    _snapshot: AgentOptionsSnapshot | null,
+    modeId: string | null,
+    configValues: Record<string, string>
+  ) => ({ mode_id: modeId, config_values: configValues }),
+  snapshotLabels: () => ({}),
+  useBooleanOptionLabels: () => ({ on: "On", off: "Off" }),
+}))
+
+vi.mock("@/components/automations/use-agent-options", () => ({
+  useAgentOptions: () => ({
+    snapshot: SNAPSHOT,
+    snapshotAgentType: "claude_code",
+    loading: false,
+    error: null,
+    reload: vi.fn(),
+    ensure: () => Promise.resolve(SNAPSHOT),
+  }),
+}))
+
+// The real composer is a Tiptap editor. This merged stub keeps the editable
+// textarea used by the base-branch tests and exposes the richer prompt blocks
+// needed by the task-setting inheritance tests.
+vi.mock("./task-message-composer", async () => {
+  const { forwardRef, useImperativeHandle, useState } = await import("react")
+  type StubProps = {
+    defaultText?: string
+    ariaLabel?: string
+    onChange?: (text: string) => void
+    bottomBarExtra?: ReactNode
+  }
+  return {
+    TaskMessageComposer: forwardRef(function Stub(
+      props: StubProps,
+      ref: React.Ref<unknown>
+    ) {
+      const [text, setText] = useState(props.defaultText ?? "")
+      useImperativeHandle(
+        ref,
+        () => ({
+          getText: () => testState.editorText,
+          getPromptBlocks: () => testState.editorBlocks,
+          hasAttachments: () =>
+            testState.editorBlocks.some((block) => block.type !== "text"),
+          hasUploadingImage: () => false,
+          focus: () => {},
+        }),
+        []
+      )
+      return (
+        <div data-testid="task-composer">
+          <textarea
+            aria-label={props.ariaLabel}
+            value={text}
+            onChange={(event) => {
+              const next = event.target.value
+              setText(next)
+              testState.editorText = next
+              testState.editorBlocks = [{ type: "text", text: next }]
+              props.onChange?.(next)
+            }}
+          />
+          {props.bottomBarExtra}
+        </div>
+      )
+    }),
+  }
+})
+
+vi.mock("@/hooks/use-scrollbar-safe-dismiss", () => ({
+  useScrollbarSafeDismiss: () => ({
+    contentRef: { current: null },
+    onPointerDownOutside: vi.fn(),
+    onFocusOutside: vi.fn(),
+  }),
+}))
+
 import { TaskEditorDialog } from "./task-editor-dialog"
+
+function settings(
+  overrides: Partial<WorkTaskFolderSettings> = {}
+): WorkTaskFolderSettings {
+  return {
+    default_agent_type: null,
+    mode_id: null,
+    config_values: {},
+    auto_process: false,
+    max_concurrent: 2,
+    merge_strategy: "squash",
+    auto_merge: false,
+    delete_worktree_default: true,
+    auto_compact_percent: 0,
+    ...overrides,
+  }
+}
 
 function ranTask(overrides?: Partial<WorkTask>): WorkTask {
   return {
@@ -154,6 +219,42 @@ function ranTask(overrides?: Partial<WorkTask>): WorkTask {
   }
 }
 
+function taskRow(config: NonNullable<WorkTask["config"]>): WorkTask {
+  return {
+    id: 1,
+    folder_id: 1,
+    title: "Fix login",
+    config,
+    status: "todo",
+    failure_reason: null,
+    last_error: null,
+    run_seq: 0,
+    sort_order: 0,
+    worktree_folder_id: null,
+    agent_type: config.agent_type ?? null,
+    conversation_id: null,
+    connection_id: null,
+    base_branch: null,
+    base_sha: null,
+    work_branch: null,
+    cleanup_state: null,
+    verdict: null,
+    result_summary: null,
+    files_changed: null,
+    additions: null,
+    deletions: null,
+    merge_commit: null,
+    preflight: null,
+    archived_at: null,
+    scheduled_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    started_at: null,
+    settled_at: null,
+    finished_at: null,
+  }
+}
+
 function renderEditor(task: WorkTask | null = null) {
   const onSubmit = vi.fn<(draft: WorkTaskDraft) => Promise<void>>(() =>
     Promise.resolve()
@@ -172,19 +273,38 @@ function renderEditor(task: WorkTask | null = null) {
   return onSubmit
 }
 
+function renderInheritanceEditor(row: WorkTask) {
+  return render(
+    <NextIntlClientProvider locale="en" messages={enMessages}>
+      <TaskEditorDialog
+        open
+        onOpenChange={() => {}}
+        task={row}
+        defaultFolderId={null}
+        onSubmit={testState.submit}
+      />
+    </NextIntlClientProvider>
+  )
+}
+
 async function fillBrief(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText("Title"), "Polish the feature")
   await user.type(screen.getByLabelText("Task description"), "do it")
 }
 
 beforeEach(() => {
-  branchesMock.mockReset().mockResolvedValue({
+  testState.branches.mockReset().mockResolvedValue({
     local: ["main", "feature"],
     remote: ["origin/release"],
     worktree_branches: [],
     main_worktree_branch: null,
   })
   headMock.mockReset().mockResolvedValue("main")
+  testState.editorText = "Task description"
+  testState.editorBlocks = [{ type: "text", text: "Task description" }]
+  testState.settingsEffective.mockReset().mockResolvedValue(settings())
+  testState.templates.mockReset().mockResolvedValue([])
+  testState.submit.mockReset().mockResolvedValue(undefined)
 })
 
 describe("TaskEditorDialog base branch", () => {
@@ -228,8 +348,6 @@ describe("TaskEditorDialog base branch", () => {
     await user.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled())
-    // Null, not "": the engine reads that as "the project folder's current
-    // branch when the task starts" — what a task did before the choice existed.
     expect(onSubmit.mock.calls[0][0].config.base_branch).toBeNull()
   })
 
@@ -240,8 +358,6 @@ describe("TaskEditorDialog base branch", () => {
 
     await user.click(screen.getByRole("button", { name: "Base branch" }))
     await user.click(await screen.findByText("feature"))
-    // Re-picking the same folder is still a folder choice — the handler that
-    // clears the branch is the one under test.
     await user.click(screen.getByRole("button", { name: "proj" }))
     await user.click(await screen.findByRole("option", { name: /proj/ }))
     await user.click(screen.getByRole("button", { name: "Save" }))
@@ -255,8 +371,6 @@ describe("TaskEditorDialog base branch", () => {
 
     const trigger = await screen.findByRole("button", { name: "Base branch" })
     expect(trigger).toHaveTextContent("feature")
-    // The base is recorded when the worktree is minted and every later
-    // decision reads it from there, so it is history, not a setting.
     expect(trigger).toBeDisabled()
     // Nor is the checkout's HEAD any of its business.
     expect(trigger).not.toHaveTextContent("HEAD")
@@ -265,9 +379,6 @@ describe("TaskEditorDialog base branch", () => {
 
   it("saving a task that already ran keeps the request it was created with", async () => {
     const user = userEvent.setup()
-    // Created without a choice — it branched from the checkout, which happened
-    // to be `feature`. Editing the title must not turn that accident into a
-    // standing request for `feature`.
     const onSubmit = renderEditor(ranTask({ status: "failed" }))
 
     await user.click(await screen.findByRole("button", { name: "Save" }))
@@ -278,8 +389,6 @@ describe("TaskEditorDialog base branch", () => {
 
   it("keeps an explicit choice across an edit", async () => {
     const user = userEvent.setup()
-    // The other half of the rule: dropping the record as a state source must
-    // not drop a branch the user actually asked for.
     const onSubmit = renderEditor(
       ranTask({
         status: "failed",
@@ -300,9 +409,6 @@ describe("TaskEditorDialog base branch", () => {
 
   it("a task whose worktree was cleaned up does not inherit its old base", async () => {
     const user = userEvent.setup()
-    // The accept-and-remove path detaches the worktree (and deletes the work
-    // branch) while leaving `base_branch` on the row, so the picker is live
-    // again — showing the request (none), not the branch it happened to run on.
     const onSubmit = renderEditor(
       ranTask({ status: "failed", worktree_folder_id: null })
     )
@@ -323,5 +429,151 @@ describe("TaskEditorDialog base branch", () => {
     expect(
       screen.queryByRole("button", { name: "Base branch" })
     ).not.toBeInTheDocument()
+  })
+})
+
+describe("TaskEditorDialog task-setting inheritance", () => {
+  it("shows matching effective settings for an explicit Codex agent", async () => {
+    testState.settingsEffective.mockResolvedValue(
+      settings({
+        default_agent_type: "codex",
+        mode_id: "global-mode",
+        config_values: { model: "global-model" },
+      })
+    )
+    renderInheritanceEditor(
+      taskRow({
+        display_text: "Task description",
+        prompt_blocks: [{ type: "text", text: "Task description" }],
+        agent_type: "codex",
+        mode_id: null,
+        config_values: {},
+      })
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId("selected-agent")).toHaveTextContent("codex")
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-config")).toHaveAttribute(
+        "data-mode-id",
+        "global-mode"
+      )
+      expect(screen.getByTestId("agent-config")).toHaveAttribute(
+        "data-config-values",
+        JSON.stringify({ model: "global-model" })
+      )
+    })
+  })
+
+  it("does not apply Codex settings to a different explicit agent", async () => {
+    testState.settingsEffective.mockResolvedValue(
+      settings({
+        default_agent_type: "codex",
+        mode_id: "global-mode",
+        config_values: { model: "global-model" },
+      })
+    )
+    renderInheritanceEditor(
+      taskRow({
+        display_text: "Task description",
+        prompt_blocks: [{ type: "text", text: "Task description" }],
+        agent_type: "claude_code",
+        mode_id: null,
+        config_values: {},
+      })
+    )
+
+    await waitFor(() => expect(testState.settingsEffective).toHaveBeenCalled())
+    expect(screen.getByTestId("selected-agent")).toHaveTextContent(
+      "claude_code"
+    )
+    expect(screen.getByTestId("agent-config")).toHaveAttribute(
+      "data-mode-id",
+      ""
+    )
+    expect(screen.getByTestId("agent-config")).toHaveAttribute(
+      "data-config-values",
+      "{}"
+    )
+  })
+
+  it("saves the shown settings for an explicit Codex task", async () => {
+    testState.settingsEffective.mockResolvedValue(
+      settings({
+        default_agent_type: "codex",
+        mode_id: "global-mode",
+        config_values: { model: "global-model" },
+      })
+    )
+    const blocks: PromptInputBlock[] = [
+      { type: "text", text: "updated description" },
+      { type: "image", data: "aGk=", mime_type: "image/png", uri: null },
+    ]
+    testState.editorText = "updated description"
+    testState.editorBlocks = blocks
+    renderInheritanceEditor(
+      taskRow({
+        display_text: "Task description",
+        prompt_blocks: [{ type: "text", text: "Task description" }],
+        agent_type: "codex",
+        mode_id: null,
+        config_values: {},
+      })
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-config")).toHaveAttribute(
+        "data-mode-id",
+        "global-mode"
+      )
+    )
+    await userEvent.setup().click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(testState.submit).toHaveBeenCalledTimes(1))
+    const draft = testState.submit.mock.calls[0][0]
+    expect(draft.config).toMatchObject({
+      agent_type: "codex",
+      mode_id: "global-mode",
+      config_values: { model: "global-model" },
+      display_text: "updated description",
+      prompt_blocks: blocks,
+    })
+  })
+
+  it("saves empty inherited fields after reset", async () => {
+    testState.settingsEffective.mockResolvedValue(
+      settings({
+        default_agent_type: "codex",
+        mode_id: "global-mode",
+        config_values: { model: "global-model" },
+      })
+    )
+    renderInheritanceEditor(
+      taskRow({
+        display_text: "Task description",
+        prompt_blocks: [{ type: "text", text: "Task description" }],
+        agent_type: "codex",
+        mode_id: null,
+        config_values: {},
+      })
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId("agent-config")).toHaveAttribute(
+        "data-mode-id",
+        "global-mode"
+      )
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByRole("button", { name: "Reset to inherited" }))
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(testState.submit).toHaveBeenCalledTimes(1))
+    expect(testState.submit.mock.calls[0][0].config).toMatchObject({
+      agent_type: null,
+      mode_id: null,
+      config_values: {},
+    })
   })
 })
