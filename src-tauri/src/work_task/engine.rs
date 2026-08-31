@@ -6649,8 +6649,30 @@ fn effective_agent_config(
     Option<String>,
     std::collections::BTreeMap<String, String>,
 ) {
+    let folder_default = root
+        .default_agent_type
+        .as_ref()
+        .and_then(|a| serde_json::to_value(a).ok())
+        .and_then(|v| v.as_str().map(String::from));
     if let Some(agent) = cfg.agent_type.clone() {
-        return (Some(agent), cfg.mode_id.clone(), cfg.config_values.clone());
+        let settings_agent = settings
+            .default_agent_type
+            .as_deref()
+            .or(folder_default.as_deref());
+        let inherits_settings = settings_agent == Some(agent.as_str());
+        let mode_id = cfg.mode_id.clone().or_else(|| {
+            if inherits_settings {
+                settings.mode_id.clone()
+            } else {
+                None
+            }
+        });
+        let config_values = if inherits_settings && cfg.config_values.is_empty() {
+            settings.config_values.clone()
+        } else {
+            cfg.config_values.clone()
+        };
+        return (Some(agent), mode_id, config_values);
     }
     if let Some(agent) = settings.default_agent_type.clone() {
         return (
@@ -6659,11 +6681,6 @@ fn effective_agent_config(
             settings.config_values.clone(),
         );
     }
-    let folder_default = root
-        .default_agent_type
-        .as_ref()
-        .and_then(|a| serde_json::to_value(a).ok())
-        .and_then(|v| v.as_str().map(String::from));
     (
         folder_default,
         settings.mode_id.clone(),
@@ -8250,6 +8267,119 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_task_agent_inherits_matching_global_task_settings() {
+        let settings_config =
+            std::collections::BTreeMap::from([("model".to_string(), "global-model".to_string())]);
+        let settings = WorkTaskFolderSettings {
+            default_agent_type: Some("codex".to_string()),
+            mode_id: Some("global-mode".to_string()),
+            config_values: settings_config.clone(),
+            ..Default::default()
+        };
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let folder_id = crate::db::test_helpers::seed_folder(&db, "/tmp/wt-config").await;
+        crate::db::service::work_task_service::settings_set(
+            &db.conn,
+            crate::db::service::work_task_service::GLOBAL_SETTINGS_FOLDER_ID,
+            &settings,
+        )
+        .await
+        .unwrap();
+        let effective =
+            crate::db::service::work_task_service::settings_get_effective(&db.conn, folder_id)
+                .await
+                .unwrap();
+        let root = crate::commands::folders::get_folder_core(&db, folder_id)
+            .await
+            .unwrap();
+
+        // This is the shape produced by create_work_task: only the agent is
+        // explicit, so matching effective task settings supply the rest.
+        let cfg = WorkTaskConfig {
+            agent_type: Some("codex".to_string()),
+            ..Default::default()
+        };
+        let (agent, mode_id, config_values) = effective_agent_config(&cfg, &effective, &root);
+        assert_eq!(agent.as_deref(), Some("codex"));
+        assert_eq!(mode_id.as_deref(), Some("global-mode"));
+        assert_eq!(config_values, settings_config);
+
+        // Settings for a different agent must never be applied to an explicit
+        // task agent, even when the task leaves both fields empty.
+        let other_settings = WorkTaskFolderSettings {
+            default_agent_type: Some("claude_code".to_string()),
+            mode_id: Some("claude-mode".to_string()),
+            config_values: settings.config_values.clone(),
+            ..Default::default()
+        };
+        let (agent, mode_id, config_values) = effective_agent_config(&cfg, &other_settings, &root);
+        assert_eq!(agent.as_deref(), Some("codex"));
+        assert_eq!(mode_id, None);
+        assert!(config_values.is_empty());
+
+        // Complete task-level selections remain authoritative.
+        let complete_cfg = WorkTaskConfig {
+            agent_type: Some("codex".to_string()),
+            mode_id: Some("task-mode".to_string()),
+            config_values: std::collections::BTreeMap::from([(
+                "model".to_string(),
+                "task-model".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let (_, mode_id, config_values) = effective_agent_config(&complete_cfg, &settings, &root);
+        assert_eq!(mode_id.as_deref(), Some("task-mode"));
+        assert_eq!(
+            config_values.get("model").map(String::as_str),
+            Some("task-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_task_agent_inherits_settings_owned_by_folder_default() {
+        let settings_config =
+            std::collections::BTreeMap::from([("model".to_string(), "folder-model".to_string())]);
+        let settings = WorkTaskFolderSettings {
+            default_agent_type: None,
+            mode_id: Some("folder-mode".to_string()),
+            config_values: settings_config.clone(),
+            ..Default::default()
+        };
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let folder_id = crate::db::test_helpers::seed_folder(&db, "/tmp/wt-folder-config").await;
+        crate::db::service::folder_service::update_folder_default_agent(
+            &db.conn,
+            folder_id,
+            Some(AgentType::Codex),
+        )
+        .await
+        .unwrap();
+        crate::db::service::work_task_service::settings_set(
+            &db.conn,
+            crate::db::service::work_task_service::GLOBAL_SETTINGS_FOLDER_ID,
+            &settings,
+        )
+        .await
+        .unwrap();
+        let effective =
+            crate::db::service::work_task_service::settings_get_effective(&db.conn, folder_id)
+                .await
+                .unwrap();
+        let root = crate::commands::folders::get_folder_core(&db, folder_id)
+            .await
+            .unwrap();
+        let cfg = WorkTaskConfig {
+            agent_type: Some("codex".to_string()),
+            ..Default::default()
+        };
+
+        let (agent, mode_id, config_values) = effective_agent_config(&cfg, &effective, &root);
+        assert_eq!(agent.as_deref(), Some("codex"));
+        assert_eq!(mode_id.as_deref(), Some("folder-mode"));
+        assert_eq!(config_values, settings_config);
     }
 
     fn texts(blocks: &[PromptInputBlock]) -> Vec<String> {
