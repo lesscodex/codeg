@@ -228,7 +228,7 @@ pub struct WorkTaskFolderSettings {
     /// Max concurrently active tasks per folder; 0 = unlimited.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: i32,
-    /// "squash" (default) | "merge"
+    /// "squash" (default) | "merge" | "rebase"
     #[serde(default = "default_merge_strategy")]
     pub merge_strategy: String,
     /// Land reviewed tasks automatically: when a task settles into review and
@@ -419,11 +419,16 @@ pub struct WorkTaskMergeState {
     /// misrouted delivery reads as "did not land" and bounces to review.
     #[serde(default)]
     pub pre_merge_head: String,
+    /// Land only: work-branch HEAD before the merge generation was dispatched.
+    /// Rebase verification uses it to distinguish task-owned merge commits from
+    /// merge commits that reached the base while the generation was running.
+    #[serde(default)]
+    pub pre_merge_work_head: String,
     /// Land only: the commit message the agent is told to use ("" when
     /// auto-generated).
     #[serde(default)]
     pub message: String,
-    /// Land only: "squash" | "merge"
+    /// Land only: "squash" | "merge" | "rebase"
     #[serde(default)]
     pub strategy: String,
     /// Whether the user asked to delete the worktree after landing — or, on a

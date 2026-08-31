@@ -6295,6 +6295,8 @@
     "strategySquashHint": "All the task's changes land in the main branch as a single history entry — a tidier history.",
     "strategyMerge": "Keep full history",
     "strategyMergeHint": "Every commit made during the task is kept, plus one merge entry — each step stays traceable.",
+    "strategyRebase": "Linear history",
+    "strategyRebaseHint": "Rebase task commits onto the base branch, then fast-forward. Keeps each commit without a merge commit; commit hashes may change.",
     "mergeInstructions": "Extra instructions (optional)",
     "mergeInstructionsPlaceholder": "e.g. prefer this branch's side on any conflict",
     "mergeDeleteWorktree": "Delete worktree after merge",

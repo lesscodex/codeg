@@ -18,7 +18,14 @@ import {
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import type { WorkTask } from "@/lib/types"
+import type { WorkTask, WorkTaskFolderSettings } from "@/lib/types"
+
+type MergeStrategy = WorkTaskFolderSettings["merge_strategy"]
+
+function normalizeMergeStrategy(value: string): MergeStrategy {
+  if (value === "merge" || value === "rebase") return value
+  return "squash"
+}
 
 interface TaskMergeDialogProps {
   open: boolean
@@ -38,8 +45,10 @@ interface TaskMergeDialogProps {
 /**
  * Accept a reviewed task. The merge itself is performed by the agent in the
  * task's session (conflicts resolved in the same turn), so the form is down to
- * two choices: let the agent write the commit message (default) or provide one,
- * and whether to delete the worktree after landing. Submit awaits only the
+ * two choices for commit-producing strategies (let the agent write the commit
+ * message or provide one) and whether to delete the worktree after landing.
+ * Rebase + fast-forward creates no landing commit, so it hides the message
+ * controls and always dispatches a null message. Submit awaits only the
  * dispatch — the CAS onto `merging` plus getting an agent up, not the landing
  * and not the context compaction that may precede it — so the dialog closes in
  * about as long as it takes to start a session. The outcome rides
@@ -64,6 +73,7 @@ export function TaskMergeDialog({
   const [message, setMessage] = useState("")
   const [instructions, setInstructions] = useState("")
   const [deleteWorktree, setDeleteWorktree] = useState(true)
+  const [mergeStrategy, setMergeStrategy] = useState<MergeStrategy>("squash")
   const [submitting, setSubmitting] = useState(false)
   const [promisedQueue, setPromisedQueue] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -90,21 +100,27 @@ export function TaskMergeDialog({
     setAutoMessage(queuedMessage == null)
     setMessage(queuedMessage ?? seedMessage)
     setInstructions(queuedInstructions ?? "")
+    setMergeStrategy("squash")
     setSubmitting(false)
     setError(null)
     if (queuedDeleteWorktree != null) {
       setDeleteWorktree(queuedDeleteWorktree)
-      return
     }
     let cancelled = false
     workTaskSettingsEffective(folderId)
       .then((s) => {
         if (cancelled) return
-        setDeleteWorktree(s.delete_worktree_default)
+        setMergeStrategy(normalizeMergeStrategy(s.merge_strategy))
+        if (queuedDeleteWorktree == null) {
+          setDeleteWorktree(s.delete_worktree_default)
+        }
       })
       .catch(() => {
         if (cancelled) return
-        setDeleteWorktree(true)
+        setMergeStrategy("squash")
+        if (queuedDeleteWorktree == null) {
+          setDeleteWorktree(true)
+        }
       })
     return () => {
       cancelled = true
@@ -131,16 +147,17 @@ export function TaskMergeDialog({
   // stays open and has to describe the situation as it now stands.
   const live = anotherMerging || alreadyQueued
   const willQueue = submitting ? promisedQueue : live
+  const isRebase = mergeStrategy === "rebase"
 
   const submit = async () => {
-    if (!task || (!autoMessage && !message.trim())) return
+    if (!task || (!isRebase && !autoMessage && !message.trim())) return
     setPromisedQueue(live)
     setSubmitting(true)
     setError(null)
     try {
       const queued = await workTaskMerge(
         task.id,
-        autoMessage ? null : message.trim(),
+        isRebase || autoMessage ? null : message.trim(),
         deleteWorktree,
         instructions.trim() || null
       )
@@ -202,27 +219,33 @@ export function TaskMergeDialog({
             />
           </div>
 
-          {/* The two options, kept adjacent — splitting them around a text box
-              read as two unrelated sections rather than one set of choices. */}
-          <Label className="text-sm font-normal">
-            <Checkbox
-              checked={autoMessage}
-              onCheckedChange={(v) => setAutoMessage(v === true)}
-            />
-            {t("mergeAutoMessage")}
-          </Label>
+          {/* Commit-message controls do not apply to rebase + fast-forward:
+              landing creates no commit on the base branch. */}
+          {isRebase ? null : (
+            <>
+              <Label className="text-sm font-normal">
+                <Checkbox
+                  checked={autoMessage}
+                  onCheckedChange={(v) => setAutoMessage(v === true)}
+                />
+                {t("mergeAutoMessage")}
+              </Label>
 
-          {autoMessage ? null : (
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="task-merge-message">{t("mergeMessage")}</Label>
-              <Textarea
-                id="task-merge-message"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder={t("mergeMessagePlaceholder")}
-                rows={3}
-              />
-            </div>
+              {autoMessage ? null : (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="task-merge-message">
+                    {t("mergeMessage")}
+                  </Label>
+                  <Textarea
+                    id="task-merge-message"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    placeholder={t("mergeMessagePlaceholder")}
+                    rows={3}
+                  />
+                </div>
+              )}
+            </>
           )}
 
           <Label className="text-sm font-normal">
@@ -259,7 +282,9 @@ export function TaskMergeDialog({
           <Button
             type="button"
             onClick={submit}
-            disabled={submitting || (!autoMessage && !message.trim())}
+            disabled={
+              submitting || (!isRebase && !autoMessage && !message.trim())
+            }
           >
             {/* A disabled button alone reads as "the click did nothing" — the
                 dispatch is short but not instant (it waits for the agent to
