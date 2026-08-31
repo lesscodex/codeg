@@ -103,10 +103,9 @@ const PROMPT_STAGES = [
 ] as const
 
 /**
- * The two ways a finished task can land. Rendered as side-by-side option cards
- * rather than a dropdown so both trade-offs are readable at once — the choice
- * is made rarely and the wording ("tidier history" vs "every step traceable")
- * is the whole decision.
+ * The ways a finished task can land. Rendered as side-by-side option cards
+ * rather than a dropdown so each trade-off is readable at once — the choice
+ * is made rarely and the wording is the whole decision.
  */
 const MERGE_STRATEGIES = [
   {
@@ -115,6 +114,11 @@ const MERGE_STRATEGIES = [
     hintKey: "strategySquashHint",
   },
   { value: "merge", labelKey: "strategyMerge", hintKey: "strategyMergeHint" },
+  {
+    value: "rebase",
+    labelKey: "strategyRebase",
+    hintKey: "strategyRebaseHint",
+  },
 ] as const
 
 /**
@@ -218,9 +222,9 @@ function TaskSettingsBody({
   const [configValues, setConfigValues] = useState<Record<string, string>>({})
   const [autoProcess, setAutoProcess] = useState(false)
   const [maxConcurrent, setMaxConcurrent] = useState("2")
-  const [mergeStrategy, setMergeStrategy] = useState<"squash" | "merge">(
-    "squash"
-  )
+  const [mergeStrategy, setMergeStrategy] = useState<
+    "squash" | "merge" | "rebase"
+  >("squash")
   const [autoMerge, setAutoMerge] = useState(false)
   const [deleteWorktreeDefault, setDeleteWorktreeDefault] = useState(true)
   const [worktreeRoot, setWorktreeRoot] = useState("")
@@ -263,7 +267,13 @@ function TaskSettingsBody({
         setConfigValues(s.config_values ?? {})
         setAutoProcess(s.auto_process)
         setMaxConcurrent(String(s.max_concurrent))
-        setMergeStrategy(s.merge_strategy === "merge" ? "merge" : "squash")
+        setMergeStrategy(
+          s.merge_strategy === "merge"
+            ? "merge"
+            : s.merge_strategy === "rebase"
+              ? "rebase"
+              : "squash"
+        )
         setAutoMerge(s.auto_merge)
         setDeleteWorktreeDefault(s.delete_worktree_default)
         setWorktreeRoot(s.worktree_root ?? "")
@@ -595,7 +605,7 @@ function TaskSettingsBody({
                   <div
                     role="radiogroup"
                     aria-label={t("settingsMergeStrategy")}
-                    className="grid gap-2 sm:grid-cols-2"
+                    className="grid gap-2 sm:grid-cols-3"
                   >
                     {MERGE_STRATEGIES.map((opt) => {
                       const active = mergeStrategy === opt.value
