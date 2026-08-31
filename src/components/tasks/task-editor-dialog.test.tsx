@@ -52,6 +52,15 @@ vi.mock("@/stores/app-workspace-store", () => {
         path: "/tmp/proj",
         default_agent_type: null,
       },
+      {
+        id: 2,
+        name: "other",
+        alias: null,
+        parent_id: null,
+        kind: "regular",
+        path: "/tmp/other",
+        default_agent_type: null,
+      },
     ],
   }
   const useStore = (selector: (s: typeof state) => unknown) => selector(state)
@@ -360,7 +369,7 @@ describe("TaskEditorDialog base branch", () => {
     await user.click(screen.getByRole("button", { name: "Base branch" }))
     await user.click(await screen.findByText("feature"))
     await user.click(screen.getByRole("button", { name: "proj" }))
-    await user.click(await screen.findByRole("option", { name: /proj/ }))
+    await user.click(await screen.findByRole("option", { name: /other/ }))
     await user.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled())
