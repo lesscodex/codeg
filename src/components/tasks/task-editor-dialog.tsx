@@ -159,6 +159,10 @@ function TaskEditorBody({
   // `agentDirty` = the user explicitly chose agent/mode/config for THIS task.
   // While clean, the controls display the folder's effective task settings and
   // the draft keeps inheriting (agent_type null) — nothing is frozen.
+  // An explicit agent is an override. Matching task settings may still fill
+  // empty mode/config in the selectors; Save writes those shown values. The
+  // override fields track whether the task/user already pinned them, so a
+  // settings refresh does not clobber a real choice.
   const [agentDirty, setAgentDirty] = useState(task?.config?.agent_type != null)
   const [agentType, setAgentType] = useState<AgentType>(
     task?.config?.agent_type ?? "claude_code"
@@ -174,12 +178,18 @@ function TaskEditorBody({
   // Whether the selector shows any agent as picked: with none enabled and
   // available here it shows none.
   const [agentShown, setAgentShown] = useState(false)
-  const [modeId, setModeId] = useState<string | null>(
-    task?.config?.mode_id ?? null
+  const initialModeId = task?.config?.mode_id ?? null
+  const initialConfigValues = task?.config?.config_values ?? {}
+  const [modeId, setModeId] = useState<string | null>(initialModeId)
+  const [configValues, setConfigValues] =
+    useState<Record<string, string>>(initialConfigValues)
+  // Task/user pins, as opposed to selector values filled from settings.
+  const [modeOverrideId, setModeOverrideId] = useState<string | null>(
+    initialModeId
   )
-  const [configValues, setConfigValues] = useState<Record<string, string>>(
-    task?.config?.config_values ?? {}
-  )
+  const [configOverrideValues, setConfigOverrideValues] =
+    useState<Record<string, string>>(initialConfigValues)
+  const hasConfigOverride = Object.keys(configOverrideValues).length > 0
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   // An edit's selector intent (codeg#1179): untouched → the server keeps the
@@ -271,23 +281,32 @@ function TaskEditorBody({
     () => folders.find((f) => f.id === folderId)?.default_agent_type ?? null,
     [folders, folderId]
   )
+  const explicitAgentForSettings = agentDirty ? agentType : null
 
-  // Prefill the agent controls from the folder's effective settings while the
-  // user hasn't touched them; follows folder switches and template resets
-  // (the effect re-runs when `agentDirty` flips back to false).
+  // Prefill inherited fields from the folder's effective settings. An explicit
+  // task agent may still inherit mode/config, but only when it matches the
+  // settings agent; another agent must keep its own native defaults.
   useEffect(() => {
-    if (agentDirty || folderId == null) return
+    if (
+      folderId == null ||
+      (agentDirty && modeOverrideId != null && hasConfigOverride)
+    ) {
+      return
+    }
     let cancelled = false
     workTaskSettingsEffective(folderId)
       .then((s) => {
         if (cancelled) return
-        const agent = s.default_agent_type ?? folderDefaultAgent ?? null
+        const settingsAgent = s.default_agent_type ?? folderDefaultAgent
+        const agent = settingsAgent ?? null
         setInherited({ folderId, agent })
-        // Nothing to inherit: a placeholder, which a save keeps rather than
-        // inherits (see `pinsShownAgent`).
-        setAgentType(agent ?? "claude_code")
-        setModeId(s.mode_id ?? null)
-        setConfigValues(s.config_values ?? {})
+        if (!agentDirty) {
+          setAgentType(settingsAgent ?? "claude_code")
+        } else if (settingsAgent !== explicitAgentForSettings) {
+          return
+        }
+        if (modeOverrideId == null) setModeId(s.mode_id ?? null)
+        if (!hasConfigOverride) setConfigValues(s.config_values ?? {})
       })
       .catch(() => {
         // Never hold a create's Save forever: fall back to the folder's
@@ -297,7 +316,14 @@ function TaskEditorBody({
     return () => {
       cancelled = true
     }
-  }, [agentDirty, folderId, folderDefaultAgent])
+  }, [
+    agentDirty,
+    explicitAgentForSettings,
+    folderId,
+    folderDefaultAgent,
+    modeOverrideId,
+    hasConfigOverride,
+  ])
 
   const folderPath = useMemo(
     () => folders.find((f) => f.id === folderId)?.path ?? null,
@@ -480,11 +506,17 @@ function TaskEditorBody({
       setModeId(cfg.mode_id ?? null)
       setConfigValues(cfg.config_values ?? {})
       touchSelection()
+      setModeOverrideId(cfg.mode_id ?? null)
+      setConfigOverrideValues(cfg.config_values ?? {})
     } else {
       // Back to the task settings — the prefill effect reseeds from them.
       setAgentDirty(false)
       setSelectionTouched(false)
       setSelectionReset(true)
+      setModeId(null)
+      setConfigValues({})
+      setModeOverrideId(null)
+      setConfigOverrideValues({})
     }
     setTemplatesOpen(false)
   }
@@ -569,6 +601,8 @@ function TaskEditorBody({
             onSelect={(a) => {
               setAgentDirty(true)
               setAgentType(a)
+              setModeOverrideId(null)
+              setConfigOverrideValues({})
               setModeId(null)
               setConfigValues({})
               touchSelection()
@@ -597,6 +631,10 @@ function TaskEditorBody({
                 setAgentDirty(false)
                 setSelectionTouched(false)
                 setSelectionReset(true)
+                setModeOverrideId(null)
+                setConfigOverrideValues({})
+                setModeId(null)
+                setConfigValues({})
               }}
               className="text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
             >
@@ -646,11 +684,18 @@ function TaskEditorBody({
                 onModeChange={(m) => {
                   setAgentDirty(true)
                   setModeId(m)
+                  setModeOverrideId(m)
                   touchSelection()
                 }}
                 onConfigChange={(optionId, valueId) => {
                   setAgentDirty(true)
                   touchSelection()
+                  setConfigOverrideValues((prev) => {
+                    const next = { ...prev }
+                    if (valueId === null) delete next[optionId]
+                    else next[optionId] = valueId
+                    return next
+                  })
                   setConfigValues((prev) => {
                     const next = { ...prev }
                     if (valueId === null) delete next[optionId]
@@ -691,6 +736,9 @@ function TaskEditorBody({
               onChange={(id) => {
                 setFolderId(id)
                 setBaseBranch("")
+                setInherited(null)
+                if (modeOverrideId == null) setModeId(null)
+                if (!hasConfigOverride) setConfigValues({})
               }}
               placeholder={t("folderPlaceholder")}
               // A task that already ran is pinned to its folder (its worktree

@@ -602,7 +602,20 @@ pub fn layer_agent_config(
     folder_default_agent: Option<String>,
 ) -> AgentTuple {
     if let Some(agent) = cfg.agent_type.clone() {
-        return (Some(agent), cfg.mode_id.clone(), cfg.config_values.clone());
+        let inherits = settings
+            .default_agent_type
+            .as_deref()
+            .or(folder_default_agent.as_deref())
+            == Some(agent.as_str());
+        let mode = cfg.mode_id.clone().or_else(|| {
+            inherits.then(|| settings.mode_id.clone()).flatten()
+        });
+        let values = if inherits && cfg.config_values.is_empty() {
+            settings.config_values.clone()
+        } else {
+            cfg.config_values.clone()
+        };
+        return (Some(agent), mode, values);
     }
     if let Some(agent) = settings.default_agent_type.clone() {
         return (
@@ -663,6 +676,11 @@ pub async fn freeze_agent_config<C: ConnectionTrait>(
         } else {
             None
         };
+        cfg.agent_type = agent;
+        cfg.mode_id = mode;
+        cfg.config_values = values;
+    } else {
+        let (agent, mode, values) = resolve_agent_config(conn, folder_id, cfg).await?;
         cfg.agent_type = agent;
         cfg.mode_id = mode;
         cfg.config_values = values;
