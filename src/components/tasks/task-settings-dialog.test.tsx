@@ -284,6 +284,27 @@ describe("TaskSettingsDialog merge tab", () => {
       screen.getByRole("switch", { name: "Merge automatically" })
     ).toHaveAttribute("data-state", "checked")
   })
+
+  it("loads, selects, and saves the linear-history strategy", async () => {
+    getOwnMock.mockResolvedValue(settings({ merge_strategy: "rebase" }))
+    const user = userEvent.setup()
+    renderDialog(1)
+    const save = await saveButton()
+
+    await openTab(user, "Merge")
+    const rebase = screen.getByRole("radio", { name: /Linear history/ })
+    expect(rebase).toHaveAttribute("aria-checked", "true")
+
+    await user.click(
+      screen.getByRole("radio", { name: /Combine into one commit/ })
+    )
+    await user.click(rebase)
+    await user.click(save)
+
+    await waitFor(() => expect(setMock).toHaveBeenCalled())
+    const [, saved] = setMock.mock.calls[0] as [number, WorkTaskFolderSettings]
+    expect(saved.merge_strategy).toBe("rebase")
+  })
 })
 
 describe("TaskSettingsDialog worktree tab", () => {
