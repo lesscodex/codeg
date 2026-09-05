@@ -6,6 +6,7 @@ import {vi} from "vitest";
 import packageJson from "../../../package.json";
 import {createCodexMockTestFixture, createTestModel, type MethodCallEvent} from "../acp-test-utils";
 import {SESSION_ID, TURN_ID, type Scenario} from "./scenarios";
+import {CODEX_TURN_STARTED_METHOD} from "../../AcpExtensions";
 
 /**
  * Drives the adapter with the scripted app-server traffic of one scenario and records the outbound ACP messages.
@@ -252,6 +253,7 @@ async function recordWhenSent(
 
 function collect(events: MethodCallEvent[]): RecordedMessage[] {
     return events.flatMap((event): RecordedMessage[] => {
+        if (event.method === "notify" && event.args[0] === CODEX_TURN_STARTED_METHOD) return [];
         switch (event.method) {
             case "sessionUpdate":
                 return [{direction: "notify", method: "session/update", params: event.args[0]}];

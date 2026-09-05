@@ -576,7 +576,8 @@ describe('Token Usage Events', () => {
                     sessionId,
                     prompt: [{ type: 'text', text: 'test prompt' }],
                 });
-                return mockFixture.getAcpConnectionEvents([]);
+                return mockFixture.getAcpConnectionEvents([])
+                    .filter(event => event.method === "sessionUpdate");
             };
         }
 

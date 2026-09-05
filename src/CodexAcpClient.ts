@@ -728,7 +728,7 @@ export class CodexAcpClient {
     }
 
     async forkSession(
-        request: WithAcpMcpServers<acp.ForkSessionRequest>,
+        request: WithAcpMcpServers<acp.ForkSessionRequest> & {lastTurnId?: string},
         releaseFailedFork: (threadId: string) => Promise<void> = threadId => this.closeSession(threadId),
         forkCreated: (threadId: string) => void = () => {},
         previousInstructions?: SessionInstructions,

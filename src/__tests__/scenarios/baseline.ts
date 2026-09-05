@@ -1,4 +1,5 @@
 import {canonical, type RecordedMessage} from "./scenario-harness";
+import {CODEX_TURN_STARTED_METHOD} from "../../AcpExtensions";
 
 /**
  * The comparison of the messages for a client that is not AIR with the messages of the adapter before the AIR extensions.
@@ -238,6 +239,7 @@ export function expectedFromBaseline(scenario: string, baseline: RecordedMessage
  * The `_meta` of each report stays as it is, because ACP defines no merge for the `_meta` keys.
  */
 export function mergedReports(messages: RecordedMessage[]): RecordedMessage[] {
+    messages = messages.filter(message => message.method !== CODEX_TURN_STARTED_METHOD);
     const stored = new Map<string, Json>();
     const same = (left: unknown, right: unknown) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
     return messages.flatMap((message): RecordedMessage[] => {

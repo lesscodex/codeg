@@ -39,6 +39,18 @@ const sessionSteerParamsParser = z.object({
     prompt: z.array(z.any()),
 }).passthrough();
 
+export const forkSessionParamsParser = z
+    .record(z.string(), z.unknown())
+    .superRefine((params, context) => {
+        if (typeof params["sessionId"] !== "string" || typeof params["cwd"] !== "string") {
+            context.addIssue({code: "custom", message: "sessionId and cwd are required strings"});
+        }
+        const lastTurnId = params["lastTurnId"];
+        if (lastTurnId !== undefined && (typeof lastTurnId !== "string" || lastTurnId.length === 0)) {
+            context.addIssue({code: "custom", message: "lastTurnId must be a non-empty string"});
+        }
+    });
+
 const goalControlParamsParser = z.discriminatedUnion("action", [
     z.object({
         sessionId: z.string(),
@@ -152,7 +164,10 @@ function createRouter(
         .onRequest(acp.methods.agent.initialize, (ctx) => getAgent().initialize(ctx.params))
         .onRequest(acp.methods.agent.session.new, (ctx) => getAgent().newSession(ctx.params))
         .onRequest(acp.methods.agent.session.load, (ctx) => setup(ctx.params.sessionId, ctx.requestId, () => getAgent(ctx.params).loadSession(ctx.params), ctx.signal))
-        .onRequest(acp.methods.agent.session.fork, (ctx) => getAgent(ctx.params).forkSession(ctx.params))
+        .onRequest(acp.methods.agent.session.fork, forkSessionParamsParser, (ctx) => {
+            const params = ctx.params as acp.ForkSessionRequest & {lastTurnId?: string};
+            return getAgent(params).forkSession(params);
+        })
         .onRequest(acp.methods.agent.session.list, (ctx) => getAgent().listSessions(ctx.params))
         .onRequest(acp.methods.agent.session.delete, (ctx) => getAgent(ctx.params).deleteSession(ctx.params))
         .onRequest(acp.methods.agent.session.resume, (ctx) => setup(ctx.params.sessionId, ctx.requestId, () => getAgent(ctx.params).resumeSession(ctx.params), ctx.signal))

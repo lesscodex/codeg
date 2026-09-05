@@ -9,6 +9,7 @@ import {toV2SessionUpdates} from "./AcpV2SessionUpdate";
 import {toV1RequestPermissionResponse, toV2RequestPermissionRequest} from "./AcpV2Permissions";
 import {elicitationSessionId, toV1CreateElicitationResponse, toV2CreateElicitationRequest} from "./AcpV2Elicitation";
 import {AcpV2ForegroundState} from "./AcpV2ForegroundState";
+import {CODEX_TURN_STARTED_METHOD} from "./AcpExtensions";
 
 export type AcpClientConnection = Pick<acp.AgentContext, "notify" | "request">;
 
@@ -273,6 +274,13 @@ export class ACPSessionConnection {
             sessionId,
             update: update
         }));
+    }
+
+    async turnStarted(turnId: string): Promise<void> {
+        await this.connection.notify(CODEX_TURN_STARTED_METHOD, {
+            sessionId: this.sessionId,
+            turnId,
+        });
     }
 }
 
