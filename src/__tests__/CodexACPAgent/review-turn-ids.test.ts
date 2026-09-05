@@ -324,8 +324,9 @@ async function startReview(
         dump: (response) => JSON.stringify({
             // The command list is published asynchronously after session/new; it is not part of the turn.
             updates: fixture.getAcpConnectionEvents([])
+                .filter(event => event.method === "sessionUpdate")
                 .map(event => event.args[0].update)
-                .filter(update => update?.sessionUpdate !== "available_commands_update"),
+                .filter(update => update.sessionUpdate !== "available_commands_update"),
             response,
         }, null, 2),
     };

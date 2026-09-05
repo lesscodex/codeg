@@ -56,6 +56,15 @@ const EXTENSION_NOTIFICATION_SCHEMAS: Record<string, object> = {
             },
         },
     },
+    "_codex/turn_started": {
+        type: "object",
+        required: ["sessionId", "turnId"],
+        additionalProperties: false,
+        properties: {
+            sessionId: {type: "string"},
+            turnId: {type: "string"},
+        },
+    },
 };
 
 /**

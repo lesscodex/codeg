@@ -41,6 +41,7 @@ export {
 
 export const LEGACY_SET_SESSION_MODEL_METHOD = "session/set_model";
 export const SESSION_STEERING_METHOD = "_session/steering";
+export const CODEX_TURN_STARTED_METHOD = "_codex/turn_started";
 
 export type LegacySessionModel = {
     modelId: string;
