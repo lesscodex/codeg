@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as acp from "@agentclientprotocol/sdk/unstable";
 import type { McpServerElicitationRequestParams, ToolRequestUserInputParams } from '../../app-server/v2';
-import { createCodexMockTestFixture, createTestSessionState, type CodexMockTestFixture } from '../acp-test-utils';
+import { createArrayDump, createCodexMockTestFixture, createTestSessionState, type CodexMockTestFixture } from '../acp-test-utils';
 import type { SessionState } from '../../CodexAcpServer';
 import { AgentMode } from "../../AgentMode";
 import { McpApprovalOptionId } from "../../permissions/option-ids";
 import type { ServerNotification } from "../../app-server";
+import {CODEX_TURN_STARTED_METHOD} from "../../AcpExtensions";
 
 describe('Elicitation Events', () => {
     let fixture: CodexMockTestFixture;
@@ -58,6 +59,19 @@ describe('Elicitation Events', () => {
         return setupSessionWithPendingPrompt();
     }
 
+    function connectionEventsWithoutTurnStarted(ignoredFields: string[] = []) {
+        return fixture.getAcpConnectionEvents(ignoredFields)
+            .filter(event => event.method !== 'notify' || event.args[0] !== CODEX_TURN_STARTED_METHOD);
+    }
+
+    function connectionDumpWithoutTurnStarted(ignoredFields: string[]) {
+        return createArrayDump(
+            fixture.getAcpConnectionEvents(ignoredFields)
+                .filter(event => event.method !== 'notify' || event.args[0] !== CODEX_TURN_STARTED_METHOD),
+            [],
+        );
+    }
+
     describe('Form mode elicitation', () => {
         it('should use ACP form elicitation when the client supports it', async () => {
             const { promptPromise, completeTurn } = await setupSessionWithPendingPromptAndCapabilities({
@@ -78,7 +92,7 @@ describe('Elicitation Events', () => {
             const response = await fixture.sendServerRequest('mcpServer/elicitation/request', params);
             expect(response).toEqual({ action: 'accept', content: { username: 'octocat' }, _meta: { source: 'client' } });
 
-            const [elicitationEvent] = fixture.getAcpConnectionEvents([]);
+            const [elicitationEvent] = connectionEventsWithoutTurnStarted();
             expect(elicitationEvent).toEqual({
                 method: 'createElicitation',
                 args: [{
@@ -125,7 +139,7 @@ describe('Elicitation Events', () => {
 
             await fixture.sendServerRequest('mcpServer/elicitation/request', params);
 
-            const [elicitationEvent] = fixture.getAcpConnectionEvents([]);
+            const [elicitationEvent] = connectionEventsWithoutTurnStarted();
             expect(elicitationEvent?.args[0].requestedSchema.properties.color).toEqual({
                 type: 'string',
                 oneOf: [
@@ -194,7 +208,7 @@ describe('Elicitation Events', () => {
 
             const response = await fixture.sendServerRequest('mcpServer/elicitation/request', params);
             expect(response).toEqual({ action: 'cancel', content: null, _meta: null });
-            expect(fixture.getAcpConnectionEvents([])).toEqual([]);
+            expect(connectionEventsWithoutTurnStarted()).toEqual([]);
 
             completeTurn();
             await promptPromise;
@@ -227,7 +241,7 @@ describe('Elicitation Events', () => {
             };
             expect(await fixture.sendServerRequest('mcpServer/elicitation/request', params))
                 .toEqual({ action: 'cancel', content: null, _meta: null });
-            const sessionUpdates = fixture.getAcpConnectionEvents([])
+            const sessionUpdates = connectionEventsWithoutTurnStarted()
                 .filter(event => event.method === 'sessionUpdate')
                 .map(event => event.args[0].update);
             expect(sessionUpdates).toEqual([
@@ -277,7 +291,7 @@ describe('Elicitation Events', () => {
 
             expect(await fixture.sendServerRequest('mcpServer/elicitation/request', params))
                 .toEqual({action: 'cancel', content: null, _meta: null});
-            expect(fixture.getAcpConnectionEvents([])).toEqual([]);
+            expect(connectionEventsWithoutTurnStarted()).toEqual([]);
 
             completeTurn();
             await promptPromise;
@@ -459,7 +473,7 @@ describe('Elicitation Events', () => {
             };
             expect(await fixture.sendServerRequest('mcpServer/elicitation/request', params))
                 .toEqual({ action: 'cancel', content: null, _meta: null });
-            const toolStatuses = fixture.getAcpConnectionEvents([])
+            const toolStatuses = connectionEventsWithoutTurnStarted()
                 .filter(event => event.method === 'sessionUpdate')
                 .map(event => event.args[0].update.status);
             expect(toolStatuses).not.toContain('in_progress');
@@ -535,7 +549,7 @@ describe('Elicitation Events', () => {
             };
             expect(await fixture.sendServerRequest('mcpServer/elicitation/request', params))
                 .toEqual({ action: 'cancel', content: null, _meta: null });
-            const toolStatuses = fixture.getAcpConnectionEvents([])
+            const toolStatuses = connectionEventsWithoutTurnStarted()
                 .filter(event => event.method === 'sessionUpdate')
                 .map(event => event.args[0].update.status);
             expect(toolStatuses).not.toContain('in_progress');
@@ -571,7 +585,7 @@ describe('Elicitation Events', () => {
             };
             expect(await fixture.sendServerRequest('mcpServer/elicitation/request', params))
                 .toEqual({action: 'cancel', content: null, _meta: null});
-            const request = fixture.getAcpConnectionEvents([]).find(event => event.method === 'requestPermission');
+            const request = connectionEventsWithoutTurnStarted().find(event => event.method === 'requestPermission');
             expect(request?.args[0].toolCall).toMatchObject({
                 toolCallId: 'elicitation:test-session-id:tool-server:1',
                 content: [{type: 'content', content: {type: 'text', text: 'Allow one of the concurrent calls?'}}],
@@ -737,7 +751,7 @@ describe('Elicitation Events', () => {
             await expect((agent as any).mcpServerSignIn(sessionId, 'linear')).resolves.toBe('signedIn');
 
             expect(oauthLogin).toHaveBeenCalledWith({name: 'linear', threadId: sessionId});
-            const events = fixture.getAcpConnectionEvents([]);
+            const events = connectionEventsWithoutTurnStarted();
             expect(events[0]).toMatchObject({
                 method: 'createElicitation',
                 args: [{
@@ -768,7 +782,7 @@ describe('Elicitation Events', () => {
             const response = await fixture.sendServerRequest('mcpServer/elicitation/request', params);
             expect(response).toEqual({ action: 'accept', content: null, _meta: { source: 'client' } });
 
-            const [elicitationEvent] = fixture.getAcpConnectionEvents([]);
+            const [elicitationEvent] = connectionEventsWithoutTurnStarted();
             expect(elicitationEvent).toEqual({
                 method: 'createElicitation',
                 args: [{
@@ -790,7 +804,8 @@ describe('Elicitation Events', () => {
             });
             await fixture.getCodexAcpClient().waitForSessionNotifications(sessionId);
 
-            const [, completeElicitationEvent] = fixture.getAcpConnectionEvents([]);
+            const completeElicitationEvent = connectionEventsWithoutTurnStarted()
+                .find(event => event.method === 'completeElicitation');
             expect(completeElicitationEvent).toEqual({
                 method: 'completeElicitation',
                 args: [{ elicitationId: 'elicit-123' }],
@@ -904,7 +919,7 @@ describe('Elicitation Events', () => {
                 },
             });
 
-            expect(fixture.getAcpConnectionEvents([])).toEqual([{
+            expect(connectionEventsWithoutTurnStarted()).toEqual([{
                 method: 'createElicitation',
                 args: [{
                     sessionId,
@@ -1037,7 +1052,7 @@ describe('Elicitation Events', () => {
             expect(response).toEqual({
                 answers: { next_step: { answers: expected } },
             });
-            await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+            await expect(connectionDumpWithoutTurnStarted([])).toMatchFileSnapshot(
                 'data/elicitation-user-input-air-custom-answer.json',
             );
 
@@ -1107,7 +1122,7 @@ describe('Elicitation Events', () => {
                         choice_note1: { answers: ['Private context'] },
                     },
                 });
-                await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+                await expect(connectionDumpWithoutTurnStarted([])).toMatchFileSnapshot(
                     `data/elicitation-user-input-note-collision-${order}.json`,
                 );
 
@@ -1148,10 +1163,10 @@ describe('Elicitation Events', () => {
             expect(response).toEqual({
                 answers: { next_step: { answers: ['None of the above'] } },
             });
-            const [elicitationEvent] = fixture.getAcpConnectionEvents([]);
+            const [elicitationEvent] = connectionEventsWithoutTurnStarted();
             const options = elicitationEvent!.args[0].requestedSchema.properties.next_step.oneOf;
             expect(options.filter((option: { const: string }) => option.const === 'None of the above')).toHaveLength(1);
-            await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+            await expect(connectionDumpWithoutTurnStarted([])).toMatchFileSnapshot(
                 'data/elicitation-user-input-existing-other.json',
             );
 
@@ -1219,7 +1234,7 @@ describe('Elicitation Events', () => {
 
             const response = await fixture.sendServerRequest('item/tool/requestUserInput', params);
             expect(response).toEqual({ answers: {} });
-            expect(fixture.getAcpConnectionEvents(['_meta'])).toEqual([]);
+            expect(connectionEventsWithoutTurnStarted(['_meta'])).toEqual([]);
 
             completeTurn();
             await promptPromise;

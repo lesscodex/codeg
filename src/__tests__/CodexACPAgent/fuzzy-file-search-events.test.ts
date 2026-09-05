@@ -72,7 +72,9 @@ describe("CodexEventHandler - fuzzy file search events", () => {
 
         await setupPromptAndSendNotifications(mockFixture, sessionId, sessionState, [updated1, updated2, completed]);
 
-        const normalizedEvents = normalizePathSeparators(events);
+        const normalizedEvents = normalizePathSeparators(
+            events.filter(event => event.method === "sessionUpdate"),
+        );
 
         expect(normalizedEvents).toHaveLength(3);
         expect(normalizedEvents[0]).toEqual({

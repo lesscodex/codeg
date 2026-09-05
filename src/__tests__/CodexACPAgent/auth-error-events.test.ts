@@ -6,6 +6,7 @@ import {
     createCodexMockTestFixture,
     createTestEventHandler,
     createTestSessionState,
+    type CodexMockTestFixture,
     deferred,
 } from "../acp-test-utils";
 import {logger} from "../../Logger";
@@ -71,6 +72,12 @@ const configuredAuthFailureCases: Array<{
         },
     },
 ];
+
+function sessionUpdates(fixture: CodexMockTestFixture): unknown[] {
+    return fixture.getAcpConnectionEvents([])
+        .filter(event => event.method === "sessionUpdate")
+        .map(event => event.args[0].update);
+}
 
 const typedFailureCapabilities: acp.ClientCapabilities = {
     _meta: {jetbrains: {air: {version: 1, capabilities: ["sessionFailure"]}}},
@@ -624,7 +631,7 @@ describe("CodexEventHandler - auth error events", () => {
         });
         await mockFixture.getCodexAcpClient().waitForSessionNotifications(sessionState.sessionId);
 
-        const updates = mockFixture.getAcpConnectionEvents([]).map(event => event.args[0].update);
+        const updates = sessionUpdates(mockFixture);
         expect(updates).toEqual([{
             sessionUpdate: "session_info_update",
             _meta: {
@@ -688,7 +695,7 @@ describe("CodexEventHandler - auth error events", () => {
         });
         await mockFixture.getCodexAcpClient().waitForSessionNotifications(sessionState.sessionId);
 
-        const updates = mockFixture.getAcpConnectionEvents([]).map(event => event.args[0].update);
+        const updates = sessionUpdates(mockFixture);
         expect(updates).toEqual([{
             sessionUpdate: "session_info_update",
             _meta: {
@@ -753,7 +760,7 @@ describe("CodexEventHandler - auth error events", () => {
             commandResult.resolve({handled: true});
             await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
 
-            const updates = mockFixture.getAcpConnectionEvents([]).map(event => event.args[0].update);
+            const updates = sessionUpdates(mockFixture);
             expect(updates).toEqual([{
                 sessionUpdate: "session_info_update",
                 _meta: {
@@ -1049,7 +1056,7 @@ async function runPromptWithError(
     }
     return {
         result,
-        updates: mockFixture.getAcpConnectionEvents([]).map(event => event.args[0].update),
+        updates: sessionUpdates(mockFixture),
     };
 }
 
@@ -1093,7 +1100,7 @@ async function runPromptWithCompletedTurn(
     }
     return {
         result,
-        updates: mockFixture.getAcpConnectionEvents([]).map(event => event.args[0].update),
+        updates: sessionUpdates(mockFixture),
     };
 }
 

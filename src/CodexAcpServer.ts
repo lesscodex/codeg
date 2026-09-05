@@ -1281,7 +1281,7 @@ export class CodexAcpServer {
     async tryCreateSession(
         request: WithAcpMcpServers<acp.NewSessionRequest>
             | WithAcpMcpServers<acp.ResumeSessionRequest>
-            | WithAcpMcpServers<acp.ForkSessionRequest>,
+            | (WithAcpMcpServers<acp.ForkSessionRequest> & {lastTurnId?: string}),
         operation: "new" | "resume" | "fork" = "sessionId" in request ? "resume" : "new",
     ): Promise<[SessionId, LegacySessionModelState, SessionModeState]> {
         clientSystemPromptText(request.systemPrompt);
@@ -1333,7 +1333,9 @@ export class CodexAcpServer {
                 throw err;
             }
         } else if (operation === "fork") {
-            const forkRequest = request as WithAcpMcpServers<acp.ForkSessionRequest>;
+            const forkRequest = request as WithAcpMcpServers<acp.ForkSessionRequest> & {
+                lastTurnId?: string;
+            };
             logger.log(`Fork existing session: ${forkRequest.sessionId}...`);
             sessionMetadata = await this.runWithProcessCheck(() => {
                 openGeneration = this.recovery?.generation ?? 0;
@@ -2006,13 +2008,17 @@ export class CodexAcpServer {
         await AcpV2Connection.of(this.connection)!.snapshotForegroundState(sessionId);
     }
 
-    async forkSession(params: WithAcpMcpServers<acp.ForkSessionRequest>): Promise<acp.ForkSessionResponse> {
+    async forkSession(
+        params: WithAcpMcpServers<acp.ForkSessionRequest> & {lastTurnId?: string},
+    ): Promise<acp.ForkSessionResponse> {
         clientSystemPromptText(params.systemPrompt);
         this.assertInstructionsReady(params.sessionId);
         return this.sessionIndex.forking(params.sessionId, () => this.createFork(params));
     }
 
-    private async createFork(params: WithAcpMcpServers<acp.ForkSessionRequest>): Promise<acp.ForkSessionResponse> {
+    private async createFork(
+        params: WithAcpMcpServers<acp.ForkSessionRequest> & {lastTurnId?: string},
+    ): Promise<acp.ForkSessionResponse> {
         if (this.providerUpdate !== null) {
             await this.waitForProviderUpdate();
         }
@@ -4852,7 +4858,7 @@ export class CodexAcpServer {
     async prompt(
         params: acp.PromptRequest,
         signal?: AbortSignal,
-        onTurnStarted?: () => void,
+        onTurnStarted?: (turnId: string) => void,
         insertion?: UserMessageInsertion,
         reservation?: TurnStartReservation,
     ): Promise<acp.PromptResponse> {
@@ -4878,7 +4884,7 @@ export class CodexAcpServer {
     private async promptAfterReservation(
         params: acp.PromptRequest,
         signal?: AbortSignal,
-        onTurnStarted?: () => void,
+        onTurnStarted?: (turnId: string) => void,
         insertion?: UserMessageInsertion,
     ): Promise<acp.PromptResponse> {
         if (this.providerUpdate !== null) {
@@ -5100,7 +5106,8 @@ export class CodexAcpServer {
                     }
                     sessionState.currentTurnId = turnId;
                     pendingTurnStart?.resolve(turnId);
-                    onTurnStarted?.();
+                    void this.notifyTurnStarted(params.sessionId, turnId);
+                    onTurnStarted?.(turnId);
                 },
                 ...(insertion === undefined ? {} : {
                     onCommandAccepted: () => {
@@ -5222,7 +5229,8 @@ export class CodexAcpServer {
                         if (priorRunningTurnId !== null && turnId === priorRunningTurnId) {
                             insertion?.onTurnAdopted?.();
                         }
-                        onTurnStarted?.();
+                        void this.notifyTurnStarted(params.sessionId, turnId);
+                        onTurnStarted?.(turnId);
                     },
                     () => this.promptShouldStop(params.sessionId, activePrompt),
                     insertion?.clientUserMessageId,
@@ -5337,6 +5345,7 @@ export class CodexAcpServer {
                                     return;
                                 }
                                 sessionState.currentTurnId = turnId;
+                                void this.notifyTurnStarted(params.sessionId, turnId);
                                 // Keep the approval-to-turn-start gap session-scoped. Once the new turn has
                                 // an identity, snapshot any unchanged session failure as its recovery baseline.
                                 recoverableSessionFailure = sessionState.sessionFailure;
@@ -5535,6 +5544,14 @@ export class CodexAcpServer {
                 registeredPendingTurnStart.resolve(null);
             }
             activePrompt.complete();
+        }
+    }
+
+    private async notifyTurnStarted(sessionId: string, turnId: string): Promise<void> {
+        try {
+            await new ACPSessionConnection(this.connection, sessionId).turnStarted(turnId);
+        } catch (error) {
+            logger.error(`Failed to publish Codex turn id for session ${sessionId}`, error);
         }
     }
 

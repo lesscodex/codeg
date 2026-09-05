@@ -29,13 +29,14 @@ export type SessionForkDependencies = {
 };
 
 export async function forkSession(
-    request: WithAcpMcpServers<acp.ForkSessionRequest>,
+    request: WithAcpMcpServers<acp.ForkSessionRequest> & {lastTurnId?: string},
     additionalDirectories: string[],
     dependencies: SessionForkDependencies,
     instructions?: SessionInstructions,
 ): Promise<SessionMetadata> {
     await dependencies.refreshSkills(request.cwd, additionalDirectories);
-    const lastTurnId = await resolveForkTurnId(request, dependencies.codexClient);
+    const lastTurnId = request.lastTurnId
+        ?? await resolveForkTurnId(request, dependencies.codexClient);
     const {config, skippedMcpServers, defaultPermissionProfileId: _defaultPermissionProfileId, ...permissionProfileMetadata} = await dependencies.createSessionConfig(
         request.cwd,
         additionalDirectories,

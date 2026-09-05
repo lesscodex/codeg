@@ -80,7 +80,9 @@ describe("CodexEventHandler - session info updates", () => {
             prompt: [{ type: "text", text: "Fallback title" }],
         });
 
-        expect(mockFixture.getAcpConnectionEvents([])).toEqual([]);
+        expect(mockFixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate"))
+            .toEqual([]);
     });
 
     it("ignores a late automatic title echo after a sessionIndex rename", async () => {
