@@ -18,7 +18,7 @@ import {AgentMode} from "../../AgentMode";
 import type {Model, ReviewStartResponse, ThreadGoal, TurnCompletedNotification, TurnStartParams} from "../../app-server/v2";
 import type {RateLimitsMap} from "../../RateLimitsMap";
 import {ModelId} from "../../ModelId";
-import {GOAL_CONTROL_METHOD} from "../../AcpExtensions";
+import {CODEX_TURN_STARTED_METHOD, GOAL_CONTROL_METHOD} from "../../AcpExtensions";
 import {ClientCapabilities} from "../../tool-calls/ClientCapabilities";
 import type {McpStartupResult} from "../../mcp/McpStartupTracker";
 
@@ -699,6 +699,43 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             }),
         }));
         expect(threadUnsubscribeSpy).not.toHaveBeenCalled();
+    });
+
+    it('forks a session at an explicit completed Codex turn', async () => {
+        const mockFixture = createCodexMockTestFixture();
+        const codexAcpClient = mockFixture.getCodexAcpClient();
+        const codexAppServerClient = mockFixture.getCodexAppServerClient();
+
+        vi.spyOn(codexAppServerClient, "skillsExtraRootsSet").mockResolvedValue(undefined);
+        vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({data: []});
+        const threadReadSpy = vi.spyOn(codexAppServerClient, "threadRead");
+        const threadForkSpy = vi.spyOn(codexAppServerClient, "threadFork").mockResolvedValue({
+            thread: {id: "fork-id"} as any,
+            model: "gpt-5",
+            modelProvider: "openai",
+            reasoningEffort: "medium",
+            serviceTier: null,
+        } as any);
+        vi.spyOn(codexAppServerClient, "threadUnsubscribe").mockResolvedValue({
+            status: "unsubscribed",
+        });
+        vi.spyOn(codexAppServerClient, "listModels").mockResolvedValue({
+            data: [createTestModel({id: "gpt-5"})],
+            nextCursor: null,
+        });
+
+        await codexAcpClient.forkSession({
+            sessionId: "source-id",
+            cwd: "/workspace",
+            mcpServers: [],
+            lastTurnId: "completed-turn-id",
+        });
+
+        expect(threadReadSpy).not.toHaveBeenCalled();
+        expect(threadForkSpy).toHaveBeenCalledWith(expect.objectContaining({
+            threadId: "source-id",
+            lastTurnId: "completed-turn-id",
+        }));
     });
 
     it('maps an AIR fork message id to the containing Codex turn', async () => {
@@ -1516,7 +1553,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         await codexAcpAgent.prompt({ sessionId: "id", prompt: [{type: "text", text: ""}] });
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot("data/output-acp-events.json");
+        await expect(`${fixture.getAcpConnectionDump([])}\n`).toMatchFileSnapshot("data/output-acp-events.json");
 
     });
 
@@ -2105,7 +2142,13 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 text_elements: []
             }]
         }));
-        expect(mockFixture.getAcpConnectionDump([])).toBe("");
+        expect(mockFixture.getAcpConnectionEvents([])).toEqual([{
+            method: "notify",
+            args: [
+                CODEX_TURN_STARTED_METHOD,
+                {sessionId: "session-id", turnId: "turn-id"},
+            ],
+        }]);
     });
 
     it('handles review slash commands through Codex app server', async () => {

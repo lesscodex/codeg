@@ -700,7 +700,7 @@ export class CodexAcpClient {
     }
 
     async forkSession(
-        request: acp.ForkSessionRequest,
+        request: acp.ForkSessionRequest & {lastTurnId?: string},
         releaseFailedFork: (threadId: string) => Promise<void> = threadId => this.closeSession(threadId),
     ): Promise<SessionMetadata> {
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);

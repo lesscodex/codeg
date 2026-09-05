@@ -46,6 +46,23 @@ const sessionSteerParamsParser = z.object({
     prompt: z.array(z.any()),
 }).passthrough();
 
+// ACP's typed ForkSessionRequest intentionally has no provider-specific
+// fields. Codeg sends Codex's completed-turn UUID as an optional top-level
+// `lastTurnId` on the standard session/fork request, so keep it through the
+// SDK's otherwise stripping validator while retaining the normal request
+// shape and AIR metadata.
+const forkSessionParamsParser = z
+    .record(z.string(), z.unknown())
+    .superRefine((params, context) => {
+        if (typeof params["sessionId"] !== "string" || typeof params["cwd"] !== "string") {
+            context.addIssue({code: "custom", message: "sessionId and cwd are required strings"});
+        }
+        const lastTurnId = params["lastTurnId"];
+        if (lastTurnId !== undefined && (typeof lastTurnId !== "string" || lastTurnId.length === 0)) {
+            context.addIssue({code: "custom", message: "lastTurnId must be a non-empty string"});
+        }
+    });
+
 const goalControlParamsParser = z.discriminatedUnion("action", [
     z.object({
         sessionId: z.string(),
@@ -168,7 +185,10 @@ function startAcpServer() {
         .onRequest(acp.methods.agent.initialize, (ctx) => getAgent().initialize(ctx.params))
         .onRequest(acp.methods.agent.session.new, (ctx) => getAgent().newSession(ctx.params))
         .onRequest(acp.methods.agent.session.load, (ctx) => getAgent().loadSession(ctx.params))
-        .onRequest(acp.methods.agent.session.fork, (ctx) => getAgent().forkSession(ctx.params))
+        .onRequest(acp.methods.agent.session.fork, forkSessionParamsParser, (ctx) => {
+            const params = ctx.params as acp.ForkSessionRequest & {lastTurnId?: string};
+            return getAgent().forkSession(params);
+        })
         .onRequest(acp.methods.agent.session.list, (ctx) => getAgent().listSessions(ctx.params))
         .onRequest(acp.methods.agent.session.delete, (ctx) => getAgent().deleteSession(ctx.params))
         .onRequest(acp.methods.agent.session.resume, (ctx) => getAgent().resumeSession(ctx.params))

@@ -8,12 +8,14 @@ import {CodexSubagentEventRouter} from "../../subagents/CodexSubagentEventRouter
 import type {ServerNotification} from "../../app-server";
 import type {Thread, ThreadItem, Turn} from "../../app-server/v2";
 import {
+    createArrayDump,
     createCodexMockTestFixture,
     createTestModel,
     createTestSessionState,
     type CodexMockTestFixture,
 } from "../acp-test-utils";
 import {createMockConnections} from "./test-utils";
+import {CODEX_TURN_STARTED_METHOD} from "../../AcpExtensions";
 
 const sessionId = "compaction-session";
 const turnId = "compaction-turn";
@@ -23,6 +25,19 @@ const childTurnId = "compaction-child-turn";
 const compactionCapabilities: acp.ClientCapabilities = {
     session: {compaction: {}},
 };
+
+function connectionEventsWithoutTurnStarted(fixture: CodexMockTestFixture) {
+    return fixture.getAcpConnectionEvents([])
+        .filter(event => event.method !== "notify" || event.args[0] !== CODEX_TURN_STARTED_METHOD);
+}
+
+function connectionDumpWithoutTurnStarted(fixture: CodexMockTestFixture): string {
+    return createArrayDump(connectionEventsWithoutTurnStarted(fixture), []);
+}
+
+function connectionDumpWithoutTurnStartedWithFinalNewline(fixture: CodexMockTestFixture): string {
+    return `${connectionDumpWithoutTurnStarted(fixture)}\n`;
+}
 
 describe("session compaction", () => {
     it("keeps one timeline entity through item progress and completion", async () => {
@@ -36,7 +51,7 @@ describe("session compaction", () => {
             compactionCompleted(),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-lifecycle.json",
         );
     });
@@ -55,7 +70,7 @@ describe("session compaction", () => {
             compactionCompleted(),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStartedWithFinalNewline(fixture)).toMatchFileSnapshot(
             "data/session-compaction-deduplicated.json",
         );
     });
@@ -64,7 +79,7 @@ describe("session compaction", () => {
         const fixture = await createFixture();
         await sendNotifications(fixture, [compactionCompleted()]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-completed-only.json",
         );
     });
@@ -77,7 +92,7 @@ describe("session compaction", () => {
         };
         await sendNotifications(fixture, [compacted, compacted]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-thread-completed.json",
         );
     });
@@ -90,7 +105,7 @@ describe("session compaction", () => {
             compactionCompleted(),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-thread-completed.json",
         );
     });
@@ -104,7 +119,7 @@ describe("session compaction", () => {
             compactionCompleted("second-compaction-item"),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-multiple.json",
         );
     });
@@ -112,7 +127,7 @@ describe("session compaction", () => {
     it("preserves compaction identity when a later prompt replaces its event handler", async () => {
         const fixture = await createFixture();
         await sendNotifications(fixture, [compactionStarted(), compactionCompleted()]);
-        const firstCompaction = fixture.getAcpConnectionEvents([]);
+        const firstCompaction = connectionEventsWithoutTurnStarted(fixture);
         await fixture.getCodexAcpAgent().prompt({sessionId, prompt: [{type: "text", text: "Continue again."}]});
         fixture.clearAcpConnectionDump();
         await sendNotifications(fixture, [
@@ -122,7 +137,7 @@ describe("session compaction", () => {
             compactionCompleted("second-compaction-item"),
         ]);
 
-        await expect(JSON.stringify([...firstCompaction, ...fixture.getAcpConnectionEvents([])], null, 2))
+        await expect(JSON.stringify([...firstCompaction, ...connectionEventsWithoutTurnStarted(fixture)], null, 2))
             .toMatchFileSnapshot("data/session-compaction-next-prompt.json");
     });
 
@@ -134,7 +149,7 @@ describe("session compaction", () => {
         await sendNotifications(fixture, [compactionStarted(), compactionCompleted()]);
         await expect(prompt).resolves.toMatchObject({stopReason: "end_turn"});
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStartedWithFinalNewline(fixture)).toMatchFileSnapshot(
             "data/session-compaction-deduplicated.json",
         );
     });
@@ -152,7 +167,7 @@ describe("session compaction", () => {
             },
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-native-child-identities.json",
         );
     });
@@ -174,7 +189,7 @@ describe("session compaction", () => {
             compactionCompleted(compactionId, childSessionId, childTurnId),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-native-child-interrupted.json",
         );
     });
@@ -278,7 +293,7 @@ describe("session compaction", () => {
             compactionCompleted(),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             `data/session-compaction-${status}.json`,
         );
     });
@@ -294,7 +309,7 @@ describe("session compaction", () => {
             compactionCompleted(),
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStartedWithFinalNewline(fixture)).toMatchFileSnapshot(
             "data/session-compaction-deduplicated.json",
         );
     });
@@ -335,7 +350,7 @@ describe("session compaction", () => {
             {method: "thread/compacted", params: {threadId: sessionId, turnId}},
         ]);
 
-        await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+        await expect(connectionDumpWithoutTurnStarted(fixture)).toMatchFileSnapshot(
             "data/session-compaction-legacy.json",
         );
     });

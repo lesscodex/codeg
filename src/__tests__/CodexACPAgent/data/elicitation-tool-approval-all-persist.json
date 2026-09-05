@@ -68,3 +68,13 @@
     }
   ]
 }
+{
+  "method": "notify",
+  "args": [
+    "_codex/turn_started",
+    {
+      "sessionId": "test-session-id",
+      "turnId": "turn-id"
+    }
+  ]
+}

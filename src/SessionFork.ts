@@ -25,12 +25,13 @@ export type SessionForkDependencies = {
 };
 
 export async function forkSession(
-    request: acp.ForkSessionRequest,
+    request: acp.ForkSessionRequest & {lastTurnId?: string},
     additionalDirectories: string[],
     dependencies: SessionForkDependencies,
 ): Promise<SessionMetadata> {
     await dependencies.refreshSkills(request.cwd, additionalDirectories);
-    const lastTurnId = await resolveForkTurnId(request, dependencies.codexClient);
+    const lastTurnId = request.lastTurnId
+        ?? await resolveForkTurnId(request, dependencies.codexClient);
     const sessionConfig = await dependencies.createSessionConfig(
         request.cwd,
         additionalDirectories,
