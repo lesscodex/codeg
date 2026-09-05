@@ -70,6 +70,14 @@ describe.each([1, 2] as const)("session/fork at a cursor, ACP v%s", version => {
         expect(forkParams).toEqual([]);
     });
 
+    it.runIf(version === 1)("rejects a cursor with a Codex lastTurnId", async () => {
+        await connect();
+
+        await expect(fork({cursorId: "before:turn-2", lastTurnId: "turn-1"}))
+            .rejects.toMatchObject({code: -32602});
+        expect(forkParams).toEqual([]);
+    });
+
     it("rejects a cursor on a subagent session", async () => {
         await connect();
         vi.spyOn(client.agent as unknown as {isRestrictedChild(id: string): boolean}, "isRestrictedChild").mockReturnValue(true);

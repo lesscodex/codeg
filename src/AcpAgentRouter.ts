@@ -51,6 +51,22 @@ const sessionRewindParamsParser = z.object({
     cursorId: z.string(),
 }).passthrough();
 
+export const forkSessionParamsParser = z
+    .record(z.string(), z.unknown())
+    .superRefine((params, context) => {
+        if (typeof params["sessionId"] !== "string" || typeof params["cwd"] !== "string") {
+            context.addIssue({code: "custom", message: "sessionId and cwd are required strings"});
+        }
+        const lastTurnId = params["lastTurnId"];
+        if (lastTurnId !== undefined && (typeof lastTurnId !== "string" || lastTurnId.length === 0)) {
+            context.addIssue({code: "custom", message: "lastTurnId must be a non-empty string"});
+        }
+        const cursorId = params["cursorId"];
+        if (cursorId !== undefined && cursorId !== null && typeof cursorId !== "string") {
+            context.addIssue({code: "custom", message: "cursorId must be a string or null"});
+        }
+    });
+
 const goalControlParamsParser = z.discriminatedUnion("action", [
     z.object({
         sessionId: z.string(),
@@ -214,7 +230,10 @@ function createRouter(
         .onRequest(acp.methods.agent.session.options, ctx => getAgentForPaths(ctx.params).sessionOptions(ctx.params))
         .onRequest(acp.methods.agent.session.new, (ctx) => createdSetup(ctx.requestId, () => getAgentForPaths(ctx.params).newSession(ctx.params)))
         .onRequest(acp.methods.agent.session.load, (ctx) => setup(ctx.params, ctx.requestId, () => getAgentForPaths(ctx.params).loadSession(ctx.params), ctx.signal))
-        .onRequest(acp.methods.agent.session.fork, (ctx) => createdSetup(ctx.requestId, () => getAgentForPaths(ctx.params).forkSession(ctx.params)))
+        .onRequest(acp.methods.agent.session.fork, forkSessionParamsParser, (ctx) => {
+            const params = ctx.params as acp.ForkSessionRequest & {lastTurnId?: string};
+            return createdSetup(ctx.requestId, () => getAgentForPaths(params).forkSession(params));
+        })
         .onRequest(acp.methods.agent.session.list, (ctx) => getAgentForPaths({cwd: ctx.params.cwd ?? null}).listSessions(ctx.params))
         .onRequest(acp.methods.agent.session.delete, (ctx) => getAgent(ctx.params).deleteSession(ctx.params))
         .onRequest(acp.methods.agent.session.resume, (ctx) => setup(ctx.params, ctx.requestId, () => getAgentForPaths(ctx.params).resumeSession(ctx.params), ctx.signal))

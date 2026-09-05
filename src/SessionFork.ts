@@ -32,7 +32,7 @@ export type SessionForkDependencies = {
 };
 
 export async function forkSession(
-    request: WithAcpMcpServers<acp.ForkSessionRequest>,
+    request: WithAcpMcpServers<acp.ForkSessionRequest> & {lastTurnId?: string},
     additionalDirectories: string[],
     dependencies: SessionForkDependencies,
     instructions?: SessionInstructions,
@@ -82,10 +82,19 @@ export async function forkSession(
 }
 
 async function resolveForkTurnId(
-    request: Pick<acp.ForkSessionRequest, "sessionId" | "_meta" | "cursorId">,
+    request: Pick<acp.ForkSessionRequest, "sessionId" | "_meta" | "cursorId"> & {lastTurnId?: string},
     dependencies: Pick<SessionForkDependencies, "codexClient" | "resolveCursorTurn">,
 ): Promise<string | undefined> {
     const forkPoint = readAirForkPoint(request._meta);
+    if (request.lastTurnId !== undefined) {
+        if (request.lastTurnId.length === 0) {
+            throw RequestError.invalidParams(undefined, "lastTurnId must be a non-empty string");
+        }
+        if (request.cursorId != null) {
+            throw RequestError.invalidParams(undefined, "A fork takes either a lastTurnId or a cursorId, not both");
+        }
+        return request.lastTurnId;
+    }
     if (request.cursorId != null) {
         if (forkPoint) {
             throw RequestError.invalidParams(undefined, "A fork takes either a cursorId or an AIR fork point, not both");
