@@ -83,6 +83,7 @@ const h = vi.hoisted(() => {
     // Where a connection's advertised commands are filed for its transcripts.
     rememberAdvertisedCommands: vi.fn(),
     openSettingsWindow: vi.fn(async () => {}),
+    getSavedPrefsForConnect: vi.fn(),
     // Every `t(key, values)` this render made. The mock below still returns
     // the bare key (what most assertions compare against), so interpolated
     // values would otherwise be unobservable — this is how a test checks the
@@ -140,7 +141,7 @@ vi.mock("@/lib/advertised-commands-store", () => ({
 }))
 
 vi.mock("@/lib/selector-prefs-storage", () => ({
-  getSavedPrefsForConnect: () => ({ modeId: undefined, configValues: {} }),
+  getSavedPrefsForConnect: h.getSavedPrefsForConnect,
   saveModePreference: vi.fn(),
   saveConfigPreference: vi.fn(),
 }))
@@ -251,6 +252,11 @@ beforeEach(() => {
   h.acpTouchConnection.mockResolvedValue(true)
   h.acpCancel.mockReset()
   h.acpCancel.mockResolvedValue(undefined)
+  h.getSavedPrefsForConnect.mockReset()
+  h.getSavedPrefsForConnect.mockReturnValue({
+    modeId: undefined,
+    configValues: {},
+  })
   h.tCalls.length = 0
   h.toastWarning.mockClear()
   h.toastError.mockClear()
@@ -1373,10 +1379,48 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      undefined,
-      {}
+      null,
+      null
     )
     expect(h.store!.getConnection(TAB)?.connectionId).toBe("respawned-conn")
+  })
+
+  it("does not apply agent-wide selector prefs when resuming a conversation", async () => {
+    h.getSavedPrefsForConnect.mockReturnValue({
+      modeId: "plan",
+      configValues: { model: "model-a" },
+    })
+
+    await connectOwner()
+
+    expect(h.acpConnect).toHaveBeenLastCalledWith(
+      "claude_code",
+      "/tmp/x",
+      "sess-1",
+      null,
+      null
+    )
+  })
+
+  it("applies agent-wide selector prefs only when creating a new conversation", async () => {
+    h.getSavedPrefsForConnect.mockReturnValue({
+      modeId: "plan",
+      configValues: { model: "model-a" },
+    })
+    h.acpFindConnectionForConversation.mockResolvedValue(null)
+    await mountProvider()
+
+    await act(async () => {
+      await h.actions!.connect(TAB, "claude_code", "/tmp/x")
+    })
+
+    expect(h.acpConnect).toHaveBeenLastCalledWith(
+      "claude_code",
+      "/tmp/x",
+      undefined,
+      "plan",
+      { model: "model-a" }
+    )
   })
 
   it("rebuilds even when the backend no longer knows the connection", async () => {
@@ -1397,8 +1441,8 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      undefined,
-      {}
+      null,
+      null
     )
     expect(h.store!.getConnection(TAB)?.connectionId).toBe("respawned-conn")
   })
@@ -1424,8 +1468,8 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      undefined,
-      {}
+      null,
+      null
     )
   })
 
@@ -1470,8 +1514,8 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      undefined,
-      {}
+      null,
+      null
     )
   })
 
@@ -1589,8 +1633,8 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      undefined,
-      {}
+      null,
+      null
     )
     expect(h.store!.getConnection(TAB)?.connectionId).toBe("respawned-conn")
   })
@@ -1678,8 +1722,8 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "snapshot-session",
-      undefined,
-      {}
+      null,
+      null
     )
   })
 
@@ -1718,8 +1762,8 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "minted-1",
-      undefined,
-      {}
+      null,
+      null
     )
   })
 })
@@ -1775,8 +1819,8 @@ describe("AcpConnectionsProvider disconnect teardown confirmation", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      undefined,
-      {}
+      null,
+      null
     )
     // ...but the caller must not show an "applied" confirmation for a restart
     // that may have landed right back on the process it meant to replace.
