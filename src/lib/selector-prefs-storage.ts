@@ -9,12 +9,13 @@
  * backend's `set_session_config_option` will reject the application and
  * the stale value is naturally dropped on the next user pick.
  *
- * Preferences are shipped to the backend at `acp_connect` time (see
- * `getSavedPrefsForConnect`) which applies them to the agent BEFORE
- * the initial `session_modes` / `session_config_options` events are
- * emitted. Snapshots, replays, and live events therefore all carry the
- * user-preferred values uniformly — there is no client-side "intercept
- * incoming event and overwrite locally" path.
+ * Preferences are shipped to the backend when a NEW session connects (see
+ * `getSavedPrefsForConnect`) which applies them to the agent BEFORE the
+ * initial `session_modes` / `session_config_options` events are emitted.
+ * Existing sessions retain the selector state they report when resumed.
+ * Snapshots, replays, and live events therefore all carry the session's
+ * actual values — there is no client-side "intercept incoming event and
+ * overwrite locally" path.
  */
 
 import type { SessionModeStateInfo } from "@/lib/types"
@@ -150,8 +151,10 @@ export function getSavedModeId(agentType: string): string | null {
 /**
  * Read all saved preferences for an agent. Returned shape mirrors what
  * the backend `acp_connect` command accepts (`preferred_mode_id` +
- * `preferred_config_values`). Null/empty fields are normalized so the
- * call site can pass the result through unchanged.
+ * `preferred_config_values`). The connection layer uses these for new
+ * sessions only; an existing session owns its own selector state. Null/empty
+ * fields are normalized so the call site can pass the result through
+ * unchanged.
  *
  * The backend applies these on the freshly-attached session before any
  * `session_modes` / `session_config_options` event is emitted, so the
