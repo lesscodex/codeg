@@ -270,7 +270,7 @@ export function CanvasConversationSurface({
   }, [contextKey, conversationId, effectiveConversationId, migrateConversation])
 
   const [modeId, setModeId] = useState<string | null>(() =>
-    getSavedModeId(agentType)
+    conversationId == null ? getSavedModeId(agentType) : null
   )
   // Sends handed back to the composer, which cleared itself as each went out
   // (see the bounce handler in `handleSend`). Oldest first, offered one at a
