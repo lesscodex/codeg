@@ -371,7 +371,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // resolves the displayed mode through `conn.modes.current_mode_id`
   // and never triggers the catch-up `setMode`.
   const [modeId, setModeId] = useState<string | null>(() =>
-    getSavedModeId(agentType)
+    conversationId == null ? getSavedModeId(agentType) : null
   )
   const [sendSignal, setSendSignal] = useState(0)
   const [agentsLoaded, setAgentsLoaded] = useState(false)

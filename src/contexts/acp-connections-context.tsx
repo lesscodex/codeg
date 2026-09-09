@@ -7482,19 +7482,16 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         // need this gate, but the wait is a fast no-op once the initial
         // subscribe resolves.
         await waitForListenerReady()
-        // Ship the user's saved selector preferences (mode + per-config
-        // values, persisted per agentType in localStorage) up to the backend
-        // at connect time. The backend applies them on the freshly-attached
-        // session before emitting `session_modes` / `session_config_options`,
-        // so by the time the frontend sees those events (or a snapshot frame
-        // on the Subscribe-with-Snapshot attach), `current_mode_id` and
-        // `current_value` already reflect the user's preferences. This
-        // eliminates the prior "intercept event → overwrite locally → sync
-        // back to agent" path, which fixed new-conversation flow but quietly
-        // regressed when the snapshot path replaced the event path on tab
-        // re-open (the snapshot frame doesn't carry a `session_modes` event,
-        // so the apply-on-event hook never fired).
-        const savedPrefs = getSavedPrefsForConnect(agentType)
+        // Saved selector preferences are defaults for NEW sessions only. A
+        // session id or persisted conversation id identifies an existing
+        // conversation whose model/mode belongs to that conversation;
+        // applying the agent-wide localStorage preference here would overwrite
+        // it when the conversation reconnects (and would make one conversation
+        // change another's selectors).
+        const savedPrefs =
+          sessionId == null && conversationId == null
+            ? getSavedPrefsForConnect(agentType)
+            : { modeId: null, configValues: null }
         const connectionId = await acpConnect(
           agentType,
           workingDir,
@@ -8073,7 +8070,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
   const setMode = useCallback(async (contextKey: string, modeId: string) => {
     const conn = storeRef.current.connections.get(contextKey)
     if (!conn) return
-    // Persist user's mode selection to localStorage
+    // Persist the mode as the default for future new sessions. Existing
+    // sessions keep their own mode when they reconnect.
     const modes =
       conn.modes ?? selectorsCache.get(conn.agentType)?.modes ?? null
     if (modes) {
@@ -8096,8 +8094,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         configId,
         valueId,
       })
-      // Persist user selection to localStorage so the next `acp_connect`
-      // can ship it back to the backend as a preferred config value.
+      // Persist user selection as the default for future new sessions.
+      // Existing sessions keep their own config when they reconnect.
       saveConfigPreference(conn.agentType, configId, valueId)
       lastActivityRef.current.set(contextKey, Date.now())
       await acpSetConfigOption(conn.connectionId, configId, valueId)
