@@ -357,6 +357,8 @@ fn build_fork_request(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use chrono::Utc;
 
@@ -508,6 +510,7 @@ mod tests {
             std::path::Path::new("/work"),
             servers.clone(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         ))
         .unwrap();
         assert_eq!(fork["mcpServers"], resume["mcpServers"]);
@@ -553,6 +556,7 @@ mod tests {
             std::path::Path::new("/work"),
             servers.clone(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         ))
         .unwrap();
         assert_eq!(fork["cwd"], resume["cwd"]);
@@ -602,6 +606,7 @@ mod tests {
             std::path::Path::new("/work"),
             vec![server("codeg-mcp")],
             &ClaudeSessionOptions::new(false),
+            &BTreeMap::new(),
         ))
         .unwrap();
         assert_eq!(fork["_meta"], resume["_meta"]);

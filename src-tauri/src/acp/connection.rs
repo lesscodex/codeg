@@ -8039,9 +8039,10 @@ fn build_load_session_request(
     cwd: &Path,
     mcp_servers: Vec<McpServer>,
     claude: &ClaudeSessionOptions,
+    preferred_config_values: &BTreeMap<String, String>,
 ) -> LoadSessionRequest {
     let mut req = LoadSessionRequest::new(session_id, cwd.to_path_buf());
-    if let Some(meta) = claude_raw_sdk_session_meta(agent_type, claude) {
+    if let Some(meta) = restore_session_meta(agent_type, claude, preferred_config_values) {
         req = req.meta(meta);
     }
     if !mcp_servers.is_empty() {
@@ -8050,8 +8051,40 @@ fn build_load_session_request(
     req
 }
 
+fn restore_session_meta(
+    agent_type: AgentType,
+    claude: &ClaudeSessionOptions,
+    preferred_config_values: &BTreeMap<String, String>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if let Some(meta) = claude_raw_sdk_session_meta(agent_type, claude) {
+        return Some(meta);
+    }
+    if agent_type != AgentType::Codex {
+        return None;
+    }
+
+    // Codex compares models during resume, before ACP selectors can be replayed.
+    let resume: serde_json::Map<String, serde_json::Value> = [
+        (MODEL_CONFIG_OPTION_ID, "model"),
+        ("reasoning_effort", "reasoningEffort"),
+    ]
+    .into_iter()
+    .filter_map(|(config_id, meta_key)| {
+        let value = preferred_config_values.get(config_id)?.trim();
+        (!value.is_empty()).then(|| (meta_key.to_string(), value.into()))
+    })
+    .collect();
+    if resume.is_empty() {
+        return None;
+    }
+    Some(serde_json::Map::from_iter([(
+        "codeg".to_string(),
+        serde_json::json!({ "resume": resume }),
+    )]))
+}
+
 /// Build a `session/resume` request. Mirrors `build_load_session_request`
-/// (same fields + ClaudeCode raw-SDK meta + non-empty mcp_servers); the only
+/// (same fields + agent-specific meta + non-empty mcp_servers); the only
 /// wire difference is that `ResumeSessionRequest.mcp_servers` is
 /// `skip_serializing_if = Vec::is_empty`, so an empty list is omitted from the
 /// payload rather than emitted as `[]`.
@@ -8061,9 +8094,10 @@ pub(crate) fn build_resume_session_request(
     cwd: &Path,
     mcp_servers: Vec<McpServer>,
     claude: &ClaudeSessionOptions,
+    preferred_config_values: &BTreeMap<String, String>,
 ) -> ResumeSessionRequest {
     let mut req = ResumeSessionRequest::new(session_id, cwd.to_path_buf());
-    if let Some(meta) = claude_raw_sdk_session_meta(agent_type, claude) {
+    if let Some(meta) = restore_session_meta(agent_type, claude, preferred_config_values) {
         req = req.meta(meta);
     }
     if !mcp_servers.is_empty() {
@@ -9926,6 +9960,7 @@ async fn run_connection(
                         &cwd,
                         mcp_servers.clone(),
                         &claude,
+                        &preferred_config_values,
                     );
                     let resume_result =
                         retry_session_establishment(&handshake, startup_deadline, || {
@@ -10076,6 +10111,7 @@ async fn run_connection(
                         &cwd,
                         mcp_servers.clone(),
                         &claude,
+                        &preferred_config_values,
                     );
                     if matches!(agent_type, AgentType::Kiro | AgentType::Hermes) {
                         retry_session_establishment(&handshake, startup_deadline, || {
@@ -14220,6 +14256,7 @@ async fn handle_fork_or_exit(
             cwd,
             mcp_servers.to_vec(),
             &claude,
+            &inherited_config_values,
         );
         match send_resume_session(&cx, resume_req).await {
             Ok(pair) => Some(pair),
@@ -35819,6 +35856,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(false),
+            &BTreeMap::new(),
         );
         let resume_req = build_resume_session_request(
             AgentType::ClaudeCode,
@@ -35826,6 +35864,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(false),
+            &BTreeMap::new(),
         );
         assert_eq!(new_req.meta, load_req.meta);
         assert_eq!(new_req.meta, resume_req.meta);
@@ -35856,10 +35895,22 @@ mod tests {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
         let sid = || SessionId::new("abc".to_string());
         let new_req = build_new_session_request(AgentType::ClaudeCode, &cwd, Vec::new(), &claude);
-        let load_req =
-            build_load_session_request(AgentType::ClaudeCode, sid(), &cwd, Vec::new(), &claude);
-        let resume_req =
-            build_resume_session_request(AgentType::ClaudeCode, sid(), &cwd, Vec::new(), &claude);
+        let load_req = build_load_session_request(
+            AgentType::ClaudeCode,
+            sid(),
+            &cwd,
+            Vec::new(),
+            &claude,
+            &BTreeMap::new(),
+        );
+        let resume_req = build_resume_session_request(
+            AgentType::ClaudeCode,
+            sid(),
+            &cwd,
+            Vec::new(),
+            &claude,
+            &BTreeMap::new(),
+        );
         assert_eq!(new_req.meta, load_req.meta);
         assert_eq!(new_req.meta, resume_req.meta);
         // Settings alone, with predictions on.
@@ -39336,8 +39387,12 @@ mod tests {
         /// Advertise `loadSession` and answer session/load with this ACP error
         /// body, as the agent's JSON-RPC answer would carry it.
         load_error: Option<serde_json::Value>,
+        /// Advertise and accept a load for this exact ID.
+        expected_load_id: Option<&'static str>,
         /// Advertise `session/resume` and answer it with this ACP error body.
         resume_error: Option<serde_json::Value>,
+        supports_resume: bool,
+        expected_restore_meta: Option<serde_json::Value>,
     }
 
     /// An in-process agent for `run_connection`'s handshake. It reports each
@@ -39361,10 +39416,14 @@ mod tests {
                 terminal,
                 fail_session_new,
                 load_error,
+                expected_load_id,
                 resume_error,
+                supports_resume,
+                expected_restore_meta,
             } = script;
-            let advertises_load = load_error.is_some();
-            let advertises_resume = resume_error.is_some();
+            let advertises_load = load_error.is_some() || expected_load_id.is_some();
+            let advertises_resume = supports_resume || resume_error.is_some();
+            let load_meta = expected_restore_meta.clone();
             let (seen_tx, seen) = mpsc::unbounded_channel();
             let (init_seen, new_seen, load_seen, resume_seen, prompt_seen) = (
                 seen_tx.clone(),
@@ -39410,9 +39469,15 @@ mod tests {
                         on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |_req: LoadSessionRequest,
+                        async move |req: LoadSessionRequest,
                                     responder: Responder<LoadSessionResponse>,
                                     _cx: ConnectionTo<Client>| {
+                            if let Some(expected) = expected_load_id {
+                                assert_eq!(req.session_id.0.as_ref(), expected);
+                            }
+                            if let Some(expected) = &load_meta {
+                                assert_eq!(serde_json::to_value(&req).unwrap()["_meta"], *expected);
+                            }
                             let _ = load_seen.send("session/load".to_string());
                             match load_error.clone() {
                                 Some(body) => responder.respond_with_error(
@@ -39424,9 +39489,12 @@ mod tests {
                         on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |_req: ResumeSessionRequest,
+                        async move |req: ResumeSessionRequest,
                                     responder: Responder<ResumeSessionResponse>,
                                     _cx: ConnectionTo<Client>| {
+                            if let Some(expected) = &expected_restore_meta {
+                                assert_eq!(serde_json::to_value(&req).unwrap()["_meta"], *expected);
+                            }
                             let _ = resume_seen.send("session/resume".to_string());
                             match resume_error.clone() {
                                 Some(body) => responder.respond_with_error(
@@ -39547,12 +39615,27 @@ mod tests {
             client_end: agent_client_protocol::Channel,
             session_id: Option<&str>,
         ) -> Self {
+            // OpenClaw reads no MCP config from the machine running the test.
+            Self::start_with_selection(
+                client_end,
+                session_id,
+                AgentType::OpenClaw,
+                BTreeMap::new(),
+            )
+            .await
+        }
+
+        async fn start_with_selection(
+            client_end: agent_client_protocol::Channel,
+            session_id: Option<&str>,
+            agent_type: AgentType,
+            preferred_config_values: BTreeMap<String, String>,
+        ) -> Self {
             let session_id = session_id.map(str::to_string);
             let dir = tempfile::tempdir().expect("tempdir");
             let cwd = dir.path().to_path_buf();
-            // An agent codeg forwards no MCP servers to, so the handshake reads
-            // no MCP config from the machine running the test.
-            let agent_type = AgentType::OpenClaw;
+            let mcp_env =
+                crate::parsers::AgentEnv::with_overrides(&[("CODEX_HOME", cwd.to_str().unwrap())]);
             let state = Arc::new(RwLock::new(SessionState::new(
                 "conn-handshake".to_string(),
                 agent_type,
@@ -39583,13 +39666,13 @@ mod tests {
                         BTreeMap::new(),
                         TerminalShellRuntimeConfig::new(),
                         None,
-                        BTreeMap::new(),
+                        preferred_config_values,
                         None,
                         FsAccessPolicy::from_env(&cwd, agent_type, &BTreeMap::new()),
                         HostToolsPolicy::from_env(&BTreeMap::new()),
                         // Watched only for a Claude launch.
                         cwd.join("claude-projects"),
-                        crate::parsers::AgentEnv::inherited(),
+                        mcp_env,
                         Arc::new(StderrTail::new()),
                     ));
                     let _ = ended_tx.send(ended);
@@ -39683,6 +39766,54 @@ mod tests {
                 }
             }
             (ended, emitted)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn codex_restores_saved_selectors_before_resume_or_load() {
+        for (supports_resume, fail_resume) in [(true, false), (true, true), (false, false)] {
+            let (client_end, agent_end) = agent_client_protocol::Channel::duplex();
+            let mut agent = HandshakeAgent::start(
+                agent_end,
+                HandshakeScript {
+                    supports_resume,
+                    resume_error: fail_resume.then(|| {
+                        serde_json::json!({
+                            "code": -32601, "message": "Method not found"
+                        })
+                    }),
+                    expected_load_id: Some("s-old"),
+                    expected_restore_meta: Some(serde_json::json!({
+                        "codeg": {"resume": {
+                            "model": "gpt-5.6-sol", "reasoningEffort": "xhigh"
+                        }}
+                    })),
+                    ..Default::default()
+                },
+            );
+            let run = HandshakeRun::start_with_selection(
+                client_end,
+                Some("s-old"),
+                AgentType::Codex,
+                BTreeMap::from([
+                    ("model".into(), "gpt-5.6-sol".into()),
+                    ("reasoning_effort".into(), "xhigh".into()),
+                ]),
+            )
+            .await;
+            assert_eq!(agent.next_request().await, "initialize");
+            if supports_resume {
+                assert_eq!(agent.next_request().await, "session/resume");
+            }
+            if !supports_resume || fail_resume {
+                assert_eq!(agent.next_request().await, "session/load");
+            }
+            run.cmd_tx
+                .send(ConnectionCommand::Disconnect)
+                .await
+                .unwrap();
+            assert!(run.ended().await.0.is_ok());
+            agent.closed().await;
         }
     }
 
@@ -40580,7 +40711,7 @@ mod tests {
     }
 
     #[test]
-    fn build_load_session_request_skips_meta_for_non_claude() {
+    fn build_load_session_request_skips_meta_without_restore_values() {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
         let req = build_load_session_request(
             AgentType::Codex,
@@ -40588,6 +40719,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         assert!(req.meta.is_none());
@@ -40629,6 +40761,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
         assert!(
             load_req.mcp_servers.is_empty(),
@@ -40775,6 +40908,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         assert_eq!(
@@ -40788,7 +40922,7 @@ mod tests {
     }
 
     #[test]
-    fn build_resume_session_request_skips_meta_for_non_claude() {
+    fn build_resume_session_request_skips_meta_without_restore_values() {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
         let req = build_resume_session_request(
             AgentType::Codex,
@@ -40796,9 +40930,54 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         assert!(req.meta.is_none());
+    }
+
+    #[test]
+    fn build_restore_session_requests_set_codex_selector_meta() {
+        let preferred = BTreeMap::from([
+            ("model".into(), " gpt-5.6-sol ".into()),
+            ("reasoning_effort".into(), "xhigh".into()),
+            ("mode".into(), "agent".into()),
+        ]);
+        let cwd = Path::new("/workspace");
+        let claude = ClaudeSessionOptions::new(true);
+        let load = build_load_session_request(
+            AgentType::Codex,
+            SessionId::new("s-old"),
+            cwd,
+            Vec::new(),
+            &claude,
+            &preferred,
+        );
+        let resume = build_resume_session_request(
+            AgentType::Codex,
+            SessionId::new("s-old"),
+            cwd,
+            Vec::new(),
+            &claude,
+            &preferred,
+        );
+        let expected = serde_json::json!({
+            "codeg": {"resume": {"model": "gpt-5.6-sol", "reasoningEffort": "xhigh"}}
+        });
+        assert_eq!(serde_json::to_value(load).unwrap()["_meta"], expected);
+        assert_eq!(serde_json::to_value(resume).unwrap()["_meta"], expected);
+        for agent_type in [AgentType::ClaudeCode, AgentType::OpenClaw, AgentType::Grok] {
+            assert_eq!(
+                restore_session_meta(agent_type, &claude, &preferred),
+                claude_raw_sdk_session_meta(agent_type, &claude)
+            );
+        }
+        assert!(restore_session_meta(
+            AgentType::Codex,
+            &claude,
+            &BTreeMap::from([("model".into(), " ".into())]),
+        )
+        .is_none());
     }
 
     // Unlike NewSessionRequest/LoadSessionRequest (whose `mcp_servers` has no
@@ -40818,6 +40997,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
         assert!(
             req.mcp_servers.is_empty(),
@@ -52899,6 +53079,20 @@ mod tests {
             CloseAnswer::Closed,
         )
         .await;
+        let options: Vec<SessionConfigOption> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "model", "name": "Model", "type": "select",
+                "currentValue": "gpt-5.6-sol",
+                "options": [{"value": "gpt-5.6-sol", "name": "Sol"}]
+            },
+            {
+                "id": "reasoning_effort", "name": "Effort", "type": "select",
+                "currentValue": "xhigh",
+                "options": [{"value": "xhigh", "name": "Extra high"}]
+            }
+        ]))
+        .unwrap();
+        fork.state.write().await.config_options = Some(map_session_config_options(&options));
         fork.fork().await;
         fork.until(
             "the child's start",
@@ -52911,6 +53105,10 @@ mod tests {
         assert_eq!(forks[0]["mcpServers"][0]["name"], "codeg-mcp");
         assert_eq!(forks[0]["mcpServers"], resumes[0]["mcpServers"]);
         assert!(forks[0].get("_meta").is_none());
+        assert_eq!(
+            resumes[0]["_meta"]["codeg"]["resume"],
+            serde_json::json!({"model": "gpt-5.6-sol", "reasoningEffort": "xhigh"})
+        );
         fork.shutdown().await;
     }
 
@@ -56164,6 +56362,7 @@ mod wire_mcp_gate_tests {
             cwd,
             servers.clone(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
         let resume_req = build_resume_session_request(
             AgentType::Pi,
@@ -56171,6 +56370,7 @@ mod wire_mcp_gate_tests {
             cwd,
             servers,
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         for forwarded in [

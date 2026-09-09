@@ -8234,27 +8234,16 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         // need this gate, but the wait is a fast no-op once the initial
         // subscribe resolves.
         await waitForListenerReady()
-        // Ship the new-conversation default (mode + per-config values,
-        // persisted per agentType in localStorage) up to the backend at
-        // connect time, with the conversation's id when it is an existing one:
-        // the backend then replays that conversation's OWN stored selection
-        // instead, and uses the default only for a draft or (once) a legacy
-        // conversation that never recorded one (codeg#1179).
-        //
-        // Previously: ship the user's saved selector preferences up to the
-        // backend at connect time. The backend applies them on the freshly-attached
-        // session before emitting `session_modes` / `session_config_options`,
-        // so by the time the frontend sees those events (or a snapshot frame
-        // on the Subscribe-with-Snapshot attach), `current_mode_id` and
-        // `current_value` already reflect the user's preferences. This
-        // eliminates the prior "intercept event → overwrite locally → sync
-        // back to agent" path, which fixed new-conversation flow but quietly
-        // regressed when the snapshot path replaced the event path on tab
-        // re-open (the snapshot frame doesn't carry a `session_modes` event,
-        // so the apply-on-event hook never fired).
-        // With any one-off selection this surface was opened with (the ask
-        // composer's pick, `setConnectSelection`) laid over the default.
-        const savedPrefs = getSavedPrefsForConnect(agentType, contextKey)
+        // Saved selector preferences are defaults for NEW sessions only. A
+        // session id or persisted conversation id identifies an existing
+        // conversation whose model/mode belongs to that conversation;
+        // applying the agent-wide localStorage preference here would overwrite
+        // it when the conversation reconnects (and would make one conversation
+        // change another's selectors).
+        const savedPrefs =
+          sessionId == null && conversationId == null
+            ? getSavedPrefsForConnect(agentType, contextKey)
+            : { modeId: null, configValues: null }
         const connectionId = await acpConnect(
           agentType,
           workingDir,

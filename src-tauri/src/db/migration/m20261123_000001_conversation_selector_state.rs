@@ -81,6 +81,20 @@ mod tests {
         .await
         .expect("legacy row");
 
+        conn.execute(sql(
+            "INSERT INTO conversation (id, folder_id, title_locked, agent_type, status, kind, \
+             message_count, created_at, updated_at) VALUES \
+             (8, 1, 0, 'codex', 'completed', 'regular', 1, \
+              '2026-10-01 00:00:00', '2026-10-01 00:00:00')",
+        ))
+        .await
+        .unwrap();
+        conn.execute(sql("INSERT INTO conversation_selector_preference VALUES \
+             (8, 'plan', '{\"model\":\"saved-model\"}', \
+              '2026-10-01 00:00:00', '2026-10-01 00:00:00')"))
+            .await
+            .unwrap();
+
         Migrator::up(&conn, None)
             .await
             .expect("the selector state migration");
@@ -91,5 +105,18 @@ mod tests {
             .expect("row decodes")
             .expect("row exists");
         assert_eq!(row.selector_state, None);
+        let saved = conversation::Entity::find_by_id(8)
+            .one(&conn)
+            .await
+            .unwrap()
+            .unwrap();
+        let selection =
+            crate::models::ConversationSelection::parse(saved.selector_state.as_deref()).unwrap();
+        assert_eq!(selection.composer_mode_id.as_deref(), Some("plan"));
+        assert_eq!(
+            selection.config_values.get("model").map(String::as_str),
+            Some("saved-model")
+        );
+        Migrator::up(&conn, None).await.expect("repeat upgrade");
     }
 }
