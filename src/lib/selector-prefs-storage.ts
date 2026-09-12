@@ -1,26 +1,19 @@
 "use client"
 
 /**
- * Persists user's selector preferences (mode & config option selections)
- * per agentType to localStorage, so they survive session restarts.
+ * Persists selector defaults per agent and actual selector state per persisted
+ * conversation, so restarting an agent does not reset that conversation.
  *
- * Structure hash is stored alongside values — when the saved value no
- * longer exists in the current option set (item renamed / removed) the
- * backend's `set_session_config_option` will reject the application and
- * the stale value is naturally dropped on the next user pick.
- *
- * Preferences are shipped to the backend when a NEW session connects (see
- * `getSavedPrefsForConnect`) which applies them to the agent BEFORE the
- * initial `session_modes` / `session_config_options` events are emitted.
- * Existing sessions retain the selector state they report when resumed.
- * Snapshots, replays, and live events therefore all carry the session's
- * actual values — there is no client-side "intercept incoming event and
- * overwrite locally" path.
+ * Preferences are shipped to the backend at connect time (see
+ * `getSavedPrefsForConnect`) and applied before the initial selector events:
+ * new sessions receive agent defaults, while existing sessions receive their
+ * conversation-specific values.
  */
 
-import type { SessionModeStateInfo } from "@/lib/types"
+import type { SessionConfigOptionInfo, SessionModeStateInfo } from "@/lib/types"
 
 const STORAGE_KEY = "codeg:selector-prefs"
+const CONVERSATION_STORAGE_KEY = "codeg:conversation-selector-prefs"
 
 interface SelectorPrefs {
   modeId?: string
@@ -29,22 +22,22 @@ interface SelectorPrefs {
 
 type AllPrefs = Record<string, SelectorPrefs>
 
-function readAll(): AllPrefs {
+function readAll(storageKey: string): AllPrefs {
   if (typeof window === "undefined") return {}
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(storageKey)
     return raw ? (JSON.parse(raw) as AllPrefs) : {}
   } catch {
     return {}
   }
 }
 
-function writeAll(all: AllPrefs) {
+function writeAll(storageKey: string, all: AllPrefs) {
   if (typeof window === "undefined") return
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(all))
-  } catch {
-    /* ignore */
+    localStorage.setItem(storageKey, JSON.stringify(all))
+  } catch (error) {
+    console.warn("[selector-prefs] localStorage write failed", error)
   }
 }
 
@@ -67,10 +60,15 @@ function prefsOf(all: AllPrefs, agentType: string): SelectorPrefs | undefined {
 
 function updatePrefs(
   agentType: string,
+  conversationId: number | undefined,
   fn: (prefs: SelectorPrefs) => SelectorPrefs
 ) {
-  const all = readAll()
-  const existing = prefsOf(all, agentType)
+  const scoped = getScope(agentType, conversationId)
+  const all = readAll(scoped.storageKey)
+  const existing =
+    scoped.storageKey === STORAGE_KEY
+      ? prefsOf(all, agentType)
+      : all[scoped.entryKey]
   // Re-project onto the current schema so legacy fields (`modesHash` /
   // `configHash` from before the backend took ownership of preference
   // application) don't survive across writes. Without this an upgrade
@@ -79,8 +77,42 @@ function updatePrefs(
     modeId: existing?.modeId,
     configValues: existing?.configValues,
   }
-  all[agentType] = fn(normalized)
-  writeAll(all)
+  all[scoped.entryKey] = fn(normalized)
+  writeAll(scoped.storageKey, all)
+}
+
+function getScope(agentType: string, conversationId?: number) {
+  return conversationId != null && conversationId > 0
+    ? {
+        storageKey: CONVERSATION_STORAGE_KEY,
+        entryKey: `${conversationId}:${agentType}`,
+      }
+    : { storageKey: STORAGE_KEY, entryKey: agentType }
+}
+
+function readPrefs(
+  agentType: string,
+  conversationId?: number
+): SelectorPrefs | undefined {
+  const scoped = getScope(agentType, conversationId)
+  const all = readAll(scoped.storageKey)
+  return scoped.storageKey === STORAGE_KEY
+    ? prefsOf(all, agentType)
+    : all[scoped.entryKey]
+}
+
+function configValuesFromOptions(
+  options: SessionConfigOptionInfo[] | null
+): Record<string, string> | undefined {
+  if (options == null) return undefined
+  return Object.fromEntries(
+    options.map((option) => [
+      option.id,
+      option.kind.type === "boolean"
+        ? String(option.kind.current_value)
+        : option.kind.current_value,
+    ])
+  )
 }
 
 /**
@@ -144,27 +176,31 @@ function healLegacyValues(
 // ── Read ──
 
 /** Read saved mode id for an agent (no validation, just the raw value). */
-export function getSavedModeId(agentType: string): string | null {
-  return prefsOf(readAll(), agentType)?.modeId ?? null
+export function getSavedModeId(
+  agentType: string,
+  conversationId?: number
+): string | null {
+  return readPrefs(agentType, conversationId)?.modeId ?? null
 }
 
 /**
- * Read all saved preferences for an agent. Returned shape mirrors what
- * the backend `acp_connect` command accepts (`preferred_mode_id` +
- * `preferred_config_values`). The connection layer uses these for new
- * sessions only; an existing session owns its own selector state. Null/empty
- * fields are normalized so the call site can pass the result through
- * unchanged.
+ * Read saved agent defaults or conversation preferences. The returned shape
+ * mirrors what the backend `acp_connect` command accepts (`preferred_mode_id` +
+ * `preferred_config_values`). Null/empty fields are normalized so the call
+ * site can pass the result through unchanged.
  *
  * The backend applies these on the freshly-attached session before any
  * `session_modes` / `session_config_options` event is emitted, so the
  * frontend never needs to "intercept event and overwrite, then sync back".
  */
-export function getSavedPrefsForConnect(agentType: string): {
+export function getSavedPrefsForConnect(
+  agentType: string,
+  conversationId?: number
+): {
   modeId: string | null
   configValues: Record<string, string> | null
 } {
-  const prefs = prefsOf(readAll(), agentType)
+  const prefs = readPrefs(agentType, conversationId)
   if (!prefs) return { modeId: null, configValues: null }
   const configValues =
     prefs.configValues && Object.keys(prefs.configValues).length > 0
@@ -176,13 +212,14 @@ export function getSavedPrefsForConnect(agentType: string): {
   }
 }
 
-// ── Save (user actions only) ──
+// ── Save ──
 
 export function saveModePreference(
   agentType: string,
-  modes: SessionModeStateInfo
+  modes: SessionModeStateInfo,
+  conversationId?: number
 ) {
-  updatePrefs(agentType, (prefs) => ({
+  updatePrefs(agentType, conversationId, (prefs) => ({
     ...prefs,
     modeId: modes.current_mode_id,
   }))
@@ -191,10 +228,43 @@ export function saveModePreference(
 export function saveConfigPreference(
   agentType: string,
   configId: string,
-  valueId: string
+  valueId: string,
+  conversationId?: number
 ) {
-  updatePrefs(agentType, (prefs) => ({
+  updatePrefs(agentType, conversationId, (prefs) => ({
     ...prefs,
     configValues: { ...prefs.configValues, [configId]: valueId },
+  }))
+}
+
+export function saveConversationSelectorPreferences(
+  agentType: string,
+  conversationId: number,
+  modes: SessionModeStateInfo | null,
+  configOptions: SessionConfigOptionInfo[] | null
+) {
+  if (conversationId <= 0) return
+  const configValues = configValuesFromOptions(configOptions)
+  updatePrefs(agentType, conversationId, (prefs) => ({
+    modeId: modes?.current_mode_id ?? prefs.modeId,
+    configValues: configValues ?? prefs.configValues,
+  }))
+}
+
+export function initializeConversationSelectorPreferences(
+  agentType: string,
+  conversationId: number,
+  modes: SessionModeStateInfo | null,
+  configOptions: SessionConfigOptionInfo[] | null
+) {
+  if (conversationId <= 0 || readPrefs(agentType, conversationId)) return
+  const defaults = readPrefs(agentType)
+  const currentConfigValues = configValuesFromOptions(configOptions)
+  updatePrefs(agentType, conversationId, () => ({
+    modeId: defaults?.modeId ?? modes?.current_mode_id,
+    configValues: {
+      ...currentConfigValues,
+      ...defaults?.configValues,
+    },
   }))
 }
