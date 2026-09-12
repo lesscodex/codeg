@@ -145,6 +145,8 @@ import {
 } from "@/lib/window-attention"
 import {
   getSavedPrefsForConnect,
+  initializeConversationSelectorPreferences,
+  saveConversationSelectorPreferences,
   saveModePreference,
   saveConfigPreference,
 } from "@/lib/selector-prefs-storage"
@@ -3999,6 +4001,16 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       const remembered = lastConnectParamsRef.current.get(contextKey)
       if (!remembered) return
       lastConnectParamsRef.current.set(contextKey, { ...remembered, ...patch })
+      const conversationId = patch.conversationId
+      const conn = storeRef.current.connections.get(contextKey)
+      if (conversationId != null && conversationId > 0 && conn) {
+        initializeConversationSelectorPreferences(
+          conn.agentType,
+          conversationId,
+          conn.modes,
+          conn.configOptions
+        )
+      }
     },
     []
   )
@@ -4215,6 +4227,19 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     [t]
   )
 
+  const persistConversationSelectors = useCallback((contextKey: string) => {
+    const conversationId =
+      lastConnectParamsRef.current.get(contextKey)?.conversationId
+    const conn = storeRef.current.connections.get(contextKey)
+    if (conversationId == null || conversationId <= 0 || !conn) return
+    saveConversationSelectorPreferences(
+      conn.agentType,
+      conversationId,
+      conn.modes,
+      conn.configOptions
+    )
+  }, [])
+
   // ── Dispatch (replaces useReducer dispatch) ──
 
   /**
@@ -4283,6 +4308,15 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       if (next === prev) return // no change
 
       storeRef.current.connections = next
+
+      if (
+        action.type === "SESSION_MODES" ||
+        action.type === "SESSION_CONFIG_OPTIONS" ||
+        action.type === "HYDRATE_FROM_SNAPSHOT" ||
+        action.type === "MODE_CHANGED"
+      ) {
+        persistConversationSelectors(action.contextKey)
+      }
 
       // Mirror a changed liveMessage into the runtime store OUTSIDE React, so
       // the keep-alive conversation panel no longer has to re-render per
@@ -4393,7 +4427,12 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [discardStreamingKey, notifyKeyListeners, notifyAllKeyListeners]
+    [
+      discardStreamingKey,
+      notifyKeyListeners,
+      notifyAllKeyListeners,
+      persistConversationSelectors,
+    ]
   )
 
   // ── setActiveKey ──
@@ -5609,10 +5648,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           break
         case "session_modes": {
           flushStreamingQueue(contextKey)
-          // Preferences are applied on the backend during connect (see
-          // `getSavedPrefsForConnect` + `acp_connect`), so `e.modes` already
-          // carries the user's preferred `current_mode_id` — no client-side
-          // override or sync-back needed.
+          // On resume, this can report ACP's current mode before Codeg applies
+          // the saved preference through the following `mode_changed` event.
           dispatch({
             type: "SESSION_MODES",
             contextKey,
@@ -7482,16 +7519,12 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         // need this gate, but the wait is a fast no-op once the initial
         // subscribe resolves.
         await waitForListenerReady()
-        // Saved selector preferences are defaults for NEW sessions only. A
-        // session id or persisted conversation id identifies an existing
-        // conversation whose model/mode belongs to that conversation;
-        // applying the agent-wide localStorage preference here would overwrite
-        // it when the conversation reconnects (and would make one conversation
-        // change another's selectors).
         const savedPrefs =
-          sessionId == null && conversationId == null
-            ? getSavedPrefsForConnect(agentType)
-            : { modeId: null, configValues: null }
+          conversationId != null && conversationId > 0
+            ? getSavedPrefsForConnect(agentType, conversationId)
+            : sessionId == null
+              ? getSavedPrefsForConnect(agentType)
+              : { modeId: null, configValues: null }
         const connectionId = await acpConnect(
           agentType,
           workingDir,
@@ -7832,12 +7865,15 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       // Capture identity BEFORE teardown. `sessionId` is what makes the new
       // process resume this conversation (session/load) rather than start fresh.
       const { agentType, workingDir, sessionId } = conn
+      const conversationId =
+        lastConnectParamsRef.current.get(contextKey)?.conversationId
       const tornDown = await disconnect(contextKey)
       await connect(
         contextKey,
         agentType,
         workingDir ?? undefined,
-        sessionId ?? undefined
+        sessionId ?? undefined,
+        conversationId
       )
       // Reconnect regardless — the user is left with a working connection
       // either way — but an unconfirmed teardown means the old process may
@@ -8044,6 +8080,16 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     ) => {
       const conn = storeRef.current.connections.get(contextKey)
       if (!conn) return
+      const conversationId = opts?.conversationId ?? undefined
+      if (conversationId != null && conversationId > 0) {
+        initializeConversationSelectorPreferences(
+          conn.agentType,
+          conversationId,
+          conn.modes,
+          conn.configOptions
+        )
+        rememberResolvedIdentity(contextKey, { conversationId })
+      }
       lastActivityRef.current.set(contextKey, Date.now())
       try {
         await acpPrompt(
@@ -8064,21 +8110,27 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         throw e
       }
     },
-    [markConnectionGone]
+    [markConnectionGone, rememberResolvedIdentity]
   )
 
   const setMode = useCallback(async (contextKey: string, modeId: string) => {
     const conn = storeRef.current.connections.get(contextKey)
     if (!conn) return
-    // Persist the mode as the default for future new sessions. Existing
-    // sessions keep their own mode when they reconnect.
+    // Persist against the conversation once it is bound; unbound drafts update
+    // the agent default used by future new conversations.
     const modes =
       conn.modes ?? selectorsCache.get(conn.agentType)?.modes ?? null
+    const conversationId =
+      lastConnectParamsRef.current.get(contextKey)?.conversationId
     if (modes) {
-      saveModePreference(conn.agentType, {
-        ...modes,
-        current_mode_id: modeId,
-      })
+      saveModePreference(
+        conn.agentType,
+        {
+          ...modes,
+          current_mode_id: modeId,
+        },
+        conversationId
+      )
     }
     lastActivityRef.current.set(contextKey, Date.now())
     await acpSetMode(conn.connectionId, modeId)
@@ -8094,9 +8146,11 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         configId,
         valueId,
       })
-      // Persist user selection as the default for future new sessions.
-      // Existing sessions keep their own config when they reconnect.
-      saveConfigPreference(conn.agentType, configId, valueId)
+      // Persist against the conversation once it is bound; unbound drafts
+      // update the agent default used by future new conversations.
+      const conversationId =
+        lastConnectParamsRef.current.get(contextKey)?.conversationId
+      saveConfigPreference(conn.agentType, configId, valueId, conversationId)
       lastActivityRef.current.set(contextKey, Date.now())
       await acpSetConfigOption(conn.connectionId, configId, valueId)
     },

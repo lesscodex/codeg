@@ -84,6 +84,8 @@ const h = vi.hoisted(() => {
     rememberAdvertisedCommands: vi.fn(),
     openSettingsWindow: vi.fn(async () => {}),
     getSavedPrefsForConnect: vi.fn(),
+    initializeConversationSelectorPreferences: vi.fn(),
+    saveConversationSelectorPreferences: vi.fn(),
     // Every `t(key, values)` this render made. The mock below still returns
     // the bare key (what most assertions compare against), so interpolated
     // values would otherwise be unobservable — this is how a test checks the
@@ -142,6 +144,9 @@ vi.mock("@/lib/advertised-commands-store", () => ({
 
 vi.mock("@/lib/selector-prefs-storage", () => ({
   getSavedPrefsForConnect: h.getSavedPrefsForConnect,
+  initializeConversationSelectorPreferences:
+    h.initializeConversationSelectorPreferences,
+  saveConversationSelectorPreferences: h.saveConversationSelectorPreferences,
   saveModePreference: vi.fn(),
   saveConfigPreference: vi.fn(),
 }))
@@ -254,9 +259,11 @@ beforeEach(() => {
   h.acpCancel.mockResolvedValue(undefined)
   h.getSavedPrefsForConnect.mockReset()
   h.getSavedPrefsForConnect.mockReturnValue({
-    modeId: undefined,
-    configValues: {},
+    modeId: null,
+    configValues: null,
   })
+  h.initializeConversationSelectorPreferences.mockReset()
+  h.saveConversationSelectorPreferences.mockReset()
   h.tCalls.length = 0
   h.toastWarning.mockClear()
   h.toastError.mockClear()
@@ -1385,7 +1392,7 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
     expect(h.store!.getConnection(TAB)?.connectionId).toBe("respawned-conn")
   })
 
-  it("does not apply agent-wide selector prefs when resuming a conversation", async () => {
+  it("applies conversation selector prefs when resuming a conversation", async () => {
     h.getSavedPrefsForConnect.mockReturnValue({
       modeId: "plan",
       configValues: { model: "model-a" },
@@ -1397,7 +1404,70 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       "claude_code",
       "/tmp/x",
       "sess-1",
-      null,
+      "plan",
+      { model: "model-a" }
+    )
+    expect(h.getSavedPrefsForConnect).toHaveBeenCalledWith("claude_code", 42)
+  })
+
+  it("persists authoritative selector events for the conversation", async () => {
+    await connectOwner()
+    const handlers = latestAttachHandlers()
+    const modes = {
+      current_mode_id: "plan",
+      available_modes: [],
+    }
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "session_modes",
+      modes,
+    })
+
+    expect(h.saveConversationSelectorPreferences).toHaveBeenLastCalledWith(
+      "claude_code",
+      42,
+      modes,
+      null
+    )
+  })
+
+  it("persists the preferred mode after ACP reports its initial mode", async () => {
+    h.getSavedPrefsForConnect.mockReturnValue({
+      modeId: "plan",
+      configValues: null,
+    })
+    await connectOwner()
+    const handlers = latestAttachHandlers()
+    const initialModes = {
+      current_mode_id: "default",
+      available_modes: [],
+    }
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "session_modes",
+      modes: initialModes,
+    })
+    expect(h.saveConversationSelectorPreferences).toHaveBeenLastCalledWith(
+      "claude_code",
+      42,
+      initialModes,
+      null
+    )
+
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "mode_changed",
+      mode_id: "plan",
+    })
+    expect(h.saveConversationSelectorPreferences).toHaveBeenLastCalledWith(
+      "claude_code",
+      42,
+      { ...initialModes, current_mode_id: "plan" },
       null
     )
   })
@@ -1420,6 +1490,35 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       undefined,
       "plan",
       { model: "model-a" }
+    )
+  })
+
+  it("binds a new conversation before its first prompt", async () => {
+    h.acpFindConnectionForConversation.mockResolvedValue(null)
+    await mountProvider()
+    await act(async () => {
+      await h.actions!.connect(TAB, "claude_code", "/tmp/x")
+      await h.actions!.sendPrompt(TAB, [{ type: "text", text: "hello" }], {
+        conversationId: 77,
+      })
+    })
+
+    expect(h.initializeConversationSelectorPreferences).toHaveBeenCalledWith(
+      "claude_code",
+      77,
+      null,
+      null
+    )
+
+    vi.mocked(saveConfigPreference).mockClear()
+    await act(async () => {
+      await h.actions!.setConfigOption(TAB, "model", "model-a")
+    })
+    expect(saveConfigPreference).toHaveBeenCalledWith(
+      "claude_code",
+      "model",
+      "model-a",
+      77
     )
   })
 
@@ -4239,7 +4338,8 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
     expect(saveConfigPreference).toHaveBeenCalledWith(
       "grok",
       "model",
-      "grok-composer-2.5-fast"
+      "grok-composer-2.5-fast",
+      undefined
     )
 
     // Backend rejects the switch mid-conversation: it re-emits the authoritative
@@ -4671,7 +4771,8 @@ describe("AcpConnectionsProvider boolean config option (cline auto-approve)", ()
     expect(saveConfigPreference).toHaveBeenCalledWith(
       "cline",
       "auto_approve",
-      "true"
+      "true",
+      undefined
     )
   })
 

@@ -270,7 +270,7 @@ export function CanvasConversationSurface({
   }, [contextKey, conversationId, effectiveConversationId, migrateConversation])
 
   const [modeId, setModeId] = useState<string | null>(() =>
-    conversationId == null ? getSavedModeId(agentType) : null
+    getSavedModeId(agentType, conversationId ?? undefined)
   )
   // Sends handed back to the composer, which cleared itself as each went out
   // (see the bounce handler in `handleSend`). Oldest first, offered one at a
@@ -564,13 +564,17 @@ export function CanvasConversationSurface({
       // agent, so a change made mid-switch can't save the previous agent's
       // mode list under this one.
       if (effectiveModes) {
-        saveModePreference(agentType, {
-          ...effectiveModes,
-          current_mode_id: nextModeId,
-        })
+        saveModePreference(
+          agentType,
+          {
+            ...effectiveModes,
+            current_mode_id: nextModeId,
+          },
+          dbConversationId ?? undefined
+        )
       }
     },
-    [agentType, effectiveModes]
+    [agentType, effectiveModes, dbConversationId]
   )
 
   const handleSend = useCallback(
