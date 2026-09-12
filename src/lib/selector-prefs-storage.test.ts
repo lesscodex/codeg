@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it } from "vitest"
 import {
   getSavedModeId,
   getSavedPrefsForConnect,
+  initializeConversationSelectorPreferences,
   saveConfigPreference,
+  saveConversationSelectorPreferences,
   saveModePreference,
 } from "./selector-prefs-storage"
 
@@ -33,6 +35,92 @@ describe("selector-prefs-storage", () => {
     expect(getSavedPrefsForConnect("grok")).toEqual({
       modeId: null,
       configValues: null,
+    })
+  })
+
+  it("isolates selector preferences by conversation", () => {
+    saveConfigPreference("codex", "model", "model-a", 41)
+    saveConfigPreference("codex", "model", "model-b", 42)
+
+    expect(getSavedPrefsForConnect("codex", 41).configValues).toEqual({
+      model: "model-a",
+    })
+    expect(getSavedPrefsForConnect("codex", 42).configValues).toEqual({
+      model: "model-b",
+    })
+    expect(getSavedPrefsForConnect("codex").configValues).toBeNull()
+  })
+
+  it("does not fall back to agent defaults for an existing conversation", () => {
+    saveConfigPreference("codex", "model", "default-model")
+
+    expect(getSavedPrefsForConnect("codex", 42)).toEqual({
+      modeId: null,
+      configValues: null,
+    })
+  })
+
+  it("initializes a new conversation from defaults and live selectors", () => {
+    saveModePreference("codex", {
+      current_mode_id: "plan",
+      available_modes: [],
+    })
+    saveConfigPreference("codex", "model", "preferred-model")
+
+    initializeConversationSelectorPreferences(
+      "codex",
+      42,
+      { current_mode_id: "ask", available_modes: [] },
+      [
+        {
+          id: "model",
+          name: "Model",
+          kind: {
+            type: "select",
+            current_value: "live-model",
+            options: [],
+            groups: [],
+          },
+        },
+        {
+          id: "auto_approve",
+          name: "Auto approve",
+          kind: { type: "boolean", current_value: true },
+        },
+      ]
+    )
+
+    expect(getSavedPrefsForConnect("codex", 42)).toEqual({
+      modeId: "plan",
+      configValues: {
+        model: "preferred-model",
+        auto_approve: "true",
+      },
+    })
+  })
+
+  it("updates a conversation from authoritative selector events", () => {
+    saveConversationSelectorPreferences(
+      "codex",
+      42,
+      { current_mode_id: "ask", available_modes: [] },
+      [
+        {
+          id: "model",
+          name: "Model",
+          kind: {
+            type: "select",
+            current_value: "model-a",
+            options: [],
+            groups: [],
+          },
+        },
+      ]
+    )
+
+    expect(getSavedPrefsForConnect("codex", 42)).toEqual({
+      modeId: "ask",
+      configValues: { model: "model-a" },
     })
   })
 
@@ -187,5 +275,20 @@ describe("selector-prefs-storage", () => {
       modeId: null,
       configValues: { model: "claude-sonnet-5" },
     })
+  })
+
+  it("keeps retired Kiro defaults out of existing conversations", () => {
+    seed({ "custom:kiro-cli": { modeId: "reviewer" } })
+
+    expect(getSavedPrefsForConnect("kiro", 42)).toEqual({
+      modeId: null,
+      configValues: null,
+    })
+    saveConfigPreference("kiro", "model", "session-model", 42)
+    expect(getSavedPrefsForConnect("kiro", 42)).toEqual({
+      modeId: null,
+      configValues: { model: "session-model" },
+    })
+    expect(getSavedModeId("kiro")).toBe("reviewer")
   })
 })

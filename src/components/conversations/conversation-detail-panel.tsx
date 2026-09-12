@@ -371,7 +371,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // resolves the displayed mode through `conn.modes.current_mode_id`
   // and never triggers the catch-up `setMode`.
   const [modeId, setModeId] = useState<string | null>(() =>
-    conversationId == null ? getSavedModeId(agentType) : null
+    getSavedModeId(agentType, conversationId ?? undefined)
   )
   const [sendSignal, setSendSignal] = useState(0)
   const [agentsLoaded, setAgentsLoaded] = useState(false)
@@ -1627,13 +1627,17 @@ const ConversationTabView = memo(function ConversationTabView({
       // mode change made during a cross-agent switch window can't save the
       // previous agent's mode shape under the selected agent.
       if (effectiveModes) {
-        saveModePreference(selectedAgent, {
-          ...effectiveModes,
-          current_mode_id: newModeId,
-        })
+        saveModePreference(
+          selectedAgent,
+          {
+            ...effectiveModes,
+            current_mode_id: newModeId,
+          },
+          dbConversationId ?? undefined
+        )
       }
     },
-    [effectiveModes, selectedAgent]
+    [dbConversationId, effectiveModes, selectedAgent]
   )
 
   const handleAnswerQuestion = useCallback(
