@@ -293,6 +293,48 @@ struct SpawnDedupKey {
     session_id: String,
 }
 
+/// Identity a caller expects when delivering a prompt to a persisted session.
+/// The generic linked-send API intentionally ignores caller ids once a
+/// connection is linked; session-directed sends opt into this stricter check.
+#[derive(Debug, Clone)]
+pub struct PromptSessionIdentity {
+    pub agent_type: AgentType,
+    pub external_id: String,
+    pub working_dir: PathBuf,
+    pub conversation_id: i32,
+    /// A resumed connection can be live before `send_prompt_linked` adopts the
+    /// persisted conversation row. `true` permits only `conversation_id == None`;
+    /// a different already-bound conversation is always rejected.
+    pub allow_unlinked: bool,
+}
+
+/// Snapshot used by a caller that created a resumed connection. A connection
+/// may be reused by another request before the original request decides to
+/// tear it down, so cleanup must prove this snapshot is still unchanged while
+/// holding the same prompt lock used by senders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptConnectionLease {
+    pub external_id: Option<String>,
+    pub conversation_id: Option<i32>,
+    pub turns_completed: u64,
+}
+
+fn validate_prompt_session_identity(
+    state: &crate::acp::SessionState,
+    expected: &PromptSessionIdentity,
+) -> Result<(), AcpError> {
+    let conversation_matches = state.conversation_id == Some(expected.conversation_id)
+        || (expected.allow_unlinked && state.conversation_id.is_none());
+    if state.agent_type != expected.agent_type
+        || state.external_id.as_deref() != Some(expected.external_id.as_str())
+        || state.working_dir.as_ref() != Some(&expected.working_dir)
+        || !conversation_matches
+    {
+        return Err(AcpError::SessionIdentityMismatch);
+    }
+    Ok(())
+}
+
 /// Default upper bound on how long `spawn_agent` will hold the per-session
 /// dedup lock waiting for `SessionStarted`. Picked to comfortably cover
 /// cold-start agents (claude-code/codex warm: <2s; npx-fetched cold: 10–30s)
@@ -992,6 +1034,32 @@ impl ConnectionManager {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_agent_with_reuse(
+        &self,
+        agent_type: AgentType,
+        working_dir: Option<String>,
+        session_id: Option<String>,
+        runtime_env: BTreeMap<String, String>,
+        owner_window_label: String,
+        emitter: EventEmitter,
+        preferred_mode_id: Option<String>,
+        preferred_config_values: BTreeMap<String, String>,
+    ) -> Result<(String, bool), AcpError> {
+        self.spawn_agent_with_outcome(
+            agent_type,
+            working_dir,
+            session_id,
+            runtime_env,
+            owner_window_label,
+            emitter,
+            preferred_mode_id,
+            preferred_config_values,
+        )
+        .await
+        .map(|outcome| (outcome.connection_id, outcome.reused))
+    }
+
     /// A fresh connection for the root of a `codeg-cli` run, marked as the
     /// run's from the moment it exists — before its agent starts, so the
     /// codeg-mcp it is given knows the run ([`crate::cli_run::RootSeed`]).
@@ -1432,6 +1500,7 @@ impl ConnectionManager {
         receipt: Option<crate::acp::prompt_receipt::PromptReceipt>,
         // The token of a `RewindHold` this prompt is the edited message for.
         hold_token: Option<&str>,
+        expected_identity: Option<&PromptSessionIdentity>,
     ) -> Result<(), AcpError> {
         // Reject an empty prompt BEFORE touching the concurrency gate. An empty
         // prompt produces no turn — and thus no `TurnComplete` to clear the gate
@@ -1476,6 +1545,9 @@ impl ConnectionManager {
             .map_err(|_| AcpError::ProcessExited)?;
         {
             let mut s = state_arc.write().await;
+            if let Some(expected) = expected_identity {
+                validate_prompt_session_identity(&s, expected)?;
+            }
             if s.turn_in_flight {
                 // Names the gate, not just the outcome: the linked path checks
                 // the same flag once before its side effects and again here, and
@@ -1525,6 +1597,57 @@ impl ConnectionManager {
         Ok(conn.prompt_lock.clone())
     }
 
+    /// Snapshot the mutable session markers used to decide whether a freshly
+    /// resumed connection is still unclaimed by any prompt sender.
+    pub async fn prompt_connection_lease(
+        &self,
+        conn_id: &str,
+    ) -> Option<PromptConnectionLease> {
+        let state = self.get_state(conn_id).await?;
+        let state = state.read().await;
+        Some(PromptConnectionLease {
+            external_id: state.external_id.clone(),
+            conversation_id: state.conversation_id,
+            turns_completed: state.turns_completed,
+        })
+    }
+
+    /// Disconnect a connection only if no prompt has claimed it since the
+    /// caller captured `lease`. The check and removal are serialized by the
+    /// connection's prompt lock, so a request that has already sent (or is
+    /// currently sending) wins over cleanup from the request that spawned it.
+    /// Returns `true` only when this call actually removed the connection.
+    pub async fn disconnect_if_unclaimed(
+        &self,
+        conn_id: &str,
+        lease: &PromptConnectionLease,
+    ) -> Result<bool, AcpError> {
+        let prompt_lock = match self.clone_prompt_lock(conn_id).await {
+            Ok(lock) => lock,
+            Err(AcpError::ConnectionNotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let _prompt_guard = prompt_lock.lock_owned().await;
+        let Some(state) = self.get_state(conn_id).await else {
+            return Ok(false);
+        };
+        {
+            let state = state.read().await;
+            let unchanged = state.external_id == lease.external_id
+                && state.conversation_id == lease.conversation_id
+                && state.turns_completed == lease.turns_completed
+                && !state.turn_in_flight;
+            if !unchanged {
+                return Ok(false);
+            }
+        }
+        match self.disconnect(conn_id).await {
+            Ok(()) => Ok(true),
+            Err(AcpError::ConnectionNotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn send_prompt(
         &self,
         conn_id: &str,
@@ -1532,7 +1655,7 @@ impl ConnectionManager {
     ) -> Result<(), AcpError> {
         let prompt_lock = self.clone_prompt_lock(conn_id).await?;
         let _guard = prompt_lock.lock_owned().await;
-        self.send_prompt_inner(conn_id, blocks, None, Vec::new(), None, None, None)
+        self.send_prompt_inner(conn_id, blocks, None, Vec::new(), None, None, None, None)
             .await
     }
 
@@ -2043,6 +2166,7 @@ impl ConnectionManager {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -2069,6 +2193,7 @@ impl ConnectionManager {
             None,
             Vec::new(),
             reply_token,
+            None,
             None,
             None,
         )
@@ -2103,6 +2228,7 @@ impl ConnectionManager {
             None,
             Some(receipt),
             None,
+            None,
         )
         .await
     }
@@ -2135,6 +2261,37 @@ impl ConnectionManager {
             None,
             None,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// Send a prompt while re-checking the persisted target identity under the
+    /// same per-connection prompt lock used by the enqueue path. This is the
+    /// strict entry point for `send_session_message`; generic UI/delegation
+    /// callers retain the historical linked-send semantics above.
+    pub async fn send_prompt_linked_for_session(
+        &self,
+        db: &AppDatabase,
+        conn_id: &str,
+        blocks: Vec<PromptInputBlock>,
+        folder_id: i32,
+        conversation_id: i32,
+        expected_identity: PromptSessionIdentity,
+    ) -> Result<Option<i32>, AcpError> {
+        self.send_prompt_linked_full(
+            db,
+            conn_id,
+            blocks,
+            Some(folder_id),
+            Some(conversation_id),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some(expected_identity),
         )
         .await
     }
@@ -2155,6 +2312,7 @@ impl ConnectionManager {
         // An edited message's rewind, done in the same step as its admission
         // (see `send_prompt_linked_rewinding`).
         rewind: Option<crate::acp::rewind::RewindTarget>,
+        expected_identity: Option<PromptSessionIdentity>,
     ) -> Result<Option<i32>, AcpError> {
         // Reject an empty prompt up front, BEFORE any side effects: linking /
         // creating the conversation row, flipping it to InProgress, or emitting
@@ -2243,6 +2401,16 @@ impl ConnectionManager {
                 launch_dir,
             )
         };
+
+        // Session-directed sends must re-check the target identity after
+        // acquiring this lock. The generic linked API intentionally ignores
+        // caller-supplied ids once linked; this check prevents a connection
+        // that changed sessions between resolver validation and this entry
+        // point from accepting the message into the wrong conversation.
+        if let Some(expected) = expected_identity.as_ref() {
+            let state = state_arc.read().await;
+            validate_prompt_session_identity(&state, expected)?;
+        }
 
         // Reject a concurrent prompt while a turn is already in flight, BEFORE
         // any side effects (row creation, InProgress emit, user-message
@@ -2719,6 +2887,7 @@ impl ConnectionManager {
                 reply_token,
                 receipt,
                 hold_token.as_deref(),
+                expected_identity.as_ref(),
             )
             .await
         {
@@ -3059,6 +3228,7 @@ impl ConnectionManager {
             None,
             None,
             Some(rewind),
+            None,
         )
         .await
     }
@@ -8882,6 +9052,7 @@ mod tests {
             agent_type: AgentType::Codex,
             owner_window_label: "test-window".to_string(),
             cmd_tx: tx,
+            handshake: tokio_util::sync::CancellationToken::new(),
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -8996,6 +9167,7 @@ mod tests {
                 agent_type: AgentType::Codex,
                 owner_window_label: "test-window".into(),
                 cmd_tx: tx,
+                handshake: tokio_util::sync::CancellationToken::new(),
                 state: source_state.clone(),
                 emitter: EventEmitter::Noop,
                 prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -9627,6 +9799,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let res = tokio::time::timeout(std::time::Duration::from_millis(50), fut).await;
         assert!(
@@ -9665,18 +9838,18 @@ mod tests {
 
         let (blocks, user) = prompt(Some("optimistic-other"));
         let other = mgr
-            .send_prompt_inner(conn_id, blocks, user, Vec::new(), None, None, None)
+            .send_prompt_inner(conn_id, blocks, user, Vec::new(), None, None, None, None)
             .await;
         assert!(matches!(other, Err(AcpError::TurnInProgress)));
         let (blocks, user) = prompt(None);
         let anonymous = mgr
-            .send_prompt_inner(conn_id, blocks, user, Vec::new(), None, None, None)
+            .send_prompt_inner(conn_id, blocks, user, Vec::new(), None, None, None, None)
             .await;
         assert!(matches!(anonymous, Err(AcpError::TurnInProgress)));
         assert!(!state.read().await.turn_in_flight);
 
         let (blocks, user) = prompt(Some("optimistic-edit"));
-        mgr.send_prompt_inner(conn_id, blocks, user, Vec::new(), None, None, None)
+        mgr.send_prompt_inner(conn_id, blocks, user, Vec::new(), None, None, None, None)
             .await
             .expect("the edited message is admitted");
         let s = state.read().await;
@@ -10483,6 +10656,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_prompt_linked_for_session_rechecks_identity_before_enqueue() {
+        use crate::db::test_helpers;
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/strict-session").await;
+        let target = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mgr = ConnectionManager::new();
+        let conn_id = "strict-session-connection";
+        let mut commands = insert_live_connection(
+            &mgr,
+            conn_id,
+            AgentType::ClaudeCode,
+            Some(PathBuf::from("/tmp/strict-session")),
+        )
+        .await;
+        let state = mgr.get_state(conn_id).await.unwrap();
+        {
+            let mut state = state.write().await;
+            state.external_id = Some("persisted-agent-session".into());
+            state.conversation_id = Some(target.id + 1);
+        }
+
+        let err = mgr
+            .send_prompt_linked_for_session(
+                &db,
+                conn_id,
+                one_text_block(),
+                folder_id,
+                target.id,
+                PromptSessionIdentity {
+                    agent_type: AgentType::ClaudeCode,
+                    external_id: "persisted-agent-session".into(),
+                    working_dir: PathBuf::from("/tmp/strict-session"),
+                    conversation_id: target.id,
+                    allow_unlinked: false,
+                },
+            )
+            .await
+            .expect_err("a different bound conversation must be rejected");
+        assert!(matches!(err, AcpError::SessionIdentityMismatch));
+        assert!(commands.try_recv().is_err(), "identity failure must enqueue nothing");
+    }
+
+    #[tokio::test]
+    async fn disconnect_if_unclaimed_preserves_connection_claimed_by_another_send() {
+        let mgr = ConnectionManager::new();
+        let conn_id = "leased-connection";
+        let _commands = insert_live_connection(
+            &mgr,
+            conn_id,
+            AgentType::ClaudeCode,
+            Some(PathBuf::from("/tmp/leased")),
+        )
+        .await;
+        let state = mgr.get_state(conn_id).await.unwrap();
+        state.write().await.external_id = Some("leased-session".into());
+        let lease = mgr.prompt_connection_lease(conn_id).await.unwrap();
+
+        // Another request has admitted a turn. Cleanup from the request that
+        // originally spawned the connection must not interrupt it.
+        state.write().await.turn_in_flight = true;
+        assert!(!mgr
+            .disconnect_if_unclaimed(conn_id, &lease)
+            .await
+            .unwrap());
+        assert!(mgr.get_state(conn_id).await.is_some());
+    }
+
+    #[tokio::test]
     async fn send_prompt_linked_caller_id_is_noop_when_already_linked() {
         use crate::db::test_helpers;
         let db = test_helpers::fresh_in_memory_db().await;
@@ -10779,6 +11028,38 @@ mod tests {
             .find_connection_for_reuse(AgentType::Codex, Some(&working_dir), Some("ext-1"))
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_reuse_reports_ownership_from_dedup_section() {
+        let mgr = ConnectionManager::new();
+        let working_dir = PathBuf::from("/tmp/reuse-ownership");
+        insert_fake_connection(
+            &mgr,
+            "owned-by-existing",
+            AgentType::ClaudeCode,
+            Some(working_dir.clone()),
+            EventEmitter::Noop,
+        )
+        .await;
+        let state = mgr.get_state("owned-by-existing").await.unwrap();
+        state.write().await.external_id = Some("ext-owned".into());
+
+        let (connection_id, reused) = mgr
+            .spawn_agent_with_reuse(
+                AgentType::ClaudeCode,
+                Some(working_dir.to_string_lossy().to_string()),
+                Some("ext-owned".into()),
+                BTreeMap::new(),
+                "test-window".into(),
+                EventEmitter::Noop,
+                None,
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(connection_id, "owned-by-existing");
+        assert!(reused);
     }
 
     #[tokio::test]

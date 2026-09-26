@@ -568,6 +568,10 @@ pub enum WorkTaskChange {
 /// broadcast — clients not showing the dashboard simply ignore it.
 pub const TOKEN_USAGE_SYNC_PROGRESS_EVENT: &str = "token-usage-sync://progress";
 
+/// An MCP queue choice is handed to the target tab's existing in-memory
+/// message queue; no second backend queue is created.
+pub const SESSION_MESSAGE_QUEUED_EVENT: &str = "session-message://queued";
+
 /// Unified event emission: serializes the payload exactly once and dispatches
 /// the shared `Arc<Value>` to both the Tauri webview and the web broadcaster.
 pub fn emit_event(emitter: &EventEmitter, event: &str, payload: impl Serialize) {
