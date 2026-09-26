@@ -190,8 +190,8 @@ describe("window zoom keys", () => {
 
   it("walks one rung per repeat without dropping a step", () => {
     // All three land in one act(), so no passive effect gets to run between
-    // them. Reading the level from an effect-synced ref would step 100 → 110
-    // three times over and lose two rungs.
+    // them. Reading the level from an effect-synced ref would repeat 100 → 110
+    // for every event and lose two rungs.
     startAt(100)
     const setItem = renderZoom()
 
@@ -201,7 +201,7 @@ describe("window zoom keys", () => {
       keydown("=", { repeat: true })
     })
 
-    expect(currentZoomPx()).toBe("24px") // 150%
+    expect(currentZoomPx()).toBe("19.2px") // 120%
     expect(zoomWrites(setItem)).toBe(3)
   })
 
