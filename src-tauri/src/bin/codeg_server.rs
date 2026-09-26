@@ -527,10 +527,12 @@ async fn async_main(
             Arc::new(codeg_lib::acp::manager::ConnectionManagerQuestionLookup {
                 manager: Arc::new(state.connection_manager.clone_ref()),
             }),
-            Arc::new(codeg_lib::commands::session_info::DbSessionInfoLookup::new(
+            Arc::new(codeg_lib::commands::session_info::DbSessionInfoLookup::new_with_messaging(
                 Arc::new(codeg_lib::db::AppDatabase {
                     conn: state.db.conn.clone(),
                 }),
+                Arc::new(state.connection_manager.clone_ref()),
+                state.data_dir.clone(),
             )),
             Arc::new(codeg_lib::work_task::EngineWorkTaskTools),
             Arc::new(codeg_lib::commands::chat_authoring::DbChatAuthoring::new(
