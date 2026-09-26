@@ -108,6 +108,41 @@ pub struct SessionInfo {
     pub note: Option<String>,
 }
 
+/// Outcome of a `send_session_message` request. Failures stay structured so
+/// the companion can surface an actionable reason without turning a target
+/// session lookup problem into an opaque broker error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMessageOutcome {
+    pub accepted: bool,
+    pub session_id: i32,
+    pub status: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+impl SessionMessageOutcome {
+    pub fn accepted(session_id: i32) -> Self {
+        Self {
+            accepted: true,
+            session_id,
+            status: "accepted".into(),
+            message: format!("Message accepted by session #{session_id}; its next agent turn is queued."),
+            error_code: None,
+        }
+    }
+
+    pub fn failed(session_id: i32, error_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            accepted: false,
+            session_id,
+            status: "failed".into(),
+            message: message.into(),
+            error_code: Some(error_code.into()),
+        }
+    }
+}
+
 impl SessionInfo {
     /// A "no session matches this id" outcome — the id was well-formed but no
     /// non-deleted conversation row exists for it.
@@ -124,10 +159,11 @@ impl SessionInfo {
     }
 }
 
-/// Listener-facing access to resolve a session by its codeg conversation id. The
-/// production impl (`crate::commands::session_info::DbSessionInfoLookup`) reads
-/// the DB + parses the on-disk transcript; tests use an in-memory stub. Mirrors
-/// [`crate::acp::feedback::SessionFeedbackAccess`] and
+/// Listener-facing access to resolve a session by its codeg conversation id or
+/// deliver a message to it. The production impl
+/// (`crate::commands::session_info::DbSessionInfoLookup`) reads the DB + parses
+/// the on-disk transcript and owns the live ACP send path; tests use an
+/// in-memory stub. Mirrors [`crate::acp::feedback::SessionFeedbackAccess`] and
 /// [`crate::acp::question::SessionQuestionAccess`].
 #[async_trait]
 pub trait SessionInfoAccess: Send + Sync {
@@ -136,6 +172,22 @@ pub trait SessionInfoAccess: Send + Sync {
     /// most recent compacted turns (capped at [`MAX_SESSION_MESSAGES`]). A
     /// missing / deleted id yields [`SessionInfo::not_found`].
     async fn resolve(&self, session_id: i32, max_messages: u32) -> SessionInfo;
+
+    /// Deliver a normal user prompt to an existing conversation. The default
+    /// keeps read-only test/runtime implementations source-compatible while
+    /// making the write capability explicit for production wiring.
+    async fn send_message(
+        &self,
+        session_id: i32,
+        _parent_connection_id: &str,
+        _message: String,
+    ) -> SessionMessageOutcome {
+        SessionMessageOutcome::failed(
+            session_id,
+            "session_messaging_unavailable",
+            "Sending messages to sessions is unavailable in this process.",
+        )
+    }
 }
 
 /// The hot-swappable feature config read at MCP injection time. Kept tiny and
