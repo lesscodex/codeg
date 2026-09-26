@@ -10,6 +10,12 @@ pub enum AcpError {
     Protocol(String),
     #[error("agent process exited unexpectedly")]
     ProcessExited,
+    /// A caller that targeted a persisted conversation found that the live
+    /// connection changed agent-session identity before its prompt was queued.
+    /// The prompt is rejected before enqueue so it cannot land in another
+    /// conversation.
+    #[error("target session identity changed before prompt delivery")]
+    SessionIdentityMismatch,
     /// A prompt arrived while this connection already had a turn in flight.
     /// The connection loop processes one turn at a time; a second concurrent
     /// prompt (e.g. two co-controlling clients sending near-simultaneously)
@@ -133,6 +139,7 @@ impl AcpError {
             Self::InitializeTimeout => Some("initialize_timeout"),
             Self::ProbeTimedOut => Some("probe_timed_out"),
             Self::ProcessExited => Some("process_exited"),
+            Self::SessionIdentityMismatch => Some("session_identity_mismatch"),
             Self::TurnInProgress => Some("turn_in_progress"),
             Self::NoActiveTurn => Some("no_active_turn"),
             Self::FeedbackDisabled => Some("feedback_disabled"),

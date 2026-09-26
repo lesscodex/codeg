@@ -4,12 +4,13 @@
 //!
 //! The companion speaks newline-delimited JSON-RPC 2.0 on stdio:
 //! one request → one response per line, with concurrent dispatch so
-//! `notifications/cancelled` can race an in-flight `tools/call`. It exposes up
-//! to six tools — `delegate_to_agent` (async; returns a `task_id` ack),
+//! `notifications/cancelled` can race an in-flight `tools/call`. It exposes
+//! feature-gated tools — `delegate_to_agent` (async; returns a `task_id` ack),
 //! `get_delegation_status` (poll/long-poll for the result), `cancel_delegation`,
 //! `check_user_feedback` (pull the user's mid-turn steering notes),
-//! `ask_user_question` (block on a multiple-choice card), and `get_session_info`
-//! (resolve a referenced session by id) — whose schemas are embedded at compile
+//! `ask_user_question` (block on a multiple-choice card), `get_session_info`
+//! (resolve a referenced session by id), and `send_session_message` (deliver a
+//! prompt to an existing session) — whose schemas are embedded at compile
 //! time from [`TOOL_SCHEMA_JSON`] and gated by the `--features` groups (delegation
 //! / feedback / ask / sessions). `submit_result` (the `result` group of a
 //! `codeg-cli --output-schema` run) is the one tool not embedded: its input
@@ -59,17 +60,19 @@ use crate::acp::delegation::transport::{
     client_create_automation_round_trip, client_create_work_task_round_trip,
     client_feedback_round_trip, client_list_assistants_round_trip, client_ping,
     client_result_schema_round_trip, client_resume_task_round_trip, client_round_trip,
-    client_session_round_trip, client_status_round_trip, client_submit_result_round_trip,
-    client_task_complete_round_trip, client_task_progress_round_trip, BrokerAskRequest,
-    BrokerBrowserActRequest, BrokerBrowserCaptureRequest, BrokerBrowserConsoleRequest,
-    BrokerBrowserEvalRequest, BrokerBrowserSnapshotRequest, BrokerBrowserTabOpRequest,
-    BrokerBrowserTabsRequest, BrokerCancelRequest, BrokerCancelTaskRequest,
-    BrokerCommitFeedbackRequest, BrokerComputerActRequest, BrokerComputerAppsRequest,
-    BrokerComputerCaptureRequest, BrokerComputerClipboardRequest, BrokerComputerLaunchRequest,
-    BrokerComputerSnapshotRequest, BrokerComputerVerifyRequest, BrokerComputerWindowsRequest,
-    BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest, BrokerFeedbackRequest,
-    BrokerListAssistantsRequest, BrokerRequest, BrokerResponse, BrokerResultSchemaRequest,
-    BrokerResumeTaskRequest, BrokerSessionRequest, BrokerStatusRequest, BrokerSubmitResultRequest,
+    client_session_message_round_trip, client_session_round_trip, client_status_round_trip,
+    client_submit_result_round_trip, client_task_complete_round_trip,
+    client_task_progress_round_trip, BrokerAskRequest, BrokerBrowserActRequest,
+    BrokerBrowserCaptureRequest, BrokerBrowserConsoleRequest, BrokerBrowserEvalRequest,
+    BrokerBrowserSnapshotRequest, BrokerBrowserTabOpRequest, BrokerBrowserTabsRequest,
+    BrokerCancelRequest, BrokerCancelTaskRequest, BrokerCommitFeedbackRequest,
+    BrokerComputerActRequest, BrokerComputerAppsRequest, BrokerComputerCaptureRequest,
+    BrokerComputerClipboardRequest, BrokerComputerLaunchRequest, BrokerComputerSnapshotRequest,
+    BrokerComputerVerifyRequest, BrokerComputerWindowsRequest, BrokerCreateAutomationRequest,
+    BrokerCreateWorkTaskRequest, BrokerFeedbackRequest, BrokerListAssistantsRequest,
+    BrokerRequest, BrokerResponse, BrokerResultSchemaRequest, BrokerResumeTaskRequest,
+    BrokerSessionMessageRequest, BrokerSessionRequest, BrokerStatusRequest,
+    BrokerSubmitResultRequest,
     BrokerTaskCompleteRequest, BrokerTaskProgressRequest,
 };
 use crate::acp::delegation::assistants::{roster_for_schema, AssistantRosterEntry};
@@ -281,7 +284,7 @@ impl CompanionFeatures {
         match name {
             "check_user_feedback" => self.feedback,
             "ask_user_question" => self.ask,
-            "get_session_info" => self.sessions,
+            "get_session_info" | "send_session_message" => self.sessions,
             "task_progress" | "task_complete" => self.tasks,
             "submit_result" => self.result,
             "create_automation" => self.automations,
@@ -1110,6 +1113,47 @@ async fn build_tools_call_spawn(
             let round_trip =
                 Box::pin(async move { client_session_round_trip(&socket, &req).await });
             register_and_spawn(inflight, id, None, round_trip, render_session_result).await
+        }
+        "send_session_message" => {
+            let session_id = match parse_session_id(&arguments) {
+                Some(id) => id,
+                None => {
+                    return LineAction::Respond(err(
+                        id,
+                        -32602,
+                        "send_session_message requires an integer `session_id` \
+                         (the number in the codeg://session/<id> reference)",
+                    ));
+                }
+            };
+            let Some(message) = arguments
+                .get("message")
+                .and_then(|v| v.as_str())
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+            else {
+                return LineAction::Respond(err(
+                    id,
+                    -32602,
+                    "send_session_message requires a non-empty string `message`",
+                ));
+            };
+            let req = BrokerSessionMessageRequest {
+                token: ctx.token.clone(),
+                session_id,
+                message,
+            };
+            let round_trip = Box::pin(async move {
+                client_session_message_round_trip(&socket, &req).await
+            });
+            register_and_spawn(
+                inflight,
+                id,
+                None,
+                round_trip,
+                render_session_message_result,
+            )
+            .await
         }
         "browser_list_tabs" => {
             let req = BrokerBrowserTabsRequest {
@@ -2200,6 +2244,29 @@ pub fn render_session_result(outcome: &Value) -> Value {
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false,
+        "structuredContent": outcome.clone(),
+    })
+}
+
+/// Map the `send_session_message` round-trip outcome into an MCP tool result.
+/// The target-side failure remains a structured, actionable tool error; a
+/// transport failure is handled by `register_and_spawn` as a JSON-RPC error.
+pub fn render_session_message_result(outcome: &Value) -> Value {
+    let accepted = outcome
+        .get("accepted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let text = outcome
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or(if accepted {
+            "Message accepted by the target session."
+        } else {
+            "The target session did not accept the message."
+        });
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": !accepted,
         "structuredContent": outcome.clone(),
     })
 }
@@ -5535,7 +5602,7 @@ mod tests {
             dispatch_for_test(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await,
         );
         assert!(!names.contains(&"get_session_info".to_string()));
-        // sessions feature on → exactly that one tool surfaces.
+        // sessions feature on → both session tools surface.
         let names = list_tool_names(
             dispatch_with_features(
                 SESSIONS_ONLY,
@@ -5543,7 +5610,13 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(names, vec!["get_session_info".to_string()]);
+        assert_eq!(
+            names,
+            vec![
+                "get_session_info".to_string(),
+                "send_session_message".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -5605,6 +5678,81 @@ mod tests {
         let e = resp.error.unwrap();
         assert_eq!(e.code, -32602);
         assert!(e.message.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn send_session_message_spawns_when_valid_and_enabled() {
+        let line = json!({
+            "jsonrpc": "2.0", "id": 34, "method": "tools/call",
+            "params": { "name": "send_session_message", "arguments": {
+                "session_id": 214, "message": "continue from the last checkpoint"
+            }}
+        })
+        .to_string();
+        assert!(matches!(
+            dispatch_with_features(SESSIONS_ONLY, &line).await,
+            LineAction::Spawn(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_session_message_rejects_missing_or_empty_arguments() {
+        for args in [
+            json!({}),
+            json!({ "session_id": 214 }),
+            json!({ "session_id": 214, "message": "   " }),
+            json!({ "session_id": "bad", "message": "hello" }),
+        ] {
+            let line = json!({
+                "jsonrpc": "2.0", "id": 35, "method": "tools/call",
+                "params": { "name": "send_session_message", "arguments": args }
+            })
+            .to_string();
+            let resp = unwrap_respond(dispatch_with_features(SESSIONS_ONLY, &line).await);
+            let e = resp.error.expect("invalid arguments must be rejected");
+            assert_eq!(e.code, -32602);
+            assert!(e.message.contains("session_id") || e.message.contains("message"));
+        }
+    }
+
+    #[tokio::test]
+    async fn send_session_message_rejected_as_unknown_when_feature_off() {
+        let line = json!({
+            "jsonrpc": "2.0", "id": 36, "method": "tools/call",
+            "params": { "name": "send_session_message", "arguments": {
+                "session_id": 214, "message": "hello"
+            }}
+        })
+        .to_string();
+        let resp = unwrap_respond(dispatch_for_test(&line).await);
+        let e = resp.error.unwrap();
+        assert_eq!(e.code, -32602);
+        assert!(e.message.contains("unknown tool"));
+    }
+
+    #[test]
+    fn render_session_message_result_distinguishes_acceptance_and_failure() {
+        let accepted = render_session_message_result(&json!({
+            "accepted": true,
+            "session_id": 214,
+            "status": "accepted",
+            "message": "Message accepted by session #214; its next agent turn has started."
+        }));
+        assert_eq!(accepted["isError"], false);
+        assert!(accepted["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("accepted"));
+
+        let failed = render_session_message_result(&json!({
+            "accepted": false,
+            "session_id": 214,
+            "status": "failed",
+            "error_code": "target_busy",
+            "message": "The target session already has a turn in progress."
+        }));
+        assert_eq!(failed["isError"], true);
+        assert_eq!(failed["structuredContent"]["error_code"], "target_busy");
     }
 
     // -- chat authoring: feature gating + parsing + rendering ---------------

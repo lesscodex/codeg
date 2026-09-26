@@ -1311,10 +1311,12 @@ mod tauri_app {
                             },
                         ),
                         std::sync::Arc::new(
-                            crate::commands::session_info::DbSessionInfoLookup::new(
+                            crate::commands::session_info::DbSessionInfoLookup::new_with_messaging(
                                 std::sync::Arc::new(db::AppDatabase {
                                     conn: db_conn.clone(),
                                 }),
+                                std::sync::Arc::new(cm_state.clone_ref()),
+                                effective_data_dir.clone(),
                             ),
                         ),
                         std::sync::Arc::new(crate::work_task::EngineWorkTaskTools),

@@ -36,8 +36,8 @@ use crate::acp::delegation::transport::{
     BrokerFeedbackRequest, BrokerListAssistantsRequest, BrokerMessage, BrokerRequest,
     BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest, BrokerResponse,
     BrokerResultSchemaRequest, BrokerResumeTaskRequest, BrokerSessionRequest,
-    BrokerStatusRequest, BrokerSubmitResultRequest, BrokerTaskCompleteRequest,
-    BrokerTaskProgressRequest,
+    BrokerSessionMessageRequest, BrokerStatusRequest, BrokerSubmitResultRequest,
+    BrokerTaskCompleteRequest, BrokerTaskProgressRequest,
 };
 use crate::acp::delegation::assistants::assistant_not_found_message;
 use crate::acp::delegation::types::{
@@ -50,7 +50,7 @@ use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
 use crate::acp::scratch_dir::{is_inside_sweep_scope, SUN_PATH_CAP};
 use crate::acp::chat_authoring::{AuthoringContext, AuthoringOutcome, ChatAuthoringAccess};
 use crate::acp::result_tool::ResultToolAccess;
-use crate::acp::session_info::{SessionInfo, SessionInfoAccess};
+use crate::acp::session_info::{SessionInfo, SessionInfoAccess, SessionMessageOutcome};
 use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
 use serde_json::Value;
 
@@ -576,6 +576,9 @@ impl DelegationListener {
                 // and there is nothing to tear down on cancel.
                 session_response(self.process_session_info(req).await)?
             }
+            BrokerMessage::SessionMessage(req) => {
+                session_message_response(self.process_session_message(req).await)?
+            }
             BrokerMessage::TaskProgress(req) => {
                 task_ack_response(self.process_task_progress(req).await)?
             }
@@ -911,6 +914,33 @@ impl DelegationListener {
         }
         self.session_info
             .resolve(req.session_id, req.max_messages.unwrap_or(0))
+            .await
+    }
+
+    /// Validate the per-launch token, then deliver a normal user prompt to the
+    /// persisted target conversation. Unlike `get_session_info`, failures are
+    /// actionable because this arm performs a write and must never silently
+    /// switch to another conversation.
+    async fn process_session_message(
+        &self,
+        req: BrokerSessionMessageRequest,
+    ) -> SessionMessageOutcome {
+        let Some(entry) = self.tokens.lookup(&req.token).await else {
+            return SessionMessageOutcome::failed(
+                req.session_id,
+                "authentication_failed",
+                "The codeg-mcp token is invalid or expired; relaunch the target session and try again.",
+            );
+        };
+        if req.message.trim().is_empty() {
+            return SessionMessageOutcome::failed(
+                req.session_id,
+                "invalid_message",
+                "The target message must contain non-whitespace text.",
+            );
+        }
+        self.session_info
+            .send_message(req.session_id, &entry.parent_connection_id, req.message)
             .await
     }
 
@@ -1395,6 +1425,17 @@ fn session_response(info: SessionInfo) -> std::io::Result<BrokerResponse> {
     })
 }
 
+/// Serialize a `send_session_message` outcome for the companion. The outcome
+/// itself carries accepted/failure state so target-side refusal remains a
+/// structured MCP tool result rather than an indistinguishable transport error.
+fn session_message_response(info: SessionMessageOutcome) -> std::io::Result<BrokerResponse> {
+    Ok(BrokerResponse {
+        outcome: serde_json::to_value(&info).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("encode: {e}"))
+        })?,
+    })
+}
+
 /// Serialize a [`BrowserTabsOutcome`] into a [`BrokerResponse`] for the
 /// `BrowserTabs` arm — the companion renders it into the `browser_list_tabs`
 /// tool result.
@@ -1869,6 +1910,7 @@ mod tests {
     struct StubSessionInfo {
         known: std::collections::HashSet<i32>,
         calls: tokio::sync::Mutex<Vec<(i32, u32)>>,
+        messages: tokio::sync::Mutex<Vec<(i32, String, String)>>,
     }
     #[async_trait]
     impl SessionInfoAccess for StubSessionInfo {
@@ -1884,6 +1926,20 @@ mod tests {
             } else {
                 SessionInfo::not_found(session_id)
             }
+        }
+
+        async fn send_message(
+            &self,
+            session_id: i32,
+            parent_connection_id: &str,
+            message: String,
+        ) -> SessionMessageOutcome {
+            self.messages.lock().await.push((
+                session_id,
+                parent_connection_id.to_string(),
+                message,
+            ));
+            SessionMessageOutcome::accepted(session_id)
         }
     }
 
@@ -3161,6 +3217,75 @@ mod tests {
         assert_eq!(resp.outcome["session_id"], 42);
         // The resolver was never consulted for an unauthenticated caller.
         assert!(session_info.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_message_valid_token_round_trips_to_target_access() {
+        let session_info = Arc::new(StubSessionInfo::default());
+        let tokens = Arc::new(TokenRegistry::default());
+        tokens
+            .register(
+                "tok".into(),
+                TokenEntry {
+                    parent_connection_id: "parent-conn".into(),
+                    working_dir: PathBuf::from("/tmp"),
+                },
+            )
+            .await;
+        let listener = make_session_listener(tokens, session_info.clone());
+
+        let (mut client, mut server) = duplex(8 * 1024);
+        let server_task = tokio::spawn(async move {
+            listener.serve_one(&mut server).await.unwrap();
+        });
+        write_frame(
+            &mut client,
+            &BrokerMessage::SessionMessage(BrokerSessionMessageRequest {
+                token: "tok".into(),
+                session_id: 42,
+                message: "continue the fix".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let response: BrokerResponse = read_frame(&mut client).await.unwrap();
+        server_task.await.unwrap();
+
+        assert_eq!(response.outcome["accepted"], true);
+        assert_eq!(response.outcome["session_id"], 42);
+        assert_eq!(
+            session_info.messages.lock().await.as_slice(),
+            &[(42, "parent-conn".to_string(), "continue the fix".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_message_invalid_token_is_actionable_and_does_not_send() {
+        let session_info = Arc::new(StubSessionInfo::default());
+        let listener = make_session_listener(
+            Arc::new(TokenRegistry::default()),
+            session_info.clone(),
+        );
+        let (mut client, mut server) = duplex(8 * 1024);
+        let server_task = tokio::spawn(async move {
+            listener.serve_one(&mut server).await.unwrap();
+        });
+        write_frame(
+            &mut client,
+            &BrokerMessage::SessionMessage(BrokerSessionMessageRequest {
+                token: "bogus".into(),
+                session_id: 42,
+                message: "do not send".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let response: BrokerResponse = read_frame(&mut client).await.unwrap();
+        server_task.await.unwrap();
+
+        assert_eq!(response.outcome["accepted"], false);
+        assert_eq!(response.outcome["error_code"], "authentication_failed");
+        assert!(session_info.messages.lock().await.is_empty());
     }
 
     /// A valid token resolves the caller's conversation + working dir and hands

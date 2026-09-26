@@ -7464,7 +7464,11 @@ async fn compose_prompt(
         blocks.push(PromptInputBlock::Text {
             text: format!(
                 "—— Work task context ——\nYou are working inside a dedicated git worktree for \
-                 this task{branch}. {licence}\nIf the `task_progress` and `task_complete` tools \
+                 this task{branch}. If this task only asks you to send or forward a message to a \
+                 `[Session title](codeg://session/<id>)` reference and `send_session_message` is \
+                 available, call that tool with the referenced id and requested message, then \
+                 finish this work task; do not inspect or change this repository for such a \
+                 delivery-only task. {licence}\nIf the `task_progress` and `task_complete` tools \
                  are available to you, report milestones with `task_progress` as you go, and \
                  call `task_complete` once right before you finish (verdict `success`, \
                  `needs_review`, or `blocked`, plus a short summary).",
@@ -9107,6 +9111,27 @@ mod tests {
         assert!(texts(&working)
             .iter()
             .any(|t| t.contains("Commit to the current branch as you like")));
+    }
+
+    #[tokio::test]
+    async fn work_task_guard_routes_session_delivery_to_the_mcp_tool() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let blocks = compose_prompt(
+            &task_config(),
+            &task_row(),
+            &LaunchMode::Fresh,
+            &WorkTaskFolderSettings::default(),
+            false,
+            &db.conn,
+        )
+        .await
+        .expect("compose");
+        let guard = texts(&blocks)
+            .into_iter()
+            .find(|text| text.starts_with("—— Work task context ——"))
+            .expect("guard block");
+        assert!(guard.contains("send_session_message"));
+        assert!(guard.contains("do not inspect or change this repository"));
     }
 
     /// A report-deliverable task (forge plan-first / review-only)

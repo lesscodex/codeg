@@ -202,6 +202,28 @@
     }
   },
   {
+    "name": "send_session_message",
+    "description": "Forward the caller session's requested text to an existing Codeg conversation referenced by codeg://session/<id> and start its next agent turn. This is Codeg's conversation-forwarding tool, distinct from Codex's `send_message` for inter-agent communication.\n\nAUTHORIZATION: Use this tool when the user has authorized forwarding or communicating with another Codeg conversation for a specific matter. That authorization covers the messages and follow-up exchanges needed for the same matter within the user-established scope. Obtain user authorization when taking up a new matter or expanding that scope.\n\nThe receiving conversation sees a server-added marker that this was forwarded through MCP, not typed directly by its user. WHEN TO CALL: if the user mentions a session as `[Session title](codeg://session/<number>)` and asks you to send, forward, relay, or post a message to it (including requests such as `向它发送信息`), that is an explicit instruction to call this tool. Extract `<number>` as `session_id` and pass only the requested message text as `message`. Do not treat the linked session title as a task to implement, and do not execute or answer the requested message in the current session. When the target and message are clear, call this tool directly without calling `get_session_info` first. The message is accepted into that conversation and starts its next agent turn; this tool returns immediately without waiting for the target agent to finish. It never creates a new conversation or falls back to session/new.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "message"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "integer",
+          "description": "The number in the target conversation's codeg://session/<number> link (the Codeg conversation id used by get_session_info)."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The non-empty original text to forward from the caller session. Pass only the requested message body; the server adds the MCP-forwarding/source marker and derives the source session identity."
+        }
+      }
+    }
+  },
+  {
     "name": "create_automation",
     "description": "Save a codeg Automation: a reusable job — a prompt plus a target project — that codeg runs on a cron schedule (or on demand) without anyone present. Use it when the user asks for work that should REPEAT or happen at a TIME rather than right now: 'every morning', 'each Monday', 'nightly', 'every 30 minutes', 'before standup', 'set up a recurring …'. Do NOT use it for work the user wants done in this conversation — just do that work. Each run starts a fresh headless session in its own worktree with no memory of this chat, so `prompt` must be completely self-contained: state the goal, the relevant paths, and what a finished run looks like. Creating an automation does not run it now; the tool returns the id and the next fire time so you can tell the user when it will first go off. The user can edit, disable, run, or delete it on the Automations page.",
     "inputSchema": {
