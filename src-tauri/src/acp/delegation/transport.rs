@@ -36,6 +36,9 @@
 //!     `notifications/cancelled`, targeting an in-flight `delegate_to_agent`
 //!     or `resume_delegation` call by `external_handle`; gets a `Value::Null`
 //!     ack.
+//!   * `session_message` — [`BrokerSessionMessageRequest`] for
+//!     `send_session_message`; returns an accepted/failure outcome after the
+//!     target prompt is enqueued, without waiting for the target turn.
 //!
 //! All arms are authenticated by the same per-launch `token`.
 //!
@@ -203,6 +206,19 @@ pub struct BrokerSessionRequest {
     /// [`crate::acp::session_info::MAX_SESSION_MESSAGES`] by the resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_messages: Option<u32>,
+}
+
+/// Send a normal user-authored prompt to an existing Codeg conversation.
+/// Backs the `send_session_message` MCP tool. The listener resolves the target
+/// conversation from persisted data and returns as soon as the prompt is
+/// accepted by the target connection; it does not wait for the agent turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerSessionMessageRequest {
+    pub token: String,
+    /// Codeg's internal conversation PK from `codeg://session/<id>`.
+    pub session_id: i32,
+    /// Non-empty user-authored text to deliver as a normal user turn.
+    pub message: String,
 }
 
 /// Report a progress milestone for the work task driving the parent session.
@@ -445,6 +461,7 @@ pub enum BrokerMessage {
     CommitFeedback(BrokerCommitFeedbackRequest),
     Ask(BrokerAskRequest),
     SessionInfo(BrokerSessionRequest),
+    SessionMessage(BrokerSessionMessageRequest),
     TaskProgress(BrokerTaskProgressRequest),
     TaskComplete(BrokerTaskCompleteRequest),
     ResultSchema(BrokerResultSchemaRequest),
@@ -649,6 +666,15 @@ pub async fn client_session_round_trip(
     req: &BrokerSessionRequest,
 ) -> io::Result<BrokerResponse> {
     message_round_trip(socket_path, &BrokerMessage::SessionInfo(req.clone())).await
+}
+
+/// Dispatch a `send_session_message` request and read the structured
+/// accepted/failure outcome.
+pub async fn client_session_message_round_trip(
+    socket_path: &str,
+    req: &BrokerSessionMessageRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::SessionMessage(req.clone())).await
 }
 
 /// Dispatch a `task_progress` report and read back the `{ recorded }` ack.
@@ -976,6 +1002,26 @@ mod tests {
                 assert_eq!(req.max_messages, Some(20));
             }
             other => panic!("expected SessionInfo variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_session_message_round_trip_in_memory() {
+        let (mut a, mut b) = duplex(8 * 1024);
+        let msg = BrokerMessage::SessionMessage(BrokerSessionMessageRequest {
+            token: "tok".into(),
+            session_id: 42,
+            message: "please continue".into(),
+        });
+        write_frame(&mut a, &msg).await.unwrap();
+        let got: BrokerMessage = read_frame(&mut b).await.unwrap();
+        match got {
+            BrokerMessage::SessionMessage(req) => {
+                assert_eq!(req.token, "tok");
+                assert_eq!(req.session_id, 42);
+                assert_eq!(req.message, "please continue");
+            }
+            other => panic!("expected SessionMessage variant, got {other:?}"),
         }
     }
 

@@ -380,7 +380,10 @@ mod tests {
 
         assert_eq!(message.method(), "session/fork");
         assert_eq!(message.params()["lastTurnId"], "codex-turn-7");
-        assert_eq!(message.params()["_meta"], point.to_meta());
+        assert_eq!(
+            message.params()["_meta"],
+            serde_json::Value::Object(point.to_meta())
+        );
     }
 
     #[test]
