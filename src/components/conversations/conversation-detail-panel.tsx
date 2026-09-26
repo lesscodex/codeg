@@ -95,6 +95,7 @@ import { isDesktop } from "@/lib/platform"
 import { ChromeReserve } from "@/components/layout/chrome-reserve"
 import { leftChromeReserve, rightChromeReserve } from "@/lib/window-chrome"
 import {
+  acknowledgeSessionMessageQueue,
   acpFork,
   acpStopAsyncTask,
   createChatConversation,
@@ -115,6 +116,12 @@ import { deliverQueuedSteer } from "@/lib/queued-steer"
 import { toErrorMessage } from "@/lib/app-error"
 import { blockingPrompts } from "@/lib/blocking-prompts"
 import { notify } from "@/lib/notify"
+import { subscribe } from "@/lib/platform"
+import {
+  SESSION_MESSAGE_QUEUED_EVENT,
+  type SessionMessageQueuedEvent,
+} from "@/lib/session-message-events"
+import { acceptSessionMessageQueued } from "@/lib/session-message-queue"
 import {
   claimRuntimeSession,
   getConversationIdByExternalIdFromStore,
@@ -731,6 +738,35 @@ const ConversationTabView = memo(function ConversationTabView({
   useEffect(() => {
     isViewerRef.current = conn.isViewer
   }, [conn.isViewer])
+  // MCP queue choices enter the same in-memory queue as the composer. The
+  // backend only forwards the request; this tab owns the existing FIFO,
+  // turn-end drain, and busy-race handling.
+  useEffect(() => {
+    let active = true
+    let unsubscribe: (() => void) | undefined
+    void subscribe<SessionMessageQueuedEvent>(
+      SESSION_MESSAGE_QUEUED_EVENT,
+      (payload) => {
+        if (!active) return
+        acceptSessionMessageQueued(
+          payload,
+          dbConvIdRef.current,
+          isViewerRef.current,
+          mqEnqueue,
+          acknowledgeSessionMessageQueue
+        )
+      }
+    )
+      .then((off) => {
+        if (active) unsubscribe = off
+        else off()
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+      unsubscribe?.()
+    }
+  }, [mqEnqueue])
   // The tab's connection is keyed by a stable tabId, but agent switching is
   // async — and for a not-installed target, connect()'s preflight throws BEFORE
   // it tears down the old connection. So `conn` can still describe the PREVIOUS

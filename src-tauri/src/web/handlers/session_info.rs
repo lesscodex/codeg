@@ -40,3 +40,22 @@ pub async fn set_session_info_settings(
     .await?;
     Ok(Json(saved))
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcknowledgeSessionMessageQueueParams {
+    pub request_id: String,
+    pub conversation_id: i32,
+}
+
+pub async fn acknowledge_session_message_queue(
+    Json(params): Json<AcknowledgeSessionMessageQueueParams>,
+) -> Result<Json<bool>, AppCommandError> {
+    Ok(Json(
+        crate::acp::session_info::acknowledge_session_message_queue(
+            &params.request_id,
+            params.conversation_id,
+        )
+        .await,
+    ))
+}

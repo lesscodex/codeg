@@ -1320,10 +1320,12 @@ mod tauri_app {
                             },
                         ),
                         std::sync::Arc::new(
-                            crate::commands::session_info::DbSessionInfoLookup::new(
+                            crate::commands::session_info::DbSessionInfoLookup::new_with_messaging(
                                 std::sync::Arc::new(db::AppDatabase {
                                     conn: db_conn.clone(),
                                 }),
+                                std::sync::Arc::new(cm_state.clone_ref()),
+                                effective_data_dir.clone(),
                             ),
                         ),
                         std::sync::Arc::new(crate::work_task::EngineWorkTaskTools),
@@ -2125,6 +2127,7 @@ mod tauri_app {
                 question_commands::set_question_settings,
                 session_info_commands::get_session_info_settings,
                 session_info_commands::set_session_info_settings,
+                session_info_commands::acknowledge_session_message_queue,
                 chat_authoring_commands::get_chat_authoring_settings,
                 chat_authoring_commands::set_chat_authoring_settings,
                 crate::commands::browser_tools::get_browser_tools_settings,

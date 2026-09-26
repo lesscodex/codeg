@@ -13,6 +13,7 @@
 //!     injection time via [`SessionInfoRuntimeConfig`]. Persist + apply + broadcast
 //!     follows the exact shape of the ask-question / feedback toggles.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,15 +23,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::acp::session_info::{
     SessionInfo, SessionInfoAccess, SessionInfoConfig, SessionInfoRuntimeConfig, SessionMessageItem,
-    SessionMessages, MAX_SESSION_MESSAGES,
+    SessionMessageAction, SessionMessageOutcome, SessionMessageQueued, SessionMessages,
+    MAX_SESSION_MESSAGES,
 };
+use crate::acp::delegation::spawner::ConnectionSpawner;
+use crate::acp::manager::{ConnectionManager, ConnectionManagerSpawner};
+use crate::acp::types::ConnectionStatus;
 use crate::app_error::AppCommandError;
 use crate::commands::conversations::get_folder_conversation_core;
 use crate::db::service::{app_metadata_service, conversation_service, folder_service};
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
 use crate::models::message::{ContentBlock, MessageTurn, TurnRole};
-use crate::web::event_bridge::{emit_event, EventEmitter, SESSION_INFO_SETTINGS_CHANGED_EVENT};
+use crate::web::event_bridge::{
+    emit_event, EventEmitter, SESSION_INFO_SETTINGS_CHANGED_EVENT,
+    SESSION_MESSAGE_QUEUED_EVENT,
+};
 
 /// Upper bound on a single compacted turn's text. Keeps one chatty turn from
 /// dominating the budget; longer text is truncated with an ellipsis marker.
@@ -68,6 +76,59 @@ const PARSE_TIMEOUT: Duration = Duration::from_secs(8);
 /// degrades to metadata-only immediately.
 const MAX_CONCURRENT_PARSES: usize = 4;
 
+const MCP_FORWARD_SEPARATOR: &str = "\n\n---\n\n";
+
+async fn current_parent_conversation_id(
+    manager: &ConnectionManager,
+    parent_connection_id: &str,
+) -> Option<i32> {
+    let state = manager.get_state(parent_connection_id).await?;
+    let state = state.read().await;
+    state.conversation_id
+}
+
+fn format_mcp_forwarded_message(source_conversation_id: Option<i32>, message: String) -> String {
+    let source = source_conversation_id.map_or_else(
+        || "Source session ID unavailable".to_string(),
+        |conversation_id| format!("Source session: codeg://session/{conversation_id}"),
+    );
+    format!(
+        "[Forwarded from another session through MCP; not typed directly by the user in this receiving conversation. {source}]{}{}",
+        MCP_FORWARD_SEPARATOR, message
+    )
+}
+
+async fn queue_session_message(
+    emitter: &EventEmitter,
+    session_id: i32,
+    message: String,
+) -> SessionMessageOutcome {
+    let (request_id, receiver) =
+        crate::acp::session_info::register_session_message_queue_handoff(session_id).await;
+    emit_event(
+        emitter,
+        SESSION_MESSAGE_QUEUED_EVENT,
+        SessionMessageQueued {
+            request_id: request_id.clone(),
+            conversation_id: session_id,
+            message,
+        },
+    );
+    if crate::acp::session_info::wait_for_session_message_queue_handoff(&request_id, receiver)
+        .await
+    {
+        SessionMessageOutcome::queued(session_id)
+    } else {
+        SessionMessageOutcome::failed(
+            session_id,
+            "queue_unavailable",
+            format!(
+                "The target conversation #{session_id} did not confirm receipt by its existing message queue; no message was accepted."
+            ),
+        )
+    }
+}
+
 /// Production [`SessionInfoAccess`]: resolves a session by codeg conversation id
 /// against the DB + on-disk transcript. Wraps an `Arc<AppDatabase>` (like
 /// `DbDepthLookup` / `DbChildStatusLookup`) plus a semaphore bounding concurrent
@@ -77,6 +138,17 @@ pub struct DbSessionInfoLookup {
     /// Limits concurrent `get_folder_conversation_core` parses (see
     /// [`MAX_CONCURRENT_PARSES`]).
     parse_limit: Arc<tokio::sync::Semaphore>,
+    /// Optional live-connection access. Read-only callers/tests can keep using
+    /// `new`; production wiring uses `new_with_messaging` for
+    /// `send_session_message`.
+    manager: Option<Arc<ConnectionManager>>,
+    data_dir: Option<Arc<PathBuf>>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveTarget {
+    connection_id: String,
+    allow_unlinked: bool,
 }
 
 impl DbSessionInfoLookup {
@@ -84,7 +156,148 @@ impl DbSessionInfoLookup {
         Self {
             db,
             parse_limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PARSES)),
+            manager: None,
+            data_dir: None,
         }
+    }
+
+    pub fn new_with_messaging(
+        db: Arc<AppDatabase>,
+        manager: Arc<ConnectionManager>,
+        data_dir: PathBuf,
+    ) -> Self {
+        Self {
+            db,
+            parse_limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PARSES)),
+            manager: Some(manager),
+            data_dir: Some(Arc::new(data_dir)),
+        }
+    }
+
+    async fn find_live_target(
+        &self,
+        manager: &ConnectionManager,
+        session_id: i32,
+        agent_type: AgentType,
+        external_id: &str,
+        workspace_path: &str,
+        allow_busy: bool,
+    ) -> Result<Option<LiveTarget>, SessionMessageOutcome> {
+        if let Some(connection_id) = manager.find_connection_by_conversation_id(session_id).await
+        {
+            match Self::validate_connection(
+                manager,
+                &connection_id,
+                session_id,
+                agent_type,
+                external_id,
+                workspace_path,
+                allow_busy,
+            )
+            .await
+            {
+                Ok(allow_unlinked) => {
+                    return Ok(Some(LiveTarget {
+                        connection_id,
+                        allow_unlinked,
+                    }))
+                }
+                Err(outcome)
+                    if outcome.error_code.as_deref() == Some("connection_unavailable") => {}
+                Err(outcome) => return Err(outcome),
+            }
+        }
+
+        if let Some(connection_id) = manager
+            .find_connection_by_external_id(external_id, agent_type)
+            .await
+        {
+            match Self::validate_connection(
+                manager,
+                &connection_id,
+                session_id,
+                agent_type,
+                external_id,
+                workspace_path,
+                allow_busy,
+            )
+            .await
+            {
+                Ok(allow_unlinked) => {
+                    return Ok(Some(LiveTarget {
+                        connection_id,
+                        allow_unlinked,
+                    }))
+                }
+                Err(outcome)
+                    if outcome.error_code.as_deref() == Some("connection_unavailable") => {}
+                Err(outcome) => return Err(outcome),
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn validate_connection(
+        manager: &ConnectionManager,
+        connection_id: &str,
+        session_id: i32,
+        agent_type: AgentType,
+        external_id: &str,
+        workspace_path: &str,
+        allow_busy: bool,
+    ) -> Result<bool, SessionMessageOutcome> {
+        let Some(state) = manager.get_state(connection_id).await else {
+            return Err(SessionMessageOutcome::failed(
+                session_id,
+                "connection_unavailable",
+                format!(
+                    "The live connection for session #{session_id} disappeared before delivery; try again."
+                ),
+            ));
+        };
+        let state = state.read().await;
+        if matches!(
+            state.status,
+            ConnectionStatus::Disconnected | ConnectionStatus::Error
+        ) {
+            return Err(SessionMessageOutcome::failed(
+                session_id,
+                "connection_unavailable",
+                format!(
+                    "The agent connection for session #{session_id} is no longer usable; Codeg will try to resume it."
+                ),
+            ));
+        }
+        if state.agent_type != agent_type
+            || state.external_id.as_deref() != Some(external_id)
+            || state.working_dir.as_deref() != Some(Path::new(workspace_path))
+            || state
+                .conversation_id
+                .is_some_and(|bound_id| bound_id != session_id)
+        {
+            return Err(SessionMessageOutcome::failed(
+                session_id,
+                "identity_mismatch",
+                format!(
+                    "The live connection does not identify the requested agent session #{session_id}; no message was sent."
+                ),
+            ));
+        }
+        if state.turn_in_flight && !allow_busy {
+            let steering_available =
+                state.native_steering_available || state.feedback_tool_available;
+            return Err(SessionMessageOutcome::failed_with_steering(
+                session_id,
+                "target_busy",
+                format!(
+                    "The target session #{session_id} already has an agent turn in progress; ask the user whether to queue the message or steer it into the current turn. Steering is {} for this runtime.",
+                    if steering_available { "available" } else { "unavailable" }
+                ),
+                steering_available,
+            ));
+        }
+        Ok(state.conversation_id.is_none())
     }
 }
 
@@ -172,6 +385,371 @@ impl SessionInfoAccess for DbSessionInfoLookup {
             }
         }
         info
+    }
+
+    async fn send_message(
+        &self,
+        session_id: i32,
+        parent_connection_id: &str,
+        message: String,
+    ) -> SessionMessageOutcome {
+        self.send_message_with_action(
+            session_id,
+            parent_connection_id,
+            message,
+            SessionMessageAction::Send,
+        )
+        .await
+    }
+
+    async fn send_message_with_action(
+        &self,
+        session_id: i32,
+        parent_connection_id: &str,
+        message: String,
+        action: SessionMessageAction,
+    ) -> SessionMessageOutcome {
+        let Some(manager) = self.manager.clone() else {
+            return SessionMessageOutcome::failed(
+                session_id,
+                "session_messaging_unavailable",
+                "Sending messages to sessions is unavailable in this process.",
+            );
+        };
+        let Some(data_dir) = self.data_dir.clone() else {
+            return SessionMessageOutcome::failed(
+                session_id,
+                "session_messaging_unavailable",
+                "The session resume runtime is not configured; relaunch the Codeg process and try again.",
+            );
+        };
+        let forwarded_message = format_mcp_forwarded_message(
+            current_parent_conversation_id(&manager, parent_connection_id).await,
+            message,
+        );
+
+        let summary = match conversation_service::get_by_id(&self.db.conn, session_id).await {
+            Ok(summary) => summary,
+            Err(_) => {
+                return SessionMessageOutcome::failed(
+                    session_id,
+                    "target_not_found",
+                    format!(
+                        "No non-deleted Codeg conversation matches session #{session_id}; verify the codeg://session/<id> reference."
+                    ),
+                )
+            }
+        };
+        let Some(external_id) = summary
+            .external_id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return SessionMessageOutcome::failed(
+                session_id,
+                "missing_external_session",
+                format!(
+                    "Session #{session_id} has no persisted external agent session id and cannot be resumed safely."
+                ),
+            );
+        };
+        let Some(folder) = folder_service::get_folder_by_id(&self.db.conn, summary.folder_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return SessionMessageOutcome::failed(
+                session_id,
+                "target_workspace_missing",
+                format!(
+                    "Session #{session_id}'s workspace folder is missing; restore the folder before sending a message."
+                ),
+            );
+        };
+
+        let target = match self
+            .find_live_target(
+                &manager,
+                session_id,
+                summary.agent_type,
+                &external_id,
+                &folder.path,
+                !matches!(action, SessionMessageAction::Send),
+            )
+            .await
+        {
+            Ok(Some(target)) => (target.connection_id, None, target.allow_unlinked),
+            Ok(None) => {
+                let spawner = ConnectionManagerSpawner {
+                    manager: manager.clone(),
+                    db: self.db.clone(),
+                    data_dir,
+                };
+                let resumed = match spawner
+                    .spawn_for_resume(
+                        parent_connection_id,
+                        summary.agent_type,
+                        Some(folder.path.clone()),
+                        &external_id,
+                        None,
+                        std::collections::BTreeMap::new(),
+                    )
+                    .await
+                {
+                    Ok(spawned) => spawned,
+                    Err(error) => {
+                        return SessionMessageOutcome::failed(
+                            session_id,
+                            "resume_failed",
+                            format!(
+                                "Could not resume session #{session_id} in {}: {error}. Verify the agent installation and workspace, then try again.",
+                                folder.path
+                            ),
+                        )
+                    }
+                };
+                let lease = if resumed.reused {
+                    None
+                } else {
+                    manager.prompt_connection_lease(&resumed.connection_id).await
+                };
+                let allow_unlinked = match Self::validate_connection(
+                    &manager,
+                    &resumed.connection_id,
+                    session_id,
+                    summary.agent_type,
+                    &external_id,
+                    &folder.path,
+                    !matches!(action, SessionMessageAction::Send),
+                )
+                .await
+                {
+                    Ok(allow_unlinked) => allow_unlinked,
+                    Err(outcome) => {
+                        if let Some(lease) = lease.as_ref() {
+                            let _ = manager
+                                .disconnect_if_unclaimed(&resumed.connection_id, lease)
+                                .await;
+                        }
+                        return outcome;
+                    }
+                };
+                (resumed.connection_id, lease, allow_unlinked)
+            }
+            Err(outcome) => return outcome,
+        };
+
+        let (connection_id, lease, allow_unlinked) = target;
+        if !matches!(action, SessionMessageAction::Send) {
+            if let Err(outcome) = Self::validate_connection(
+                &manager,
+                &connection_id,
+                session_id,
+                summary.agent_type,
+                &external_id,
+                &folder.path,
+                true,
+            )
+            .await
+            {
+                if let Some(lease) = lease.as_ref() {
+                    let _ = manager
+                        .disconnect_if_unclaimed(&connection_id, lease)
+                        .await;
+                }
+                return outcome;
+            }
+        }
+        match action {
+            SessionMessageAction::Queue => {
+                let Some((_, emitter)) = manager.get_state_and_emitter(&connection_id).await else {
+                    if let Some(lease) = lease.as_ref() {
+                        let _ = manager
+                            .disconnect_if_unclaimed(&connection_id, lease)
+                            .await;
+                    }
+                    return SessionMessageOutcome::failed(
+                        session_id,
+                        "connection_unavailable",
+                        format!(
+                            "The live connection for session #{session_id} disappeared before queueing; try again."
+                        ),
+                    );
+                };
+                return queue_session_message(
+                    &emitter,
+                    session_id,
+                    forwarded_message.clone(),
+                )
+                .await;
+            }
+            SessionMessageAction::Steer => {
+                let Some((state, _)) = manager.get_state_and_emitter(&connection_id).await else {
+                    if let Some(lease) = lease.as_ref() {
+                        let _ = manager
+                            .disconnect_if_unclaimed(&connection_id, lease)
+                            .await;
+                    }
+                    return SessionMessageOutcome::failed(
+                        session_id,
+                        "connection_unavailable",
+                        format!(
+                            "The live connection for session #{session_id} disappeared before steering; try again."
+                        ),
+                    );
+                };
+                let steering_available = {
+                    let state = state.read().await;
+                    state.native_steering_available || state.feedback_tool_available
+                };
+                if !steering_available {
+                    if let Some(lease) = lease.as_ref() {
+                        let _ = manager
+                            .disconnect_if_unclaimed(&connection_id, lease)
+                            .await;
+                    }
+                    return SessionMessageOutcome::failed_with_steering(
+                        session_id,
+                        "steering_unavailable",
+                        format!(
+                            "Session #{session_id}'s current runtime has no working steering channel; no message was delivered."
+                        ),
+                        false,
+                    );
+                }
+                let steer = manager
+                    .submit_feedback(&connection_id, forwarded_message.clone(), None)
+                    .await;
+                return match steer {
+                    Ok(_) => SessionMessageOutcome::steered(session_id),
+                    Err(error) => {
+                        if matches!(&error, crate::acp::error::AcpError::NoActiveTurn) {
+                            if let Some((_, emitter)) =
+                                manager.get_state_and_emitter(&connection_id).await
+                            {
+                                return queue_session_message(
+                                    &emitter,
+                                    session_id,
+                                    forwarded_message.clone(),
+                                )
+                                .await;
+                            }
+                        }
+                        if let Some(lease) = lease.as_ref() {
+                            let _ = manager
+                                .disconnect_if_unclaimed(&connection_id, lease)
+                                .await;
+                        }
+                        SessionMessageOutcome::failed_with_steering(
+                            session_id,
+                            error.code().unwrap_or("delivery_failed"),
+                            format!(
+                                "The message was not steered into session #{session_id}: {error}."
+                            ),
+                            steering_available,
+                        )
+                    }
+                };
+            }
+            SessionMessageAction::Send => {}
+        }
+        let send = manager
+            .send_prompt_linked_for_session(
+                &self.db,
+                &connection_id,
+                vec![crate::acp::types::PromptInputBlock::Text {
+                    text: forwarded_message,
+                }],
+                summary.folder_id,
+                session_id,
+                crate::acp::manager::PromptSessionIdentity {
+                    agent_type: summary.agent_type,
+                    external_id: external_id.clone(),
+                    working_dir: PathBuf::from(&folder.path),
+                    conversation_id: session_id,
+                    allow_unlinked,
+                },
+            )
+            .await;
+        match send {
+            Ok(Some(bound_id)) if bound_id == session_id => {
+                SessionMessageOutcome::accepted(session_id)
+            }
+            Ok(Some(bound_id)) => {
+                if let Some(lease) = lease.as_ref() {
+                    let _ = manager
+                        .disconnect_if_unclaimed(&connection_id, lease)
+                        .await;
+                }
+                SessionMessageOutcome::failed(
+                    session_id,
+                    "identity_mismatch",
+                    format!(
+                        "The target connection bound the prompt to session #{bound_id} instead of session #{session_id}; no message was accepted in the requested conversation."
+                    ),
+                )
+            }
+            Ok(None) => {
+                if let Some(lease) = lease.as_ref() {
+                    let _ = manager
+                        .disconnect_if_unclaimed(&connection_id, lease)
+                        .await;
+                }
+                SessionMessageOutcome::failed(
+                    session_id,
+                    "identity_mismatch",
+                    format!(
+                        "The target connection accepted no conversation binding for session #{session_id}; no message was accepted."
+                    ),
+                )
+            }
+            Err(error) => {
+                if let Some(lease) = lease.as_ref() {
+                    let _ = manager
+                        .disconnect_if_unclaimed(&connection_id, lease)
+                        .await;
+                }
+                let (code, detail) = if matches!(
+                    &error,
+                    crate::acp::error::AcpError::TurnInProgress
+                ) {
+                    ("target_busy", error.to_string())
+                } else if matches!(
+                    &error,
+                    crate::acp::error::AcpError::SessionIdentityMismatch
+                ) {
+                    ("identity_mismatch", error.to_string())
+                } else {
+                    (error.code().unwrap_or("delivery_failed"), error.to_string())
+                };
+                if code == "target_busy" {
+                    let steering_available = if let Some(state) =
+                        manager.get_state(&connection_id).await
+                    {
+                        let state = state.read().await;
+                        state.native_steering_available || state.feedback_tool_available
+                    } else {
+                        false
+                    };
+                    SessionMessageOutcome::failed_with_steering(
+                        session_id,
+                        code,
+                        format!(
+                            "The message was not accepted by session #{session_id}: {detail}. Ask the user whether to queue it or steer it into the current turn; retry only after the user chooses."
+                        ),
+                        steering_available,
+                    )
+                } else {
+                    SessionMessageOutcome::failed(
+                        session_id,
+                        code,
+                        format!(
+                            "The message was not accepted by session #{session_id}: {detail}. Retry when the target agent is connected."
+                        ),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -434,10 +1012,27 @@ pub async fn set_session_info_settings(
     }
 }
 
+/// Acknowledge that the target owner composer synchronously inserted an MCP
+/// queue hand-off into its existing FIFO. The acknowledgement is transient and
+/// never stores the message itself.
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acknowledge_session_message_queue(
+    request_id: String,
+    conversation_id: i32,
+) -> Result<bool, AppCommandError> {
+    Ok(crate::acp::session_info::acknowledge_session_message_queue(
+        &request_id,
+        conversation_id,
+    )
+    .await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::connection::ConnectionCommand;
     use chrono::Utc;
+    use sea_orm::{ActiveModelTrait, Set};
     use crate::models::message::ContentBlock;
 
     fn turn(role: TurnRole, blocks: Vec<ContentBlock>) -> MessageTurn {
@@ -669,5 +1264,281 @@ mod tests {
         let info = lookup.resolve(999_999, 10).await;
         assert!(!info.found);
         assert_eq!(info.session_id, 999_999);
+    }
+
+    #[tokio::test]
+    async fn send_message_without_production_wiring_fails_closed() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let lookup = DbSessionInfoLookup::new(Arc::new(AppDatabase {
+            conn: db.conn.clone(),
+        }));
+        let outcome = lookup
+            .send_message(42, "parent", "hello".into())
+            .await;
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.error_code.as_deref(), Some("session_messaging_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn queue_handoff_returns_success_only_after_existing_queue_ack() {
+        let broadcaster = Arc::new(crate::web::event_bridge::WebEventBroadcaster::new());
+        let mut events = broadcaster.subscribe();
+        let emitter = Arc::new(EventEmitter::test_web_only(broadcaster));
+        let task = tokio::spawn(async move {
+            queue_session_message(emitter.as_ref(), 42, "queued body".into()).await
+        });
+
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.channel, SESSION_MESSAGE_QUEUED_EVENT);
+        let request_id = event.payload["request_id"].as_str().unwrap().to_string();
+        assert_eq!(event.payload["conversation_id"], 42);
+        assert!(
+            crate::acp::session_info::acknowledge_session_message_queue(&request_id, 42).await
+        );
+
+        let outcome = task.await.unwrap();
+        assert!(outcome.accepted);
+        assert_eq!(outcome.status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn queue_handoff_without_a_receiver_fails_instead_of_claiming_success() {
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            queue_session_message(&EventEmitter::Noop, 42, "lost body".into()),
+        )
+        .await
+        .expect("queue hand-off should fail within its ack deadline");
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.error_code.as_deref(), Some("queue_unavailable"));
+    }
+
+    #[test]
+    fn mcp_forwarded_message_includes_known_source_link() {
+        let body = "keep this body\nexactly as written";
+        let marked = format_mcp_forwarded_message(Some(214), body.into());
+
+        assert!(marked.contains("Forwarded from another session through MCP"));
+        assert!(marked.contains("codeg://session/214"));
+        assert!(marked.ends_with(body));
+        assert!(marked.contains(MCP_FORWARD_SEPARATOR));
+    }
+
+    #[test]
+    fn mcp_forwarded_message_marks_unknown_source() {
+        let body = "original body with codeg://session/999 in it";
+        let marked = format_mcp_forwarded_message(None, body.into());
+
+        assert!(marked.contains("Forwarded from another session through MCP"));
+        assert!(marked.contains("Source session ID unavailable"));
+        assert!(marked.ends_with(body));
+        assert!(marked.contains(MCP_FORWARD_SEPARATOR));
+    }
+
+    #[tokio::test]
+    async fn send_message_delivers_to_original_live_conversation() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let workspace = "/tmp/session-message-success";
+        let folder_id = crate::db::test_helpers::seed_folder(&db, workspace).await;
+        let row = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut active: crate::db::entities::conversation::ActiveModel = row.clone().into();
+        active.external_id = Set(Some("agent-session-1".into()));
+        active.update(&db.conn).await.unwrap();
+
+        let manager = ConnectionManager::new();
+        let mut commands = manager
+            .insert_test_connection_live(
+                "target-connection",
+                AgentType::ClaudeCode,
+                Some(PathBuf::from(workspace)),
+                EventEmitter::Noop,
+            )
+            .await;
+        let _parent_commands = manager
+            .insert_test_connection_live(
+                "parent-connection",
+                AgentType::ClaudeCode,
+                Some(PathBuf::from("/tmp/session-message-parent")),
+                EventEmitter::Noop,
+            )
+            .await;
+        let parent_state = manager.get_state("parent-connection").await.unwrap();
+        parent_state.write().await.conversation_id = Some(214);
+        let state = manager.get_state("target-connection").await.unwrap();
+        {
+            let mut state = state.write().await;
+            state.external_id = Some("agent-session-1".into());
+            state.conversation_id = Some(row.id);
+            state.folder_id = Some(folder_id);
+        }
+
+        let lookup = DbSessionInfoLookup::new_with_messaging(
+            Arc::new(AppDatabase {
+                conn: db.conn.clone(),
+            }),
+            Arc::new(manager.clone_ref()),
+            PathBuf::from("/tmp"),
+        );
+        let original_message = "continue the fix\nwith exact spacing";
+        let outcome = lookup
+            .send_message(row.id, "parent-connection", original_message.into())
+            .await;
+        assert!(outcome.accepted, "message should be accepted: {outcome:?}");
+        assert_eq!(outcome.session_id, row.id);
+
+        match commands.recv().await.unwrap() {
+            ConnectionCommand::Prompt { blocks, .. } => {
+                assert_eq!(
+                    blocks,
+                    vec![crate::acp::types::PromptInputBlock::Text {
+                        text: format_mcp_forwarded_message(Some(214), original_message.into())
+                    }]
+                );
+            }
+            _ => panic!("expected prompt command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_busy_target_before_delivery() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let workspace = "/tmp/session-message-busy";
+        let folder_id = crate::db::test_helpers::seed_folder(&db, workspace).await;
+        let row = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut active: crate::db::entities::conversation::ActiveModel = row.clone().into();
+        active.external_id = Set(Some("agent-session-busy".into()));
+        active.update(&db.conn).await.unwrap();
+
+        let manager = ConnectionManager::new();
+        let _commands = manager
+            .insert_test_connection_live(
+                "busy-connection",
+                AgentType::ClaudeCode,
+                Some(PathBuf::from(workspace)),
+                EventEmitter::Noop,
+            )
+            .await;
+        let state = manager.get_state("busy-connection").await.unwrap();
+        {
+            let mut state = state.write().await;
+            state.external_id = Some("agent-session-busy".into());
+            state.conversation_id = Some(row.id);
+            state.folder_id = Some(folder_id);
+            state.turn_in_flight = true;
+        }
+
+        let lookup = DbSessionInfoLookup::new_with_messaging(
+            Arc::new(AppDatabase {
+                conn: db.conn.clone(),
+            }),
+            Arc::new(manager.clone_ref()),
+            PathBuf::from("/tmp"),
+        );
+        let outcome = lookup.send_message(row.id, "parent", "second turn".into()).await;
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.error_code.as_deref(), Some("target_busy"));
+    }
+
+    #[tokio::test]
+    async fn steer_no_active_turn_fallback_cannot_claim_queue_success() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let workspace = "/tmp/session-message-steer-fallback";
+        let folder_id = crate::db::test_helpers::seed_folder(&db, workspace).await;
+        let row = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut active: crate::db::entities::conversation::ActiveModel = row.clone().into();
+        active.external_id = Set(Some("agent-session-steer-fallback".into()));
+        active.update(&db.conn).await.unwrap();
+
+        let manager = ConnectionManager::new();
+        manager
+            .insert_test_connection(
+                "steer-fallback-connection",
+                AgentType::ClaudeCode,
+                Some(PathBuf::from(workspace)),
+                EventEmitter::Noop,
+            )
+            .await;
+        let state = manager
+            .get_state("steer-fallback-connection")
+            .await
+            .unwrap();
+        {
+            let mut state = state.write().await;
+            state.external_id = Some("agent-session-steer-fallback".into());
+            state.conversation_id = Some(row.id);
+            state.folder_id = Some(folder_id);
+            state.feedback_tool_available = true;
+            state.turn_in_flight = false;
+        }
+
+        let lookup = DbSessionInfoLookup::new_with_messaging(
+            Arc::new(AppDatabase {
+                conn: db.conn.clone(),
+            }),
+            Arc::new(manager.clone_ref()),
+            PathBuf::from("/tmp"),
+        );
+        let outcome = lookup
+            .send_message_with_action(
+                row.id,
+                "parent",
+                "steer fallback".into(),
+                SessionMessageAction::Steer,
+            )
+            .await;
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.error_code.as_deref(), Some("queue_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn resume_fallback_session_new_is_rejected_by_identity_check() {
+        let manager = ConnectionManager::new();
+        manager
+            .insert_test_connection(
+                "fallback-connection",
+                AgentType::ClaudeCode,
+                Some(PathBuf::from("/tmp/fallback")),
+                EventEmitter::Noop,
+            )
+            .await;
+        let state = manager.get_state("fallback-connection").await.unwrap();
+        state.write().await.external_id = Some("session/new-id".into());
+
+        let result = DbSessionInfoLookup::validate_connection(
+            &manager,
+            "fallback-connection",
+            214,
+            AgentType::ClaudeCode,
+            "persisted-session-id",
+            "/tmp/fallback",
+            false,
+        )
+        .await;
+        let outcome = result.expect_err("session/new identity must never be accepted");
+        assert_eq!(outcome.error_code.as_deref(), Some("identity_mismatch"));
     }
 }

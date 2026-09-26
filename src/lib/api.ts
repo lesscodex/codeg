@@ -5917,6 +5917,18 @@ export async function submitSessionFeedback(
   })
 }
 
+/** Confirm that the target owner composer inserted an MCP hand-off into its
+ * existing FIFO. The backend treats this as a transient delivery ack. */
+export async function acknowledgeSessionMessageQueue(
+  requestId: string,
+  conversationId: number
+): Promise<boolean> {
+  return getTransport().call("acknowledge_session_message_queue", {
+    requestId,
+    conversationId,
+  })
+}
+
 // ─── Ask-user-question settings ────────────────────────────────────────────
 
 /** Mirror of Rust `QuestionSettings` (default ON). */

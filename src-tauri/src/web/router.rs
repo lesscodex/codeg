@@ -147,6 +147,10 @@ pub fn build_router_with_srn(
             post(handlers::session_info::set_session_info_settings),
         )
         .route(
+            "/acknowledge_session_message_queue",
+            post(handlers::session_info::acknowledge_session_message_queue),
+        )
+        .route(
             "/get_browser_tools_settings",
             post(handlers::browser_tools::get_browser_tools_settings),
         )
