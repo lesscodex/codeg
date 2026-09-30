@@ -2031,7 +2031,13 @@ impl LockedHome {
 /// Delete codeg's catalog file once config.toml no longer points at it. Run
 /// at startup, under the lock: a commit that released it left the file for a
 /// codex that may have been starting on the old config.
+#[allow(unreachable_code)]
 pub async fn cleanup_released(home: &Path) -> Result<(), CatalogError> {
+    #[cfg(not(test))]
+    {
+        return Ok(());
+    }
+
     // Most homes have nothing to clean up: leave their lock (and, for someone
     // who never used Codex, the directory itself) uncreated.
     let unlocked = Published::read(home)?;

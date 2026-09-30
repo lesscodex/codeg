@@ -203,6 +203,7 @@ export function AddModelProviderDialog({
             </label>
             <Input
               id="add-mp-name"
+              disabled={agentType === "codex"}
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t("providerNamePlaceholder")}
@@ -215,6 +216,7 @@ export function AddModelProviderDialog({
             </label>
             <Input
               id="add-mp-url"
+              disabled={agentType === "codex"}
               value={apiUrl}
               onChange={(e) => setApiUrl(e.target.value)}
               placeholder={t("apiUrlPlaceholder")}
@@ -227,6 +229,7 @@ export function AddModelProviderDialog({
             </label>
             <Input
               id="add-mp-key"
+              disabled={agentType === "codex"}
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
@@ -265,6 +268,7 @@ export function AddModelProviderDialog({
                 value={codexModel}
                 onChange={setCodexModel}
                 endpoint={codexEndpoint}
+                readOnly
               />
             </div>
           ) : (
@@ -295,7 +299,10 @@ export function AddModelProviderDialog({
           >
             {t("cancel")}
           </Button>
-          <Button onClick={handleSubmit} disabled={loading}>
+          <Button
+            onClick={handleSubmit}
+            disabled={agentType === "codex" || loading}
+          >
             {loading && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />}
             {t("create")}
           </Button>

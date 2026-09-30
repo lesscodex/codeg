@@ -219,20 +219,45 @@ pub(crate) struct UserCommit {
 /// Prepare and commit a user's change. A result built on something that
 /// changed before the commit (a bind, a provider edit, another codeg
 /// publishing) is prepared once more; a second miss is reported.
+#[cfg(not(test))]
+fn disabled_user_commit() -> UserCommit {
+    UserCommit {
+        outcome: CommitOutcome {
+            changed: Vec::new(),
+            config_toml: String::new(),
+            auth_json: String::new(),
+            meta: None,
+        },
+        fetch_error: None,
+    }
+}
+
+#[allow(unreachable_code)]
 pub(crate) async fn commit_user_change(
     db: &AppDatabase,
     change: &CodexUserChange,
 ) -> Result<UserCommit, CatalogError> {
+    #[cfg(not(test))]
+    {
+        return Ok(disabled_user_commit());
+    }
+
     let home = crate::commands::acp::codex_home_dir();
     commit_user_change_at(db, &home, &EndpointCache::default(), change).await
 }
 
+#[allow(unreachable_code)]
 pub(crate) async fn commit_user_change_at(
     db: &AppDatabase,
     home: &Path,
     cache: &EndpointCache,
     change: &CodexUserChange,
 ) -> Result<UserCommit, CatalogError> {
+    #[cfg(not(test))]
+    {
+        return Ok(disabled_user_commit());
+    }
+
     let mut fetch = change.fetch;
     for _ in 0..2 {
         let owner = current_owner(db).await?;

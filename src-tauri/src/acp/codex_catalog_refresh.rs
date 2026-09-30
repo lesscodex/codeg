@@ -191,12 +191,21 @@ fn published_binding(p: &Published) -> Binding {
 
 /// Bring what is published in line with the current codex and, as `fetch`
 /// allows, the provider — from the published state alone.
+#[allow(unreachable_code)]
 pub async fn refresh_published(
     home: &Path,
     origin: Origin,
     fetch: FetchPolicy,
     cache: &EndpointCache,
 ) -> Result<RefreshReport, CatalogError> {
+    #[cfg(not(test))]
+    {
+        return Ok(RefreshReport {
+            outcome: RefreshOutcome::Skipped("configuration_writes_disabled"),
+            fetch_error: None,
+        });
+    }
+
     let skipped = |why| RefreshReport {
         outcome: RefreshOutcome::Skipped(why),
         fetch_error: None,
@@ -297,10 +306,16 @@ pub enum PrelaunchOutcome {
 /// Make sure the codex about to run loads what is published, offline. Only
 /// a launch after a codex change does any work; launches that arrive
 /// together check once (the gate) and the rest find it done.
+#[allow(unreachable_code)]
 pub async fn prelaunch_check(
     home: &Path,
     cache: &EndpointCache,
 ) -> Result<PrelaunchOutcome, CatalogError> {
+    #[cfg(not(test))]
+    {
+        return Ok(PrelaunchOutcome::Fine);
+    }
+
     // Most launches: codeg publishes nothing here, and nothing was cut short.
     if !home.join(catalog::SOURCE_REL).exists() && !commit::interrupted(home) {
         return Ok(PrelaunchOutcome::Fine);
