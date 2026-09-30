@@ -1,17 +1,7 @@
-/**
- * The Codex card's saves now leave the keys codeg manages to the backend:
- * - an edit of the model list does not patch `model_catalog_json` or root
- *   `model` into config.toml, and the save carries the text the draft was
- *   loaded from, so a hand edit of either can be told apart;
- * - switching to the subscription drops the provider source from the list
- *   and leaves the provider table for the backend to prune;
- * - a save refused for a catalog reason says so in the user's language.
- */
-import { render, screen, waitFor, within } from "@testing-library/react"
-import userEvent from "@testing-library/user-event"
+/** The Codex card exposes its configuration as read-only downstream state. */
+import { render, screen, within } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { toast } from "sonner"
 
 import enMessages from "@/i18n/messages/en.json"
 import {
@@ -115,13 +105,15 @@ async function openPanel(agent: AcpAgentInfo) {
   await screen.findByText("config.toml (native)", { selector: "label" })
 }
 
-async function save(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole("button", { name: "Save Codex Config" }))
-  await waitFor(() => expect(acpUpdateAgentConfig).toHaveBeenCalledTimes(1))
-  return vi.mocked(acpUpdateAgentConfig).mock.calls[0][1]
+function expectCodexWritesBlocked() {
+  expect(
+    screen.getByRole("button", { name: "Save Codex Config" })
+  ).toBeDisabled()
+  expect(acpUpdateAgentConfig).not.toHaveBeenCalled()
+  expect(acpUpdateAgentEnv).not.toHaveBeenCalled()
 }
 
-describe("AcpAgentSettings — Codex saves and the keys codeg manages", () => {
+describe("AcpAgentSettings — Codex configuration is read-only", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(listModelProviders).mockResolvedValue([])
@@ -130,124 +122,82 @@ describe("AcpAgentSettings — Codex saves and the keys codeg manages", () => {
     vi.mocked(codexBundledCatalog).mockResolvedValue(OFFICIALS)
   })
 
-  it("leaves model_catalog_json and root model to the backend once the list is customized", async () => {
-    const user = userEvent.setup()
+  it("shows the official model list without allowing removals", async () => {
     await openPanel(codexAgent())
     const row = (await screen.findByText("GPT-5.5 mini")).closest(
       "[data-model-row]"
     ) as HTMLElement
-    await user.click(within(row).getByRole("button", { name: "Remove" }))
-
-    const saved = await save(user)
-    expect(saved.codex_config_toml).toBe(CONFIG)
-    expect(saved.codex_config_toml_baseline).toBe(CONFIG)
-    expect(JSON.parse(saved.codex_model_catalog ?? "")).toEqual({
-      customs: [],
-      excludedOfficials: ["gpt-5.5-mini"],
-    })
-  })
-
-  it("keeps the star as root model while codex's own list is in use", async () => {
-    const user = userEvent.setup()
-    await openPanel(codexAgent())
-    const row = (await screen.findByText("GPT-5.5 mini")).closest(
-      "[data-model-row]"
-    ) as HTMLElement
-    await user.click(
+    expect(
       within(row).getByRole("button", { name: "Set as default" })
-    )
-
-    const saved = await save(user)
-    expect(saved.codex_config_toml?.trimEnd()).toBe(
-      CONFIG.replace('model = "gpt-5.5"', 'model = "gpt-5.5-mini"').trimEnd()
-    )
-    expect(saved.codex_config_toml_baseline).toBe(CONFIG)
+    ).toBeDisabled()
+    expect(within(row).queryByRole("button", { name: "Remove" })).toBeNull()
+    expectCodexWritesBlocked()
   })
 
-  it("does not count a star placed before the list was customized as a hand edit", async () => {
-    const user = userEvent.setup()
+  it("keeps the configured default model visible without allowing changes", async () => {
     await openPanel(codexAgent())
-    const mini = (await screen.findByText("GPT-5.5 mini")).closest(
+    const row = (await screen.findByText("GPT-5.5")).closest(
       "[data-model-row]"
     ) as HTMLElement
-    await user.click(
-      within(mini).getByRole("button", { name: "Set as default" })
-    )
-    // Now customized: root `model` is the backend's again.
-    await user.click(within(mini).getByRole("button", { name: "Remove" }))
-
-    const saved = await save(user)
-    expect(saved.codex_config_toml).toContain('model = "gpt-5.5"')
-    expect(saved.codex_config_toml).not.toContain("gpt-5.5-mini")
-    expect(saved.codex_config_toml_baseline).toBe(CONFIG)
+    expect(screen.getByText("GPT-5.5 mini")).toBeInTheDocument()
+    expect(
+      within(row).getByRole("button", { name: "Default model" })
+    ).toBeDisabled()
+    expectCodexWritesBlocked()
   })
 
-  it("keeps an edit made while the save was in flight", async () => {
-    const user = userEvent.setup()
-    let finish: (n: number) => void = () => {}
-    vi.mocked(acpUpdateAgentConfig).mockReturnValue(
-      new Promise((resolve) => {
-        finish = resolve
+  it("shows a customized model entry without allowing edits", async () => {
+    await openPanel(
+      codexAgent({
+        codex_model_catalog: JSON.stringify({
+          customs: [{ slug: "custom-model", base: "gpt-5.5" }],
+        }),
       })
     )
-    await openPanel(codexAgent())
-    await user.click(screen.getByRole("button", { name: "Save Codex Config" }))
-    await waitFor(() => expect(acpUpdateAgentConfig).toHaveBeenCalledTimes(1))
+    const customSlug = screen.getByDisplayValue("custom-model")
+    expect(customSlug).toHaveAttribute("readonly")
+    for (const button of screen.getAllByRole("button", {
+      name: "Set as default",
+    })) {
+      expect(button).toBeDisabled()
+    }
+    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull()
+    expectCodexWritesBlocked()
+  })
 
+  it("shows config.toml without allowing edits or saves", async () => {
+    await openPanel(codexAgent())
     const label = screen.getByText("config.toml (native)", {
       selector: "label",
     })
     const editor = within(label.parentElement as HTMLElement).getByRole(
       "textbox"
-    ) as HTMLTextAreaElement
-    await user.type(editor, "# typed meanwhile")
-    finish(0)
-    // The save's reseed reads the agent list again; the typed text stays.
-    await waitFor(() => expect(acpListAgents).toHaveBeenCalledTimes(2))
-    await waitFor(() => expect(toast.success).toHaveBeenCalled())
-    expect(editor.value).toContain("# typed meanwhile")
+    )
+    expect(editor).toHaveValue(CONFIG)
+    expect(editor).toHaveAttribute("readonly")
+    expectCodexWritesBlocked()
   })
 
-  it("drops the provider source when switching to the subscription", async () => {
-    const user = userEvent.setup()
+  it("shows Auth Mode without allowing authentication changes", async () => {
     await openPanel(
       codexAgent({
         codex_model_catalog: '{"customs":[],"catalog":{"format":"native"}}',
       })
     )
     const label = screen.getByText("Auth Mode", { selector: "label" })
-    await user.click(
+    expect(
       within(label.parentElement as HTMLElement).getByRole("combobox")
-    )
-    const list = await screen.findByRole("listbox")
-    await user.click(
-      within(list).getByRole("option", { name: "Official Subscription" })
-    )
-
-    const saved = await save(user)
-    // `model_provider` goes; the table stays for the backend to judge.
-    expect(saved.codex_config_toml).not.toContain('model_provider = "codeg"')
-    expect(saved.codex_config_toml).toContain("[model_providers.codeg]")
-    expect(saved.codex_model_catalog ?? "").toBe("")
+    ).toBeDisabled()
+    expectCodexWritesBlocked()
   })
 
-  it("says why a save was refused, in the user's language", async () => {
-    const user = userEvent.setup()
+  it("does not expose a Codex save error path while saving is disabled", async () => {
     vi.mocked(acpUpdateAgentConfig).mockRejectedValue(
       new Error(
         'no model is left\n[codexCatalog] {"code":"no_usable_models","params":{}}'
       )
     )
     await openPanel(codexAgent())
-    await user.click(screen.getByRole("button", { name: "Save Codex Config" }))
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith(
-        "Failed to save Codex native config",
-        {
-          description:
-            "No usable models: every entry is hidden or only for ChatGPT sign-in. Keep at least one.",
-        }
-      )
-    )
+    expectCodexWritesBlocked()
   })
 })
