@@ -1127,6 +1127,7 @@ export function McpSettings() {
                   <input
                     type="checkbox"
                     checked={installAppsDraft[app.value]}
+                    disabled={app.value === "codex"}
                     onChange={(event) => {
                       setInstallAppsDraft((prev) => ({
                         ...prev,
@@ -1551,6 +1552,7 @@ export function McpSettings() {
                       <input
                         type="checkbox"
                         checked={draftAppsDraft[app.value]}
+                        disabled={app.value === "codex"}
                         onChange={(event) => {
                           setDraftAppsDraft((prev) => ({
                             ...prev,
@@ -1675,6 +1677,7 @@ export function McpSettings() {
                       <input
                         type="checkbox"
                         checked={localAppsDraft[app.value]}
+                        disabled={app.value === "codex"}
                         onChange={(event) => {
                           setLocalAppsDraft((prev) => ({
                             ...prev,

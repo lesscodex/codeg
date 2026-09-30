@@ -8763,7 +8763,11 @@ export function AcpAgentSettings() {
                               name: selectedAgent.name,
                             })
                       }
-                      disabled={selectedIsSaving || selectedGrokSaving}
+                      disabled={
+                        selectedAgent.agent_type === "codex" ||
+                        selectedIsSaving ||
+                        selectedGrokSaving
+                      }
                       className={cn(
                         "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
                         selectedDraft.enabled
@@ -8890,7 +8894,10 @@ export function AcpAgentSettings() {
                       }}
                       placeholder={"KEY1=VALUE1\nKEY2=VALUE2"}
                       className="min-h-24"
-                      disabled={selectedGrokSaving}
+                      disabled={
+                        selectedAgent.agent_type === "codex" ||
+                        selectedGrokSaving
+                      }
                     />
                     <div className="pointer-events-none absolute inset-0 rounded-md bg-background/10 backdrop-blur-[3px] transition-opacity duration-200 group-focus-within:opacity-0" />
                   </div>
@@ -8920,7 +8927,10 @@ export function AcpAgentSettings() {
                           ),
                         }))
                       }}
-                      disabled={selectedGrokSaving}
+                      disabled={
+                        selectedAgent.agent_type === "codex" ||
+                        selectedGrokSaving
+                      }
                       aria-label={t("hostTools.label")}
                     />
                   </div>
@@ -8974,7 +8984,11 @@ export function AcpAgentSettings() {
                             })
                           })
                       }}
-                      disabled={selectedIsSavingEnv || selectedGrokSaving}
+                      disabled={
+                        selectedAgent.agent_type === "codex" ||
+                        selectedIsSavingEnv ||
+                        selectedGrokSaving
+                      }
                     >
                       {selectedIsSavingEnv ? (
                         <>
@@ -9137,6 +9151,7 @@ export function AcpAgentSettings() {
                         {t("codex.authMode")}
                       </label>
                       <Select
+                        disabled
                         value={selectedDraft.codexAuthMode}
                         onValueChange={(value) => {
                           if (
@@ -9184,6 +9199,7 @@ export function AcpAgentSettings() {
                           )}
                         {codexLoginStatus === "idle" && (
                           <Button
+                            disabled
                             onClick={handleCodexDeviceLogin}
                             size="sm"
                             variant="outline"
@@ -9221,6 +9237,7 @@ export function AcpAgentSettings() {
                                 {codexDeviceCode.userCode}
                               </code>
                               <Button
+                                disabled
                                 size="sm"
                                 variant="ghost"
                                 className="h-7 w-7 p-0"
@@ -9241,6 +9258,7 @@ export function AcpAgentSettings() {
                               {t("codex.loginPolling")}
                             </div>
                             <Button
+                              disabled
                               size="sm"
                               variant="outline"
                               onClick={cancelCodexDeviceLogin}
@@ -9263,6 +9281,7 @@ export function AcpAgentSettings() {
                               })}
                             </p>
                             <Button
+                              disabled
                               onClick={handleCodexDeviceLogin}
                               size="sm"
                               variant="outline"
@@ -9281,6 +9300,7 @@ export function AcpAgentSettings() {
                         </label>
                         {selectedModelProviders.length > 0 ? (
                           <Select
+                            disabled
                             value={
                               selectedDraft.modelProviderId != null
                                 ? String(selectedDraft.modelProviderId)
@@ -9319,6 +9339,7 @@ export function AcpAgentSettings() {
                           {t("codex.apiUrlLabel")}
                         </label>
                         <Input
+                          disabled
                           value={selectedDraft.apiBaseUrl}
                           readOnly={
                             selectedDraft.codexAuthMode === "model_provider"
@@ -9342,6 +9363,7 @@ export function AcpAgentSettings() {
                         </label>
                         <div className="flex items-center gap-2">
                           <Input
+                            disabled
                             type={
                               showApiKeys[selectedAgent.agent_type]
                                 ? "text"
@@ -9360,6 +9382,7 @@ export function AcpAgentSettings() {
                             placeholder="sk-..."
                           />
                           <Button
+                            disabled
                             type="button"
                             variant="outline"
                             size="sm"
@@ -9392,9 +9415,7 @@ export function AcpAgentSettings() {
                         <CodexModelListEditor
                           value={selectedDraft.codexModelList}
                           onChange={handleCodexModelListChange}
-                          readOnly={
-                            selectedDraft.codexAuthMode === "model_provider"
-                          }
+                          readOnly
                           endpoint={codexCatalogEndpoint}
                         />
                         {selectedDraft.codexAuthMode === "api_key" && (
@@ -9426,6 +9447,7 @@ export function AcpAgentSettings() {
                             {t("codex.enableWebsocket")}
                           </label>
                           <Switch
+                            disabled
                             checked={selectedDraft.codexSupportsWebsockets}
                             onCheckedChange={
                               handleCodexSupportsWebsocketsChange
@@ -9449,6 +9471,7 @@ export function AcpAgentSettings() {
                           {t("codex.enableDefaultModeRequestUserInput")}
                         </label>
                         <Switch
+                          disabled
                           checked={
                             selectedDraft.codexDefaultModeRequestUserInput
                           }
@@ -9496,6 +9519,7 @@ export function AcpAgentSettings() {
                           {t("codex.approvalPolicyLabel")}
                         </label>
                         <Select
+                          disabled
                           value={
                             selectedDraft.codexApprovalPolicy ||
                             CODEX_SANDBOX_UNSET_OPTION
@@ -9560,6 +9584,7 @@ export function AcpAgentSettings() {
                                 {t(`codex.granular_${key}`)}
                               </label>
                               <Switch
+                                disabled
                                 checked={selectedDraft.codexGranular[key]}
                                 onCheckedChange={(checked) => {
                                   updateSelectedDraft((current) => ({
@@ -9582,7 +9607,7 @@ export function AcpAgentSettings() {
                           {t("codex.sandboxModeLabel")}
                         </label>
                         <Select
-                          disabled={selectedDraft.codexSandboxShadowed}
+                          disabled
                           value={
                             selectedDraft.codexSandboxMode ||
                             CODEX_SANDBOX_UNSET_OPTION
@@ -9651,6 +9676,7 @@ export function AcpAgentSettings() {
                               {t("codex.writableRootsLabel")}
                             </label>
                             <Textarea
+                              readOnly
                               className="min-h-16 font-mono text-2xs"
                               spellCheck={false}
                               value={selectedDraft.codexWritableRootsText}
@@ -9680,6 +9706,7 @@ export function AcpAgentSettings() {
                               {t("codex.networkAccessLabel")}
                             </label>
                             <Switch
+                              disabled
                               checked={selectedDraft.codexNetworkAccess}
                               onCheckedChange={(checked) => {
                                 updateSelectedDraft((current) => ({
@@ -9695,6 +9722,7 @@ export function AcpAgentSettings() {
                               {t("codex.excludeTmpdirLabel")}
                             </label>
                             <Switch
+                              disabled
                               checked={selectedDraft.codexExcludeTmpdirEnvVar}
                               onCheckedChange={(checked) => {
                                 updateSelectedDraft((current) => ({
@@ -9710,6 +9738,7 @@ export function AcpAgentSettings() {
                               {t("codex.excludeSlashTmpLabel")}
                             </label>
                             <Switch
+                              disabled
                               checked={selectedDraft.codexExcludeSlashTmp}
                               onCheckedChange={(checked) => {
                                 updateSelectedDraft((current) => ({
@@ -9729,6 +9758,7 @@ export function AcpAgentSettings() {
                         {t("codex.configTomlNative")}
                       </label>
                       <Textarea
+                        readOnly
                         value={selectedDraft.codexConfigTomlText}
                         onChange={(event) => {
                           handleCodexConfigTomlTextChange(event.target.value)
@@ -9751,6 +9781,7 @@ base_url = "https://api.openai.com/v1"`}
 
                     <div className="flex justify-end">
                       <Button
+                        disabled
                         size="sm"
                         onClick={() => {
                           if (selectedMissingModelProvider) {
@@ -9825,7 +9856,6 @@ base_url = "https://api.openai.com/v1"`}
                               })
                             })
                         }}
-                        disabled={selectedIsSavingEnv || selectedIsSavingConfig}
                       >
                         {selectedIsSavingEnv || selectedIsSavingConfig ? (
                           <>

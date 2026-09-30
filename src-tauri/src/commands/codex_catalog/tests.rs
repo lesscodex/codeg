@@ -444,19 +444,18 @@ async fn an_openai_list_says_which_template_each_id_would_use() {
     assert_eq!(ids[2].context_window, Some(200000));
 }
 
-/// Saving preferences (enabled, env, native files) keeps a bound provider
-/// bound, and its row keeps deciding codex's endpoint and key.
+/// Codex preferences are visible but immutable: the save succeeds without
+/// changing the database binding or creating native configuration files.
 #[tokio::test]
-async fn saving_preferences_keeps_the_provider_bound() {
+async fn saving_codex_preferences_is_a_no_op() {
     let env = Env::new();
     let db = codex_db().await;
     let id = add_provider(&db, "https://relay.test/v1", "sk-p", Some(CUSTOMS)).await;
     bind(&db, Some(id)).await;
-    // The coordinator writes the configured CODEX_HOME; point it here.
     temp_env::async_with_vars([("CODEX_HOME", Some(env.home()))], async {
         crate::commands::acp::acp_update_agent_preferences_core(
             AgentType::Codex,
-            true,
+            false,
             std::collections::BTreeMap::new(),
             None,
             None,
@@ -474,15 +473,8 @@ async fn saving_preferences_keeps_the_provider_bound() {
         .unwrap();
     assert_eq!(setting.model_provider_id, Some(id));
     assert!(setting.enabled);
-    let config = env.read(CONFIG_REL).unwrap();
-    assert_eq!(
-        commit::codeg_provider_parts(&config).unwrap().base_url,
-        "https://relay.test/v1"
-    );
-    assert_eq!(
-        commit::auth_api_key(&env.read(AUTH_REL).unwrap()).as_deref(),
-        Some("sk-p")
-    );
+    assert!(env.read(CONFIG_REL).is_none());
+    assert!(env.read(AUTH_REL).is_none());
 }
 
 /// The preferences write is one UPDATE without the provider column, so it

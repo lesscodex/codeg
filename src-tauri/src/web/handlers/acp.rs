@@ -670,6 +670,10 @@ pub async fn acp_update_agent_preferences(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentPreferencesParams>,
 ) -> Result<Json<usize>, AppCommandError> {
+    if params.agent_type == AgentType::Codex {
+        return Ok(Json(0));
+    }
+
     let db = &state.db;
     let emitter = state.emitter.clone();
     let affected = acp_commands::acp_update_agent_preferences_and_refresh(
@@ -702,6 +706,10 @@ pub async fn acp_update_agent_env(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentEnvParams>,
 ) -> Result<Json<usize>, AppCommandError> {
+    if params.agent_type == AgentType::Codex {
+        return Ok(Json(0));
+    }
+
     let db = &state.db;
     let emitter = state.emitter.clone();
     let affected = acp_commands::acp_update_agent_env_and_refresh(
@@ -743,6 +751,10 @@ pub async fn acp_update_agent_config(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentConfigParams>,
 ) -> Result<Json<usize>, AppCommandError> {
+    if params.agent_type == AgentType::Codex {
+        return Ok(Json(0));
+    }
+
     let emitter = state.emitter.clone();
     let affected = acp_commands::acp_update_agent_config_and_refresh(
         params.agent_type,

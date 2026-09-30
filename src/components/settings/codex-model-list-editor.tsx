@@ -672,6 +672,7 @@ export function CodexModelListEditor({
               <ProviderModelsRefreshButton
                 fetching={refreshing}
                 onRefresh={refresh}
+                disabled={readOnly}
                 label={t("refresh")}
               />
             ) : (
