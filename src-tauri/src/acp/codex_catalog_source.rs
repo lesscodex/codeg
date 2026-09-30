@@ -78,28 +78,11 @@ fn write_cache(models: &[Value]) {
     }
 }
 
-/// The codex-acp package directory under an npm prefix, where the nested
-/// `@openai/codex` codex-acp actually drives lives.
-fn codex_acp_dir(prefix: &Path) -> PathBuf {
-    let base = if cfg!(windows) {
-        prefix.join("node_modules")
-    } else {
-        prefix.join("lib").join("node_modules")
-    };
-    base.join("@agentclientprotocol").join("codex-acp")
-}
-
-/// Candidate codex-acp package dirs: the global npm prefix and codeg's user
-/// prefix (`~/.codeg/npm-global`, used when a global install hit EACCES).
-async fn codex_acp_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(prefix) = crate::commands::acp::cached_npm_global_prefix().await {
-        dirs.push(codex_acp_dir(&prefix));
-    }
-    if let Some(prefix) = crate::process::user_npm_prefix() {
-        dirs.push(codex_acp_dir(&prefix));
-    }
-    dirs
+/// The repository-packaged codex-acp directory, where the nested
+/// `@openai/codex` binary used by the running adapter lives.
+fn packaged_codex_acp_dir() -> Option<PathBuf> {
+    let entry = crate::acp::codex_backend::packaged_adapter_entry()?;
+    entry.parent()?.parent().map(Path::to_path_buf)
 }
 
 /// Resolve the nested `@openai/codex/bin/codex.js` from a codex-acp package dir
@@ -129,32 +112,25 @@ async fn resolve_codex_js(acp_dir: &Path, node: &Path) -> Option<PathBuf> {
 /// Run the nested codex's `debug models --bundled` and return its `models`.
 async fn fetch_live() -> Option<Vec<Value>> {
     let node = which::which("node").ok()?;
-    for acp_dir in codex_acp_dirs().await {
-        if !acp_dir.exists() {
-            continue;
-        }
-        let Some(codex_js) = resolve_codex_js(&acp_dir, &node).await else {
-            continue;
-        };
-        let mut cmd = crate::process::tokio_command(&node);
-        cmd.arg(&codex_js)
-            .arg("debug")
-            .arg("models")
-            .arg("--bundled")
-            .kill_on_drop(true);
-        let Ok(Ok(output)) = tokio::time::timeout(CODEX_TIMEOUT, cmd.output()).await else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        if let Some(models) = parse_models(&String::from_utf8_lossy(&output.stdout)) {
-            if !models.is_empty() {
-                return Some(models);
-            }
-        }
+    let acp_dir = packaged_codex_acp_dir()?;
+    if !acp_dir.exists() {
+        return None;
     }
-    None
+    let codex_js = resolve_codex_js(&acp_dir, &node).await?;
+    let mut cmd = crate::process::tokio_command(&node);
+    cmd.arg(&codex_js)
+        .arg("debug")
+        .arg("models")
+        .arg("--bundled")
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(CODEX_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_models(&String::from_utf8_lossy(&output.stdout)).filter(|models| !models.is_empty())
 }
 
 /// Resolve the official codex catalog with the live → cache → bundled-snapshot

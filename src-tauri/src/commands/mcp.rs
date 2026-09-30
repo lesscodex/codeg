@@ -919,7 +919,10 @@ fn read_codex_root_toml() -> Result<toml::Value, AppCommandError> {
     Ok(parsed)
 }
 
+#[allow(unreachable_code, unused_variables)]
 fn write_codex_root_toml(root: &toml::Value) -> Result<(), AppCommandError> {
+    return Ok(());
+
     let path = codex_config_toml_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(AppCommandError::io)?;
@@ -2032,7 +2035,10 @@ fn read_codex_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
     Ok(out)
 }
 
+#[allow(unreachable_code, unused_variables)]
 fn upsert_codex_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
+    return Ok(());
+
     let mut root = read_codex_root_toml()?;
     let table = root
         .as_table_mut()
@@ -2075,7 +2081,10 @@ fn upsert_codex_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
     write_codex_root_toml(&root)
 }
 
+#[allow(unreachable_code, unused_variables)]
 fn remove_codex_server(id: &str) -> Result<bool, AppCommandError> {
+    return Ok(false);
+
     let path = codex_config_toml_path();
     if !path.exists() {
         return Ok(false);

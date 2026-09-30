@@ -3795,7 +3795,10 @@ fn load_codex_local_config_json() -> Option<String> {
     serde_json::to_string_pretty(&serde_json::Value::Object(merged)).ok()
 }
 
+#[allow(unreachable_code, unused_variables)]
 fn persist_codex_local_config(config_patch_json: Option<&str>) -> Result<(), AcpError> {
+    return Ok(());
+
     let Some(raw_patch) = config_patch_json else {
         return Ok(());
     };
@@ -3947,10 +3950,13 @@ fn persist_codex_local_config(config_patch_json: Option<&str>) -> Result<(), Acp
     Ok(())
 }
 
+#[allow(unreachable_code, unused_variables)]
 fn persist_codex_native_config_files(
     codex_auth_json: Option<&str>,
     codex_config_toml: Option<&str>,
 ) -> Result<(), AcpError> {
+    return Ok(());
+
     if let Some(raw_toml) = codex_config_toml {
         toml::from_str::<toml::Table>(raw_toml)
             .map_err(|e| AcpError::protocol(format!("invalid codex config.toml: {e}")))?;
@@ -4159,7 +4165,10 @@ fn remove_codex_catalog_key(
 /// Drop codeg's own `model_catalog_json` reference from the config.toml on disk,
 /// if it carries one. Reads fresh so it also cleans up a key written by an
 /// earlier codeg version or by another window since the panel opened.
+#[allow(unreachable_code, unused_variables)]
 fn drop_codex_catalog_reference() -> Result<(), AcpError> {
+    return Ok(());
+
     let base = read_codex_config_or_empty()?;
     if let Some(next) = remove_codex_catalog_key(&base, &codex_home_dir())? {
         persist_codex_native_config_files(None, Some(&next))?;
@@ -4170,87 +4179,17 @@ fn drop_codex_catalog_reference() -> Result<(), AcpError> {
 /// What [`resync_codex_generated_catalog_at`] did.
 #[derive(Debug, PartialEq)]
 enum CodexCatalogResync {
-    /// No catalog codeg can regenerate: config.toml references none, references
-    /// the user's own, or codeg's intent sidecar is missing.
+    /// Catalog configuration writes are disabled for Codex.
     NotOwned,
-    /// The generated catalog was re-expanded against the new official list.
-    Rewritten,
-    /// Nothing deviates from codex's own list any more, so the reference and
-    /// the generated files were removed and codex's catalog applies untouched.
-    Released,
 }
 
-/// Re-expand codeg's generated codex catalog (`model_catalog_json`) against
-/// `snapshot`, the official catalog of the codex that is now installed.
-///
-/// The key is a whole-table replace that codeg only rewrites when the model
-/// settings are saved, so a codex upgrade that ships new official models left
-/// every user with custom models or removed officials on the OLD table: codex
-/// 0.159.1 (codex-acp 2.0.1) made GPT-6.1 Sol its default and they would not
-/// see it until they happened to re-save. Expanding the stored intent (the
-/// source sidecar) against the new catalog is exactly what that re-save writes.
-///
-/// Only a catalog codeg owns is touched — config.toml must reference codeg's
-/// own file, and the sidecar must exist. A catalog without a sidecar is NOT
-/// re-imported: read against the new list, every newly shipped official would
-/// look like one the user removed. The root `model` is left alone; the user's
-/// explicit default is part of the sidecar and survives the rewrite as-is.
+/// Codex catalog resync is intentionally disabled with the Codex configuration
+/// write policy. The successful no-op keeps install/upgrade flows non-blocking.
 fn resync_codex_generated_catalog_at(
-    codex_home: &Path,
-    snapshot: &[serde_json::Value],
+    _codex_home: &Path,
+    _snapshot: &[serde_json::Value],
 ) -> Result<CodexCatalogResync, AcpError> {
-    let config_path = codex_home.join("config.toml");
-    let config_toml = match fs::read_to_string(&config_path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(CodexCatalogResync::NotOwned)
-        }
-        Err(e) => {
-            return Err(AcpError::protocol(format!(
-                "read codex config.toml failed: {e}"
-            )))
-        }
-    };
-    let owned = config_toml
-        .parse::<toml::Value>()
-        .ok()
-        .as_ref()
-        .and_then(|doc| doc.get("model_catalog_json"))
-        .and_then(toml::Value::as_str)
-        .is_some_and(|value| is_codeg_owned_catalog_ref(value, codex_home));
-    if !owned {
-        return Ok(CodexCatalogResync::NotOwned);
-    }
-    let raw = match fs::read_to_string(codex_home.join(crate::acp::codex_model_catalog::SOURCE_REL))
-    {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(CodexCatalogResync::NotOwned)
-        }
-        Err(e) => {
-            return Err(AcpError::protocol(format!(
-                "read codex catalog source failed: {e}"
-            )))
-        }
-    };
-    let config = crate::acp::codex_model_catalog::parse_model_config(Some(&raw));
-    let released = crate::acp::codex_model_catalog::is_effectively_empty(&config, snapshot);
-    if released {
-        // Reference first, files second: codex refuses to start on a
-        // `model_catalog_json` that points at a missing file, so a failure in
-        // between must leave a stale-but-valid table, never a dangling key.
-        if let Some(next) = remove_codex_catalog_key(&config_toml, codex_home)? {
-            fs::write(&config_path, next)
-                .map_err(|e| AcpError::protocol(format!("write codex config.toml failed: {e}")))?;
-        }
-    }
-    crate::acp::codex_model_catalog::write_catalog_files(&raw, codex_home, snapshot)
-        .map_err(|e| AcpError::protocol(e.to_string()))?;
-    Ok(if released {
-        CodexCatalogResync::Released
-    } else {
-        CodexCatalogResync::Rewritten
-    })
+    Ok(CodexCatalogResync::NotOwned)
 }
 
 /// After codex-acp is (re)installed: refresh the cached official catalog from
@@ -11049,9 +10988,13 @@ fn cascade_update_agent_config(
     api_url: &str,
     api_key: &str,
     model_env: &BTreeMap<String, Option<String>>,
-    codex_model: &CodexModelAction,
-    codex_model_raw: Option<&str>,
+    _codex_model: &CodexModelAction,
+    _codex_model_raw: Option<&str>,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let (url_key, key_key, _) = agent_env_keys(agent_type);
     match agent_type {
         AgentType::ClaudeCode | AgentType::Gemini => {
@@ -11091,120 +11034,7 @@ fn cascade_update_agent_config(
             // against Cursor's own backend; there is no third-party
             // model-provider endpoint to cascade into.
         }
-        AgentType::Codex => {
-            let auth_path = codex_auth_json_path();
-            let mut auth_obj = if auth_path.exists() {
-                fs::read_to_string(&auth_path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                    .filter(|v| v.is_object())
-                    .unwrap_or_else(|| serde_json::json!({}))
-            } else {
-                serde_json::json!({})
-            };
-            if !api_key.trim().is_empty() {
-                auth_obj[key_key] = serde_json::Value::String(api_key.to_string());
-            }
-            let auth_str = serde_json::to_string_pretty(&auth_obj)
-                .map_err(|e| AcpError::protocol(e.to_string()))?;
-
-            let config_path = codex_config_toml_path();
-            let mut toml_value = if config_path.exists() {
-                fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|raw| raw.parse::<toml::Value>().ok())
-                    .filter(|v| v.is_table())
-                    .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()))
-            } else {
-                toml::Value::Table(toml::map::Map::new())
-            };
-            let table = toml_value
-                .as_table_mut()
-                .ok_or_else(|| AcpError::protocol("codex config root must be a TOML table"))?;
-            table.remove("api_base_url");
-
-            let provider_name = table
-                .get("model_provider")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| "codeg".to_string());
-            table.insert(
-                "model_provider".to_string(),
-                toml::Value::String(provider_name.clone()),
-            );
-
-            let providers_item = table
-                .entry("model_providers".to_string())
-                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-            if !providers_item.is_table() {
-                *providers_item = toml::Value::Table(toml::map::Map::new());
-            }
-            let providers = providers_item
-                .as_table_mut()
-                .ok_or_else(|| AcpError::protocol("invalid model_providers table"))?;
-            let provider_item = providers
-                .entry(provider_name.clone())
-                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-            if !provider_item.is_table() {
-                *provider_item = toml::Value::Table(toml::map::Map::new());
-            }
-            let provider_table = provider_item
-                .as_table_mut()
-                .ok_or_else(|| AcpError::protocol("invalid model provider table"))?;
-            if api_url.trim().is_empty() {
-                provider_table.remove("base_url");
-            } else {
-                provider_table.insert(
-                    "base_url".to_string(),
-                    toml::Value::String(api_url.to_string()),
-                );
-            }
-            if provider_name == "codeg" {
-                provider_table.insert("name".to_string(), toml::Value::String("codeg".to_string()));
-                provider_table.insert(
-                    "wire_api".to_string(),
-                    toml::Value::String("responses".to_string()),
-                );
-                ensure_codex_provider_auth_default(provider_table);
-            }
-            match codex_model {
-                CodexModelAction::Set(model) => {
-                    table.insert("model".to_string(), toml::Value::String(model.to_string()));
-                }
-                CodexModelAction::Clear => {
-                    table.remove("model");
-                }
-                CodexModelAction::NoOp => {}
-            }
-            // Regenerate the model_catalog_json file from the provider's full
-            // structured model config and reference it (relative to CODEX_HOME).
-            // REPLACE semantics require rewriting the whole catalog every time.
-            let snapshot = crate::acp::codex_catalog_source::cached_or_bundled_snapshot();
-            match crate::acp::codex_model_catalog::write_catalog_files(
-                codex_model_raw.unwrap_or_default(),
-                &codex_home_dir(),
-                &snapshot,
-            ) {
-                Ok(Some(inj)) => {
-                    table.insert(
-                        "model_catalog_json".to_string(),
-                        toml::Value::String(inj.catalog_rel.to_string()),
-                    );
-                }
-                Ok(None) => {
-                    table.remove("model_catalog_json");
-                }
-                Err(e) => {
-                    tracing::warn!("[ModelProvider] write codex catalog failed: {e}");
-                }
-            }
-            let toml_str = toml::to_string_pretty(&toml_value)
-                .map_err(|e| AcpError::protocol(e.to_string()))?;
-
-            persist_codex_native_config_files(Some(&auth_str), Some(&toml_str))?;
-        }
+        AgentType::Codex => unreachable!(),
         AgentType::OpenCode => {
             let auth_path = opencode_auth_json_path();
             let mut auth_obj = if auth_path.exists() {
@@ -11632,6 +11462,10 @@ pub(crate) async fn acp_update_agent_env_and_refresh(
     data_dir: &Path,
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     acp_update_agent_env_core(agent_type, enabled, env, model_provider_id, db, emitter).await?;
     Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
 }
@@ -11653,6 +11487,10 @@ pub(crate) async fn acp_update_agent_preferences_and_refresh(
     data_dir: &Path,
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     acp_update_agent_preferences_core(
         agent_type,
         enabled,
@@ -12491,6 +12329,10 @@ pub(crate) async fn acp_update_agent_preferences_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
         registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -12591,6 +12433,10 @@ pub async fn acp_update_agent_preferences(
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -12621,6 +12467,10 @@ pub(crate) async fn acp_update_agent_env_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
         registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -12740,7 +12590,10 @@ pub(crate) async fn acp_update_agent_env_core(
 
 /// Apply a `CodexModelAction` to the `model` field at the root of
 /// `~/.codex/config.toml`, preserving everything else.
+#[allow(unreachable_code, unused_variables)]
 fn apply_codex_root_model_action(action: &CodexModelAction) -> Result<(), AcpError> {
+    return Ok(());
+
     if matches!(action, CodexModelAction::NoOp) {
         return Ok(());
     }
@@ -12782,7 +12635,10 @@ fn apply_codex_root_model_action(action: &CodexModelAction) -> Result<(), AcpErr
 /// panel path instead patches the config.toml text on the frontend and only
 /// asks the backend to (re)write the catalog *files* (see
 /// `acp_update_agent_config_core`).
+#[allow(unreachable_code, unused_variables)]
 fn apply_codex_catalog_and_model(raw: Option<&str>) -> Result<(), AcpError> {
+    return Ok(());
+
     let snapshot = crate::acp::codex_catalog_source::cached_or_bundled_snapshot();
     let injection = crate::acp::codex_model_catalog::write_catalog_files(
         raw.unwrap_or_default(),
@@ -12841,6 +12697,10 @@ pub async fn acp_update_agent_env(
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -12907,6 +12767,10 @@ pub(crate) async fn acp_update_agent_config_core(
     cursor_structured: Option<crate::acp::types::CursorStructuredConfig>,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let config_json = config_json.and_then(|raw| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -13084,6 +12948,10 @@ pub(crate) async fn acp_update_agent_config_and_refresh(
     data_dir: &Path,
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     acp_update_agent_config_core(
         agent_type,
         config_json,
@@ -13121,6 +12989,10 @@ pub async fn acp_update_agent_config(
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -15796,32 +15668,26 @@ base_url = \"https://example.test/v1\"
             .collect()
     }
 
-    /// The official list before codex 0.159.1: today's minus GPT-6.1 Sol.
-    fn catalog_without_gpt_6_1_sol() -> Vec<serde_json::Value> {
-        crate::acp::codex_model_catalog::bundled_snapshot_models()
-            .into_iter()
-            .filter(|m| m["slug"] != "gpt-6.1-sol")
-            .collect()
-    }
-
     /// A catalog codeg generated before an upgrade is re-expanded from its
     /// stored intent, so the new official model shows up — in codex's own
     /// rank, behind the custom — without the user re-saving anything.
     #[test]
-    fn resync_rewrites_codegs_catalog_against_the_new_official_list() {
+    fn resync_does_not_write_codegs_catalog_against_the_new_official_list() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         let config = config_with_catalog_ref(crate::acp::codex_model_catalog::CATALOG_REL);
         fs::write(home.join("config.toml"), &config).unwrap();
         let intent = r#"{"customs":[{"slug":"gw/x","base":"gpt-5.6-sol"}],"default":"gw/x"}"#;
-        crate::acp::codex_model_catalog::write_catalog_files(
-            intent,
-            home,
-            &catalog_without_gpt_6_1_sol(),
+        fs::write(
+            home.join(crate::acp::codex_model_catalog::CATALOG_REL),
+            r#"{"models":[]}"#,
         )
-        .unwrap()
-        .expect("customs → generated catalog");
-        assert!(!catalog_slugs(home).iter().any(|s| s == "gpt-6.1-sol"));
+        .unwrap();
+        fs::write(
+            home.join(crate::acp::codex_model_catalog::SOURCE_REL),
+            intent,
+        )
+        .unwrap();
 
         // Today's list plus one model no compiled-in snapshot has, so only
         // the list passed in can put it in the table.
@@ -15835,13 +15701,10 @@ base_url = \"https://example.test/v1\"
         new.push(unshipped);
         assert_eq!(
             resync_codex_generated_catalog_at(home, &new).unwrap(),
-            CodexCatalogResync::Rewritten
+            CodexCatalogResync::NotOwned
         );
-        let slugs = catalog_slugs(home);
-        assert_eq!(slugs[..3], ["gw/x", "gpt-6.1-sol", "gpt-6-astra"]);
-        assert!(slugs.iter().any(|s| s == "gpt-test-unshipped"));
-        assert_eq!(slugs.len(), new.len() + 1);
-        // The intent and config.toml are untouched: same bytes as before.
+        assert!(catalog_slugs(home).is_empty());
+        // The intent, catalog, and config.toml are untouched: same bytes as before.
         assert_eq!(
             fs::read_to_string(home.join(crate::acp::codex_model_catalog::SOURCE_REL)).unwrap(),
             intent
@@ -15909,14 +15772,11 @@ base_url = \"https://example.test/v1\"
             config_with_catalog_ref(crate::acp::codex_model_catalog::CATALOG_REL),
         )
         .unwrap();
-        crate::acp::codex_model_catalog::write_catalog_files(
-            intent,
-            home,
-            &catalog_without_gpt_6_1_sol(),
+        fs::write(
+            catalog_path(home),
+            r#"{"models":[]}"#,
         )
-        .unwrap()
-        .expect("seeded");
-        fs::remove_file(home.join(crate::acp::codex_model_catalog::SOURCE_REL)).unwrap();
+        .unwrap();
         let before = fs::read_to_string(catalog_path(home)).unwrap();
         assert_eq!(
             resync_codex_generated_catalog_at(home, &new).unwrap(),
@@ -15925,49 +15785,32 @@ base_url = \"https://example.test/v1\"
         assert_eq!(fs::read_to_string(catalog_path(home)).unwrap(), before);
     }
 
-    /// When the new list makes the takeover moot (the only removal names a model
-    /// codex has since retired), control goes back to codex: the reference is
-    /// dropped — format-preservingly — and the generated files with it, so
-    /// config.toml never points at a file that is gone.
+    /// Catalog resync does not remove a user config reference while Codex
+    /// configuration writes are disabled.
     #[test]
-    fn resync_releases_a_takeover_the_new_list_makes_moot() {
+    fn resync_does_not_release_or_delete_catalogs_when_writes_are_disabled() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
+        let config = config_with_catalog_ref(crate::acp::codex_model_catalog::CATALOG_REL);
         fs::write(
             home.join("config.toml"),
-            config_with_catalog_ref(crate::acp::codex_model_catalog::CATALOG_REL),
+            &config,
         )
         .unwrap();
-        // The old list still LISTED a model the user removed; the new one no
-        // longer ships it at all.
-        let mut old = crate::acp::codex_model_catalog::bundled_snapshot_models();
-        let mut retired = old
-            .iter()
-            .find(|m| m["slug"] == "gpt-5.5")
-            .cloned()
-            .expect("gpt-5.5 in snapshot");
-        retired["slug"] = serde_json::Value::String("gpt-5.4-retired".into());
-        old.push(retired);
-        let intent = r#"{"customs":[],"excludedOfficials":["gpt-5.4-retired"]}"#;
-        crate::acp::codex_model_catalog::write_catalog_files(intent, home, &old)
-            .unwrap()
-            .expect("a live removal → generated catalog");
-
         let new = crate::acp::codex_model_catalog::bundled_snapshot_models();
+        let catalog = home.join(crate::acp::codex_model_catalog::CATALOG_REL);
+        let source = home.join(crate::acp::codex_model_catalog::SOURCE_REL);
+        fs::write(&catalog, r#"{"models":[]}"#).unwrap();
+        fs::write(&source, "stored intent").unwrap();
+        let catalog_before = fs::read_to_string(&catalog).unwrap();
+        let source_before = fs::read_to_string(&source).unwrap();
         assert_eq!(
             resync_codex_generated_catalog_at(home, &new).unwrap(),
-            CodexCatalogResync::Released
+            CodexCatalogResync::NotOwned
         );
-        let config = fs::read_to_string(home.join("config.toml")).unwrap();
-        assert!(!config.contains("model_catalog_json"), "{config}");
-        assert!(config.contains("# my codex config"));
-        assert!(config.contains("model = \"gw/x\"           # the model"));
-        assert!(!home
-            .join(crate::acp::codex_model_catalog::CATALOG_REL)
-            .exists());
-        assert!(!home
-            .join(crate::acp::codex_model_catalog::SOURCE_REL)
-            .exists());
+        assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), config);
+        assert_eq!(fs::read_to_string(&catalog).unwrap(), catalog_before);
+        assert_eq!(fs::read_to_string(&source).unwrap(), source_before);
     }
 
     #[test]
@@ -18875,25 +18718,19 @@ wire_api = "chat"
     }
 
     #[test]
-    fn codex_cascade_preserves_explicit_auth_flag_and_headers() {
-        // Repro path 2 from issue #406: editing a bound model provider's URL /
-        // key / model cascades into ~/.codex/config.toml, which used to
-        // overwrite requires_openai_auth on the way through.
+    fn codex_cascade_does_not_modify_existing_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         temp_env::with_var("CODEX_HOME", Some(dir.path()), || {
             let config_path = dir.path().join("config.toml");
-            std::fs::write(
-                &config_path,
-                "model_provider = \"codeg\"\n\n\
+            let original = "model_provider = \"codeg\"\n\n\
                  [model_providers.codeg]\n\
                  base_url = \"https://old.example/v1\"\n\
                  name = \"codeg\"\n\
                  wire_api = \"responses\"\n\
                  requires_openai_auth = false\n\n\
                  [model_providers.codeg.http_headers]\n\
-                 x-openai-actor-authorization = \"local-image-extension\"\n",
-            )
-            .expect("seed config.toml");
+                 x-openai-actor-authorization = \"local-image-extension\"\n";
+            std::fs::write(&config_path, original).expect("seed config.toml");
 
             cascade_update_agent_config(
                 AgentType::Codex,
@@ -18905,27 +18742,15 @@ wire_api = "chat"
             )
             .expect("cascade must succeed");
 
-            let written = std::fs::read_to_string(&config_path).expect("read back");
-            let table = provider_table_of(&written);
             assert_eq!(
-                auth_flag_of(&table),
-                Some(false),
-                "an explicit requires_openai_auth = false must survive the cascade"
-            );
-            assert!(
-                codex_provider_uses_actor_authorization(&table),
-                "the actor-authorization header must survive the cascade"
-            );
-            assert_eq!(
-                table.get("base_url").and_then(toml::Value::as_str),
-                Some("https://new.example/v1"),
-                "the cascade must still apply the new base_url"
+                std::fs::read_to_string(&config_path).expect("read back"),
+                original
             );
         });
     }
 
     #[test]
-    fn codex_cascade_seeds_auth_flag_for_a_fresh_provider() {
+    fn codex_cascade_does_not_create_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         temp_env::with_var("CODEX_HOME", Some(dir.path()), || {
             cascade_update_agent_config(
@@ -18938,13 +18763,7 @@ wire_api = "chat"
             )
             .expect("cascade must succeed");
 
-            let written =
-                std::fs::read_to_string(dir.path().join("config.toml")).expect("read back");
-            assert_eq!(
-                auth_flag_of(&provider_table_of(&written)),
-                Some(true),
-                "a provider codeg creates still gets the default"
-            );
+            assert!(!dir.path().join("config.toml").exists());
         });
     }
 

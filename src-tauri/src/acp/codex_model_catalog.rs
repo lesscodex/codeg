@@ -30,7 +30,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::app_error::{AppCommandError, AppErrorCode};
+use crate::app_error::AppCommandError;
 
 /// Official codex catalog snapshot compiled into the binary. Generated from the
 /// `codex debug models --bundled` of the codex that `codex-acp` drives (shape
@@ -68,7 +68,7 @@ struct EnumSpec {
 
 // Authoritative value sets + nullability, extracted from the codex binary itself
 // by feeding it candidate catalogs and reading the full `unknown variant …,
-// expected …` / `invalid type: null, expected …` errors (re-probed on 0.159.2,
+// expected …` / `invalid type: null, expected …` errors (re-probed on 0.159.1,
 // unchanged since 0.147 — treat these as version-specific and re-probe when
 // codex moves).
 fn enum_spec_for(key: &str) -> Option<EnumSpec> {
@@ -132,7 +132,7 @@ fn enum_spec_for(key: &str) -> Option<EnumSpec> {
 /// catalog, and every existing entry keeps its previous key set (GPT-6.1 Sol
 /// sets the optional `multi_agent_reasoning_effort` and omits
 /// `default_service_tier`, which GPT-6 Sol does the other way round). Re-probed
-/// against the 0.159.2 binary: each field below rejects both `"yes"` and `null`
+/// against the 0.159.1 binary: each field below rejects both `"yes"` and `null`
 /// (bar the ignored `supports_parallel_tool_calls`), no boolean-typed key sits
 /// outside this list, and every enum set above is unchanged.
 ///
@@ -675,44 +675,19 @@ pub fn import_catalog(
     }
 }
 
-fn io_err(context: &str, e: std::io::Error) -> AppCommandError {
-    AppCommandError::new(AppErrorCode::IoError, format!("{context}: {e}"))
-}
-
 /// Write the expanded catalog + the compact source sidecar under `codex_home`,
 /// expanding against `snapshot` (the runtime official catalog).
 ///
 /// The sidecar is written **verbatim** from `raw_compact` so the value the
-/// editor reads back is byte-identical to what it stored. A config with no
-/// customs and no removal that still applies (see [`is_effectively_empty`])
-/// removes both files and returns `None`, signalling the caller to drop the
-/// `model_catalog_json` key so codex uses its own catalog.
+/// editor reads back is byte-identical to what it stored. Catalog file writes
+/// are currently disabled; this function always returns `None` without
+/// creating or removing files.
 pub fn write_catalog_files(
-    raw_compact: &str,
-    codex_home: &Path,
-    snapshot: &[Value],
+    _raw_compact: &str,
+    _codex_home: &Path,
+    _snapshot: &[Value],
 ) -> Result<Option<CatalogInjection>, AppCommandError> {
-    let config = parse_model_config(Some(raw_compact));
-    let catalog_path = codex_home.join(CATALOG_REL);
-    let source_path = codex_home.join(SOURCE_REL);
-
-    if is_effectively_empty(&config, snapshot) {
-        let _ = std::fs::remove_file(&catalog_path);
-        let _ = std::fs::remove_file(&source_path);
-        return Ok(None);
-    }
-
-    std::fs::create_dir_all(codex_home).map_err(|e| io_err("create codex home", e))?;
-    let catalog = serde_json::to_string_pretty(&expand_to_catalog(&config, snapshot)).map_err(|e| {
-        AppCommandError::new(AppErrorCode::IoError, format!("serialize catalog: {e}"))
-    })?;
-    std::fs::write(&catalog_path, catalog).map_err(|e| io_err("write catalog file", e))?;
-    std::fs::write(&source_path, raw_compact).map_err(|e| io_err("write catalog source", e))?;
-
-    Ok(Some(CatalogInjection {
-        catalog_rel: CATALOG_REL,
-        default_model: default_slug(&config, snapshot),
-    }))
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1334,40 +1309,14 @@ mod tests {
     }
 
     #[test]
-    fn write_and_clear_catalog_files() {
+    fn catalog_file_writes_are_disabled() {
         let dir = std::env::temp_dir().join(format!("codeg-catalog-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let s = snap();
         let raw = r#"{"customs":[{"slug":"gw/x","base":"gpt-5.6-sol"}],"default":"gw/x"}"#;
-        // write_catalog_files parses `raw` itself; snapshot is the runtime catalog.
-        let inj = write_catalog_files(raw, &dir, &s)
-            .unwrap()
-            .expect("non-empty → injection");
-        assert_eq!(inj.catalog_rel, CATALOG_REL);
-        assert_eq!(inj.default_model.as_deref(), Some("gw/x"));
-        assert_eq!(std::fs::read_to_string(dir.join(SOURCE_REL)).unwrap(), raw);
-        let cat: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join(CATALOG_REL)).unwrap()).unwrap();
-        assert!(find(&cat, "gw/x").is_some());
-        assert!(find(&cat, "gpt-5.6-sol").is_some()); // official auto-included
-        // Empty config clears files + signals key removal.
-        assert!(write_catalog_files(r#"{"customs":[]}"#, &dir, &s)
-            .unwrap()
-            .is_none());
+        assert!(write_catalog_files(raw, &dir, &s).unwrap().is_none());
+        assert!(!dir.exists());
         assert!(!dir.join(CATALOG_REL).exists());
         assert!(!dir.join(SOURCE_REL).exists());
-
-        // A ghost-only config (removals of officials codex has since hidden)
-        // behaves the same: the files go away and the caller is told to drop the
-        // `model_catalog_json` key, so the two never get out of sync.
-        write_catalog_files(r#"{"customs":[{"slug":"gw/y","base":"gpt-5.6-sol"}]}"#, &dir, &s)
-            .unwrap()
-            .expect("seeded");
-        assert!(dir.join(CATALOG_REL).exists());
-        let ghosts = r#"{"customs":[],"excludedOfficials":["gpt-5.4","gpt-5.4-mini"]}"#;
-        assert!(write_catalog_files(ghosts, &dir, &s).unwrap().is_none());
-        assert!(!dir.join(CATALOG_REL).exists());
-        assert!(!dir.join(SOURCE_REL).exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

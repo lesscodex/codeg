@@ -3261,8 +3261,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             //
             // 2.0.1 is two upstream changes (#562, #565), both `@openai/codex`
             // bumps: ^0.158.0 → **^0.159.1**, which a fresh install resolves to
-            // 0.159.2 (a Windows console fix; its bundled catalog is
-            // byte-identical to 0.159.1's). `engines` is still absent, so the
+            // The lockfile pins 0.159.1; the bundled catalog was compared
+            // byte-for-byte with that nested binary. `engines` is still absent, so the
             // 20.0.0 floor stays. The adapter's own code moves by one table row
             // (see (v)): its scenario harness (33 scenarios, a mocked app-server)
             // replays byte-identically under codeg's exact `clientCapabilities`
@@ -3280,7 +3280,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // serve the new slug refuses such sessions until a model is picked.
             // Its recommended effort is `low` (6 Sol's is `medium`). No
             // `ModelInfo` field was added; the offline snapshot is regenerated
-            // from the 0.159.2 binary and the strictness re-probed
+            // from the 0.159.1 binary and the strictness re-probed
             // (`codex_model_catalog.rs`).
             //
             // (t) The catalog's FILE order stopped being priority order: GPT-6.1

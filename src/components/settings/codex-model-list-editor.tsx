@@ -343,7 +343,7 @@ export function CodexModelListEditor({
             size="icon"
             className="h-7 w-7 shrink-0 text-muted-foreground"
             onClick={refresh}
-            disabled={refreshing}
+            disabled={readOnly || refreshing}
             title={t("refresh")}
             aria-label={t("refresh")}
           >
@@ -621,14 +621,14 @@ function CodexCustomRow({
         <div className="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_7rem]">
           <Input
             value={entry.slug}
-            readOnly={readOnly}
+            disabled={readOnly}
             placeholder={t("slugPlaceholder")}
             onChange={(e) => onPatch({ slug: e.target.value })}
             className="h-8 text-xs"
           />
           <Input
             value={entry.displayName ?? ""}
-            readOnly={readOnly}
+            disabled={readOnly}
             placeholder={t("displayNamePlaceholder")}
             onChange={(e) =>
               onPatch({ displayName: e.target.value || undefined })
@@ -638,7 +638,7 @@ function CodexCustomRow({
           <Input
             type="number"
             value={entry.contextWindow ?? ""}
-            readOnly={readOnly}
+            disabled={readOnly}
             placeholder={t("contextWindow")}
             onChange={(e) => {
               const n = parseInt(e.target.value, 10)
@@ -774,7 +774,7 @@ function CodexCustomRow({
               </Label>
               <Textarea
                 value={descValue}
-                readOnly={readOnly}
+                disabled={readOnly}
                 rows={2}
                 onChange={(e) => setField("description", e.target.value)}
                 className="max-h-20 resize-y text-2xs"
@@ -786,7 +786,7 @@ function CodexCustomRow({
               </Label>
               <Textarea
                 value={biValue}
-                readOnly={readOnly}
+                disabled={readOnly}
                 rows={6}
                 onChange={(e) => setField("base_instructions", e.target.value)}
                 className="max-h-48 resize-y overflow-y-auto font-mono text-2xs"

@@ -174,6 +174,7 @@ export function AddModelProviderDialog({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t("providerNamePlaceholder")}
+              disabled={agentType === "codex"}
             />
           </div>
 
@@ -186,6 +187,7 @@ export function AddModelProviderDialog({
               value={apiUrl}
               onChange={(e) => setApiUrl(e.target.value)}
               placeholder={t("apiUrlPlaceholder")}
+              disabled={agentType === "codex"}
             />
           </div>
 
@@ -199,6 +201,7 @@ export function AddModelProviderDialog({
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={t("apiKeyPlaceholder")}
+              disabled={agentType === "codex"}
             />
           </div>
 
@@ -367,6 +370,7 @@ export function AddModelProviderDialog({
               <CodexModelListEditor
                 value={codexModel}
                 onChange={setCodexModel}
+                readOnly
               />
             </div>
           ) : (
@@ -395,7 +399,10 @@ export function AddModelProviderDialog({
           >
             {t("cancel")}
           </Button>
-          <Button onClick={handleSubmit} disabled={loading}>
+          <Button
+            onClick={handleSubmit}
+            disabled={agentType === "codex" || loading}
+          >
             {loading && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />}
             {t("create")}
           </Button>
