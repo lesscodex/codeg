@@ -192,6 +192,7 @@ function HostLine({
   const state = hostStateKey(host.state)
   const actions = hostActionsOf(host)
   const subject = subjectOf(plugin)
+  const configDisabled = host.agent === "codex"
   const showTrust = trustOffered(host)
   const trust = useHookTrust(plugin, host)
   const trustRead = trust.state !== undefined && trust.state.phase !== "loading"
@@ -251,6 +252,7 @@ function HostLine({
               type="button"
               variant="ghost"
               size="xs"
+              disabled={configDisabled}
               onClick={() =>
                 openPluginChange(slots, subject, {
                   kind: "enabled",
@@ -269,6 +271,7 @@ function HostLine({
               type="button"
               variant="ghost"
               size="xs"
+              disabled={configDisabled}
               onClick={() =>
                 openPluginChange(slots, subject, {
                   kind: "enabled",
@@ -289,6 +292,7 @@ function HostLine({
                   type="button"
                   variant="ghost"
                   size="xs"
+                  disabled={configDisabled}
                   className="max-md:h-9"
                 >
                   <Repeat aria-hidden="true" />

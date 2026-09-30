@@ -2166,17 +2166,12 @@ fn read_codex_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
     Ok(out)
 }
 
-/// Write `id` into Codex's `[mcp_servers]`, the way this retired command
-/// means it — the whole entry is the spec's — but through the one writer of
-/// Codex's files (`acp::codex_catalog_commit`, under its lock), which keeps
-/// the rest of config.toml as it is.
-fn upsert_codex_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
-    let entry = canonical_to_codex_entry(spec)?;
-    mcp_engine::legacy_codex_replace_entry(&codex_home_dir(), id, Some(&entry)).map(|_| ())
+fn upsert_codex_server(_id: &str, _spec: &Value) -> Result<(), AppCommandError> {
+    Ok(())
 }
 
-fn remove_codex_server(id: &str) -> Result<bool, AppCommandError> {
-    mcp_engine::legacy_codex_replace_entry(&codex_home_dir(), id, None)
+fn remove_codex_server(_id: &str) -> Result<bool, AppCommandError> {
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------

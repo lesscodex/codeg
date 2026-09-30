@@ -282,12 +282,12 @@ fn file_name(app: McpAppType) -> &'static str {
 }
 
 /// The agents a test has installed: four with every kind of file the engine
-/// writes (Claude's JSON with its plugin gate, Codex's TOML, Gemini's JSON,
-/// Cline's JSON with an on/off flag).
+/// writes (Claude's JSON with its plugin gate, OpenCode's JSONC, Gemini's
+/// JSON, Cline's JSON with an on/off flag).
 const INSTALLED: [McpAppType; 4] = [
     McpAppType::ClaudeCode,
-    McpAppType::Codex,
     McpAppType::Gemini,
+    McpAppType::OpenCode,
     McpAppType::Cline,
 ];
 
@@ -687,8 +687,8 @@ async fn the_default_name_steps_around_servers_from_elsewhere() {
 
     // that one taken too: a number
     sandbox.write(
-        McpAppType::Codex,
-        "[mcp_servers.notes-acme-dev]\ncommand = \"other\"\n",
+        McpAppType::Gemini,
+        r#"{ "mcpServers": { "notes-acme-dev": { "command": "other" } } }"#,
     );
     let plan = sandbox.plan(None).await;
     assert_eq!(plan.key.default, "notes-acme-dev-2");
@@ -701,7 +701,7 @@ async fn the_default_name_steps_around_servers_from_elsewhere() {
         r#"{ "mcpServers": { "notes": { "command": "x" } } }"#,
     );
     sandbox.write(McpAppType::ClaudeCode, "{}");
-    sandbox.write(McpAppType::Codex, "");
+    sandbox.write(McpAppType::Gemini, "{}");
     let plan = sandbox.plan(None).await;
     assert_eq!(plan.key.default, "notes");
     assert_eq!(plan.key.conflicts[0].agent, McpAppType::Kiro);
@@ -724,7 +724,7 @@ async fn an_install_writes_through_the_engine_and_records_it_under_the_lock() {
     let plan = sandbox.plan(None).await;
     let targets = [
         McpAppType::ClaudeCode,
-        McpAppType::Codex,
+        McpAppType::Cline,
         McpAppType::Gemini,
     ];
     let request = sandbox.request(&plan, &targets, "notes");
@@ -764,15 +764,11 @@ async fn an_install_writes_through_the_engine_and_records_it_under_the_lock() {
         json!({ "type": "stdio", "command": "npx", "args": ["-y", "@acme/notes-mcp@1.2.3"],
                 "env": { "NOTES_TOKEN": "t0ken" } })
     );
-    let codex = sandbox.read(McpAppType::Codex).unwrap();
-    assert!(
-        codex.starts_with("# mine\nmodel = \"gpt-5.5\"\n"),
-        "{codex}"
-    );
-    let codex: toml::Table = codex.parse().unwrap();
+    let cline: Value =
+        serde_json::from_str(&sandbox.read(McpAppType::Cline).unwrap()).unwrap();
     assert_eq!(
-        codex["mcp_servers"]["notes"]["args"][1].as_str(),
-        Some("@acme/notes-mcp@1.2.3")
+        cline["mcpServers"]["notes"]["args"][1],
+        "@acme/notes-mcp@1.2.3"
     );
     for agent in targets {
         assert_eq!(
@@ -780,7 +776,7 @@ async fn an_install_writes_through_the_engine_and_records_it_under_the_lock() {
             Some(npx("1.2.3", "t0ken"))
         );
     }
-    assert!(sandbox.read(McpAppType::Cline).is_none(), "not a target");
+    assert!(sandbox.read(McpAppType::OpenCode).is_none(), "not a target");
 
     // The record: what was written where, as the agent reads it back.
     let record = sandbox.record().unwrap();
@@ -788,7 +784,7 @@ async fn an_install_writes_through_the_engine_and_records_it_under_the_lock() {
     assert_eq!(item["ref"], REF);
     assert_eq!(item["key"], "notes");
     let agents: Vec<&String> = item["agents"].as_object().unwrap().keys().collect();
-    assert_eq!(agents, ["claude_code", "codex", "gemini"]);
+    assert_eq!(agents, ["claude_code", "cline", "gemini"]);
     let claude = &item["agents"]["claude_code"];
     assert_eq!(claude["revision"], 3);
     assert_eq!(claude["version"], "3.0.0");
@@ -818,7 +814,7 @@ async fn an_install_writes_through_the_engine_and_records_it_under_the_lock() {
     assert_eq!(channels, ["mcp://changed", INSTALLED_CHANGED_EVENT]);
     assert_eq!(
         seen[1].1,
-        json!({ "item_ids": [ID], "agents": ["claude_code", "codex", "gemini"] })
+        json!({ "item_ids": [ID], "agents": ["claude_code", "gemini", "cline"] })
     );
     assert!(!seen
         .iter()
@@ -925,7 +921,11 @@ async fn a_version_that_became_uninstallable_aborts_the_install() {
     for change in changes {
         let sandbox = Sandbox::new().await;
         let plan = sandbox.plan(None).await;
-        let request = sandbox.request(&plan, &[McpAppType::ClaudeCode, McpAppType::Codex], "notes");
+        let request = sandbox.request(
+            &plan,
+            &[McpAppType::ClaudeCode, McpAppType::Gemini],
+            "notes",
+        );
         sandbox.site.resolve(3, change);
         let before = sandbox.files();
 
@@ -1138,7 +1138,7 @@ async fn a_remote_address_that_is_not_public_once_filled_in_writes_nothing() {
 async fn an_update_replaces_the_recorded_entries_with_the_newer_revision() {
     let sandbox = Sandbox::new().await;
     let first = sandbox
-        .install_to(&[McpAppType::ClaudeCode, McpAppType::Codex])
+        .install_to(&[McpAppType::ClaudeCode, McpAppType::Gemini])
         .await;
     assert_eq!(first.outcome, InstallOutcome::Installed);
     sandbox.site.publish(4, "1.3.0", "s4-a");
@@ -1151,11 +1151,11 @@ async fn an_update_replaces_the_recorded_entries_with_the_newer_revision() {
     let option = &plan.options[0];
     assert_eq!(
         option.default_targets,
-        [McpAppType::ClaudeCode, McpAppType::Codex]
+        [McpAppType::ClaudeCode, McpAppType::Gemini]
     );
     assert_eq!(
         option.default_replace,
-        [McpAppType::ClaudeCode, McpAppType::Codex]
+        [McpAppType::ClaudeCode, McpAppType::Gemini]
     );
     let conflicts: Vec<(McpAppType, EntryOwner, Option<LocalState>)> = plan
         .key
@@ -1172,7 +1172,7 @@ async fn an_update_replaces_the_recorded_entries_with_the_newer_revision() {
                 Some(LocalState::AsInstalled)
             ),
             (
-                McpAppType::Codex,
+                McpAppType::Gemini,
                 EntryOwner::ThisItem,
                 Some(LocalState::AsInstalled)
             ),
@@ -1193,14 +1193,14 @@ async fn an_update_replaces_the_recorded_entries_with_the_newer_revision() {
         })
         .await;
     assert_eq!(result.outcome, InstallOutcome::Installed, "{result:?}");
-    for agent in [McpAppType::ClaudeCode, McpAppType::Codex] {
+    for agent in [McpAppType::ClaudeCode, McpAppType::Gemini] {
         assert_eq!(
             sandbox.entry(agent, "notes").unwrap().definition,
             Some(npx("1.3.0", "t0ken"))
         );
     }
     let record = sandbox.record().unwrap();
-    for agent in ["claude_code", "codex"] {
+    for agent in ["claude_code", "gemini"] {
         assert_eq!(record["items"][ID]["agents"][agent]["revision"], 4);
         assert_eq!(
             record["items"][ID]["agents"][agent]["packages"][0]["version"],
@@ -1210,7 +1210,7 @@ async fn an_update_replaces_the_recorded_entries_with_the_newer_revision() {
     // under another name it is refused: update it under its own
     let other = sandbox.request(
         &sandbox.plan(None).await,
-        &[McpAppType::Gemini],
+        &[McpAppType::Cline],
         "notes-two",
     );
     let result = sandbox.install(other).await;
@@ -1222,13 +1222,13 @@ async fn an_update_replaces_the_recorded_entries_with_the_newer_revision() {
 async fn an_update_to_some_agents_leaves_the_others_at_their_revision() {
     let sandbox = Sandbox::new().await;
     sandbox
-        .install_to(&[McpAppType::ClaudeCode, McpAppType::Codex])
+        .install_to(&[McpAppType::ClaudeCode, McpAppType::Gemini])
         .await;
     sandbox.site.publish(4, "1.3.0", "s4-a");
     let plan = sandbox.plan(None).await;
     let request = HarnessMcpInstallRequest {
-        replace: vec![McpAppType::Codex],
-        ..sandbox.request(&plan, &[McpAppType::Codex], "notes")
+        replace: vec![McpAppType::Gemini],
+        ..sandbox.request(&plan, &[McpAppType::Gemini], "notes")
     };
     assert_eq!(
         sandbox.install(request).await.outcome,
@@ -1242,7 +1242,7 @@ async fn an_update_to_some_agents_leaves_the_others_at_their_revision() {
         .collect();
     assert_eq!(
         revisions,
-        [(McpAppType::ClaudeCode, 3), (McpAppType::Codex, 4)]
+        [(McpAppType::ClaudeCode, 3), (McpAppType::Gemini, 4)]
     );
     assert_eq!(listing[0].revision, 3, "an update starts from the oldest");
     assert_eq!(listing[0].state, LocalState::AsInstalled);
@@ -1423,8 +1423,8 @@ async fn a_guard_that_refuses_calls_the_save_off_under_the_lock() {
 async fn an_update_plan_reads_back_what_the_installed_entries_hold() {
     let sandbox = Sandbox::new().await;
     let plan = sandbox.plan(None).await;
-    // stdio into Claude Code and Codex, with an optional value as well
-    let mut request = sandbox.request(&plan, &[McpAppType::ClaudeCode, McpAppType::Codex], "notes");
+    // stdio into Claude Code and Cline, with an optional value as well
+    let mut request = sandbox.request(&plan, &[McpAppType::ClaudeCode, McpAppType::Cline], "notes");
     request
         .values
         .insert("env.NOTES_DIR".to_string(), "/home/me/notes".to_string());
@@ -1432,12 +1432,12 @@ async fn an_update_plan_reads_back_what_the_installed_entries_hold() {
         sandbox.install(request).await.outcome,
         InstallOutcome::Installed
     );
-    // Codex's token changed by hand since, and a variable of the user's own
-    let codex = sandbox.read(McpAppType::Codex).unwrap().replace(
-        "NOTES_TOKEN = \"t0ken\"",
-        "NOTES_TOKEN = \"rotated\"\nNOTES_EXTRA = \"mine\"",
-    );
-    sandbox.write(McpAppType::Codex, &codex);
+    // Cline's token changed by hand since, and a variable of the user's own
+    let mut cline: Value =
+        serde_json::from_str(&sandbox.read(McpAppType::Cline).unwrap()).unwrap();
+    cline["mcpServers"]["notes"]["env"]["NOTES_TOKEN"] = json!("rotated");
+    cline["mcpServers"]["notes"]["env"]["NOTES_EXTRA"] = json!("mine");
+    sandbox.write(McpAppType::Cline, &serde_json::to_string(&cline).unwrap());
 
     sandbox.site.publish(4, "1.3.0", "s4-a");
     let plan = sandbox.plan(None).await;
@@ -1451,19 +1451,19 @@ async fn an_update_plan_reads_back_what_the_installed_entries_hold() {
     };
     let token = current("env.NOTES_TOKEN").expect("the token was recovered");
     assert_eq!(token.value, "t0ken");
-    assert_eq!(token.agents, [McpAppType::ClaudeCode, McpAppType::Codex]);
-    assert!(token.conflicting, "Codex holds another one");
+    assert_eq!(token.agents, [McpAppType::ClaudeCode, McpAppType::Cline]);
+    assert!(token.conflicting, "Cline holds another one");
     let dir = current("env.NOTES_DIR").unwrap();
     assert_eq!(dir.value, "/home/me/notes");
     assert!(!dir.conflicting);
     let recovery = stdio.recovery.as_ref().unwrap();
-    assert_eq!(recovery.from, [McpAppType::ClaudeCode, McpAppType::Codex]);
+    assert_eq!(recovery.from, [McpAppType::ClaudeCode, McpAppType::Cline]);
     assert!(recovery.unmatched.is_empty());
     assert_eq!(
         recovery.lost,
         [LostValue {
             key: "env.NOTES_EXTRA".into(),
-            agents: vec![McpAppType::Codex]
+            agents: vec![McpAppType::Cline]
         }]
     );
     // the other options were not installed: nothing read for them
@@ -1704,13 +1704,13 @@ async fn the_scan_drops_what_is_gone_and_keeps_what_cannot_be_read() {
     assert_eq!(result.outcome, InstallOutcome::Installed);
     let mut events = sandbox.events.subscribe();
 
-    // Claude's entry edited by hand, Codex's removed, Gemini's file broken.
+    // Claude's entry edited by hand, OpenCode's removed, Gemini's file broken.
     let claude = sandbox
         .read(McpAppType::ClaudeCode)
         .unwrap()
         .replace("t0ken", "edited");
     sandbox.write(McpAppType::ClaudeCode, &claude);
-    sandbox.write(McpAppType::Codex, "# mine\nmodel = \"gpt-5.5\"\n");
+    sandbox.write(McpAppType::OpenCode, "{}");
     sandbox.write(McpAppType::Gemini, "{ \"mcpServers\": ");
 
     let listing = sandbox.listing().await;
@@ -1723,8 +1723,8 @@ async fn the_scan_drops_what_is_gone_and_keeps_what_cannot_be_read() {
         states,
         [
             (McpAppType::ClaudeCode, LocalState::ChangedLocally),
-            (McpAppType::Codex, LocalState::Missing),
             (McpAppType::Gemini, LocalState::Unknown),
+            (McpAppType::OpenCode, LocalState::Missing),
             (McpAppType::Cline, LocalState::AsInstalled),
         ]
     );
@@ -1742,7 +1742,7 @@ async fn the_scan_drops_what_is_gone_and_keeps_what_cannot_be_read() {
         drain(&mut events),
         [(
             INSTALLED_CHANGED_EVENT.to_string(),
-            json!({ "item_ids": [ID], "agents": ["codex"] })
+            json!({ "item_ids": [ID], "agents": ["open_code"] })
         )]
     );
     let again = sandbox.listing().await;
@@ -1793,7 +1793,7 @@ async fn an_uninstall_removes_what_is_as_installed_and_a_changed_entry_only_when
     let sandbox = Sandbox::new().await;
     let targets = [
         McpAppType::ClaudeCode,
-        McpAppType::Codex,
+        McpAppType::Cline,
         McpAppType::Gemini,
     ];
     assert_eq!(
@@ -1830,14 +1830,14 @@ async fn an_uninstall_removes_what_is_as_installed_and_a_changed_entry_only_when
                 UninstallAction::Remove
             ),
             (
-                McpAppType::Codex,
-                LocalState::AsInstalled,
-                UninstallAction::Remove
-            ),
-            (
                 McpAppType::Gemini,
                 LocalState::ChangedLocally,
                 UninstallAction::KeepChanged
+            ),
+            (
+                McpAppType::Cline,
+                LocalState::AsInstalled,
+                UninstallAction::Remove
             ),
         ]
     );
@@ -1874,7 +1874,7 @@ async fn an_uninstall_removes_what_is_as_installed_and_a_changed_entry_only_when
         .await;
     assert_eq!(done.outcome, UninstallOutcome::Uninstalled, "{done:?}");
     assert!(sandbox.entry(McpAppType::ClaudeCode, "notes").is_none());
-    assert!(sandbox.entry(McpAppType::Codex, "notes").is_none());
+    assert!(sandbox.entry(McpAppType::Cline, "notes").is_none());
     assert!(
         sandbox.entry(McpAppType::Gemini, "notes").is_some(),
         "changed: kept"

@@ -12283,6 +12283,10 @@ pub(crate) async fn acp_update_agent_env_and_refresh(
     data_dir: &Path,
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     acp_update_agent_env_core(agent_type, enabled, env, model_provider_id, db, emitter).await?;
     Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
 }
@@ -12303,6 +12307,10 @@ pub(crate) async fn acp_update_agent_preferences_and_refresh(
     data_dir: &Path,
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     acp_update_agent_preferences_core(
         agent_type,
         enabled,
@@ -13633,6 +13641,10 @@ pub(crate) async fn acp_update_agent_preferences_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
         registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -13742,6 +13754,10 @@ pub async fn acp_update_agent_preferences(
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -13771,6 +13787,10 @@ pub(crate) async fn acp_update_agent_env_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let default = agent_setting_service::AgentDefaultInput {
         agent_type,
         registry_id: registry::registry_id_for(agent_type).to_string(),
@@ -13893,6 +13913,10 @@ pub async fn acp_update_agent_env(
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -13930,6 +13954,10 @@ pub(crate) async fn acp_update_agent_config_core(
     db: &AppDatabase,
     emitter: &EventEmitter,
 ) -> Result<(), AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(());
+    }
+
     let config_json = config_json.and_then(|raw| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -14122,6 +14150,10 @@ pub(crate) async fn acp_update_agent_config_and_refresh(
     data_dir: &Path,
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     acp_update_agent_config_core(
         agent_type,
         config_json,
@@ -14164,6 +14196,10 @@ pub async fn acp_update_agent_config(
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<usize, AcpError> {
+    if agent_type == AgentType::Codex {
+        return Ok(0);
+    }
+
     let app_data_dir = app
         .path()
         .app_data_dir()

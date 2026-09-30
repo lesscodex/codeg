@@ -168,6 +168,7 @@ export function ModelProviderSettings() {
                     variant="ghost"
                     className="h-7 w-7"
                     onClick={() => setEditTarget(p)}
+                    disabled={p.agent_type === "codex"}
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </Button>
@@ -176,6 +177,7 @@ export function ModelProviderSettings() {
                     variant="ghost"
                     className="h-7 w-7 text-destructive"
                     onClick={() => setDeleteTarget(p)}
+                    disabled={p.agent_type === "codex"}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
@@ -215,7 +217,10 @@ export function ModelProviderSettings() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t("cancel")}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={deleteTarget?.agent_type === "codex"}
+            >
               {t("delete")}
             </AlertDialogAction>
           </AlertDialogFooter>

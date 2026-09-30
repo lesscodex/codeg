@@ -98,7 +98,7 @@ pub(crate) fn spec(app: McpAppType) -> AgentSpec {
         // project.
         McpAppType::ClaudeCode => (ALL_TRANSPORTS, CodegSession, DisableFlag::NONE, false),
         // `enabled = false`; no SSE transport in config.toml.
-        McpAppType::Codex => (NO_SSE, CodegSession, DisableFlag::enabled_false(), false),
+        McpAppType::Codex => (NO_SSE, CodegSession, DisableFlag::enabled_false(), true),
         // Its switches live in a file of their own
         // (`mcp-server-enablement.json`), and an entry takes no key the
         // settings schema does not list.
@@ -661,7 +661,8 @@ mod tests {
                 );
             }
         }
-        // The two listed-only agents get nothing from codeg either way.
+        // Listed-only agents never have their configuration changed by codeg.
+        assert!(spec(McpAppType::Codex).scan_only);
         assert!(spec(McpAppType::OpenClaw).scan_only);
         assert!(spec(McpAppType::Pi).scan_only);
         assert!(!crate::acp::registry::get_agent_meta(AgentType::OpenClaw).supports_mcp);

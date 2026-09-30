@@ -335,7 +335,7 @@ async fn the_startup_recovers_the_plugin_journals_before_the_skills() {
 }
 
 #[tokio::test]
-async fn after_a_restore_codex_is_only_switched_off_whatever_its_copy_looks_like() {
+async fn after_a_restore_codex_config_is_left_untouched() {
     let mut fx = Fixture::new().await;
     fx.publish(1, true);
     let plan = fx
@@ -347,7 +347,7 @@ async fn after_a_restore_codex_is_only_switched_off_whatever_its_copy_looks_like
         .await;
     let done = fx.install(fx.request(&plan)).await;
     assert_eq!(done.outcome, PluginInstallOutcome::Installed, "{done:?}");
-    assert_eq!(fx.codex_enabled(), Some(true));
+    assert_eq!(fx.codex_enabled(), None);
     fx.mark_restored();
 
     fx.take_log();
@@ -357,10 +357,9 @@ async fn after_a_restore_codex_is_only_switched_off_whatever_its_copy_looks_like
         PluginInstallOutcome::Repaired,
         "{repaired:?}"
     );
-    // Codex runs its own copy, which cannot be told from another
-    // revision's: off, never put in again.
+    // The record is repaired without changing Codex's configuration.
     assert_eq!(fx.host(CODEX).state, HostState::DisabledByUser);
-    assert_eq!(fx.codex_enabled(), Some(false));
+    assert_eq!(fx.codex_enabled(), None);
     assert!(!fx
         .take_log()
         .iter()

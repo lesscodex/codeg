@@ -372,6 +372,36 @@ fn codes_of(problems: &[crate::harness::mcp::model::Reason]) -> Vec<&str> {
 }
 
 #[tokio::test]
+async fn configuration_mutations_are_no_ops() {
+    let s = sandbox();
+    let adapter = s.adapter(true, false);
+    let env = s.env(&[]);
+    let found = detect(&s, &adapter, &env).await;
+    s.stage(NAME, 4, manifest(NAME, "7.0.2"));
+    s.stage(NAME, 5, manifest(NAME, "7.1.0"));
+    let n = name(NAME);
+    let config = s.config_text();
+
+    with_cx!(s, env, found, |cx| {
+        assert_eq!(adapter.install(&cx, &plugin(&n, 4)).await.unwrap(), "");
+        adapter
+            .update(&cx, &plugin(&n, 4), &plugin(&n, 5))
+            .await
+            .unwrap();
+        adapter.disable(&cx, &plugin(&n, 4)).await.unwrap();
+        adapter.enable(&cx, &plugin(&n, 4)).await.unwrap();
+        adapter.uninstall(&cx, &plugin(&n, 4)).await.unwrap();
+
+        assert_eq!(s.config_text(), config);
+        assert!(s.take_log().is_empty());
+        assert!(!s.marketplace_path().exists());
+        assert!(!s.cache().exists());
+        assert!(!s.codex_home.join("codeg-codex.lock").exists());
+    });
+}
+
+#[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn install_adds_the_marketplace_then_the_plugin() {
     let s = sandbox();
     let adapter = s.adapter(true, true);
@@ -427,6 +457,7 @@ async fn install_adds_the_marketplace_then_the_plugin() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn installing_again_runs_the_same_commands_and_changes_nothing() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -454,6 +485,7 @@ async fn installing_again_runs_the_same_commands_and_changes_nothing() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn an_update_repoints_the_entry_and_adds_the_plugin_again() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -536,6 +568,7 @@ async fn an_update_repoints_the_entry_and_adds_the_plugin_again() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn disable_and_enable_edit_config_toml_and_keep_the_rest_of_it() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -619,6 +652,7 @@ async fn disable_and_enable_edit_config_toml_and_keep_the_rest_of_it() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn uninstalling_the_last_plugin_takes_everything_of_codeg_s_away() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -666,6 +700,7 @@ async fn uninstalling_the_last_plugin_takes_everything_of_codeg_s_away() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn uninstalling_one_of_two_keeps_the_marketplace_and_the_other_s_trust() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -705,6 +740,7 @@ async fn uninstalling_one_of_two_keeps_the_marketplace_and_the_other_s_trust() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_lost_marketplace_file_never_takes_another_plugin_with_it() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -734,6 +770,7 @@ async fn a_lost_marketplace_file_never_takes_another_plugin_with_it() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_failing_or_slow_command_is_a_reason_and_a_retry_finishes_it() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -816,6 +853,7 @@ async fn a_failing_or_slow_command_is_a_reason_and_a_retry_finishes_it() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_marketplace_of_codeg_s_name_from_elsewhere_or_a_broken_config_is_refused() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -959,6 +997,7 @@ async fn the_version_gate() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn the_entry_is_named_by_the_plugin_s_codex_manifest() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1021,6 +1060,7 @@ async fn the_entry_is_named_by_the_plugin_s_codex_manifest() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn codex_home_is_the_agent_s() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1080,6 +1120,7 @@ async fn codex_home_is_the_agent_s() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_marketplace_folder_that_is_a_link_is_never_used() {
     for linked in [".agents", ".agents/plugins"] {
         let s = sandbox();
@@ -1423,6 +1464,7 @@ async fn the_hooks_a_package_gives_codex() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_marketplace_of_codeg_s_name_from_elsewhere_is_never_touched() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1461,6 +1503,7 @@ async fn a_marketplace_of_codeg_s_name_from_elsewhere_is_never_touched() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn versions_that_differ_in_case_alone_keep_their_one_folder() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1482,6 +1525,7 @@ async fn versions_that_differ_in_case_alone_keep_their_one_folder() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_linked_cache_folder_is_never_removed_through() {
     for linked in [
         "plugins/cache/codeg-harness",
@@ -1530,6 +1574,7 @@ async fn a_linked_cache_folder_is_never_removed_through() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn an_update_cut_short_still_leaves_a_plugin_that_was_off_off() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1616,6 +1661,7 @@ async fn gone(pid: i32) -> bool {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn a_marketplace_of_codeg_s_name_in_another_case_is_not_codeg_s() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1642,6 +1688,7 @@ async fn a_marketplace_of_codeg_s_name_in_another_case_is_not_codeg_s() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn an_install_over_a_linked_plugin_cache_folder_is_refused() {
     let s = sandbox();
     let adapter = s.adapter(true, false);
@@ -1663,6 +1710,7 @@ async fn an_install_over_a_linked_plugin_cache_folder_is_refused() {
 }
 
 #[tokio::test]
+#[ignore = "Codex configuration mutations are disabled"]
 async fn an_update_cut_short_in_one_codex_home_leaves_another_alone() {
     let s = sandbox();
     let adapter = s.adapter(true, false);

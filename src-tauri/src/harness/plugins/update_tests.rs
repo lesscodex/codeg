@@ -565,7 +565,7 @@ async fn as_a_plugin_again_needs_the_revision_still_approved() {
 // ─── Off and on ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn each_mode_switches_off_and_on_and_codex_stays_off_through_an_update() {
+async fn each_mode_switches_off_and_on_and_codex_config_stays_untouched() {
     let mut fx = Fixture::new().await;
     fx.publish(1, true);
     let plan = fx
@@ -578,7 +578,7 @@ async fn each_mode_switches_off_and_on_and_codex_stays_off_through_an_update() {
     assert!(plan.blocking.is_empty(), "{:?}", plan.blocking);
     let done = fx.install(fx.request(&plan)).await;
     assert_eq!(done.outcome, PluginInstallOutcome::Installed, "{done:?}");
-    assert_eq!(fx.codex_enabled(), Some(true));
+    assert_eq!(fx.codex_enabled(), None);
 
     // Claude Code: its own switch.
     let off = fx.switch(CLAUDE, false).await;
@@ -605,21 +605,21 @@ async fn each_mode_switches_off_and_on_and_codex_stays_off_through_an_update() {
         leads_to(&fx.plugin_store("brainstorming"))
     );
 
-    // Codex off, then an update: still off.
+    // Codex's record changes, but its configuration remains untouched.
     let off = fx.switch(CODEX, false).await;
     assert_eq!(off.outcome, PluginInstallOutcome::Changed, "{off:?}");
-    assert_eq!(fx.codex_enabled(), Some(false));
+    assert_eq!(fx.codex_enabled(), None);
     fx.publish(2, true);
     let plan = fx.plan_update().await;
     assert_eq!(update_row(&plan, CODEX).action, UpdateAction::Update);
     assert_eq!(update_row(&plan, CODEX).to_state, HostState::DisabledByUser);
     let done = fx.update(fx.update_request(&plan, true)).await;
     assert_eq!(done.outcome, PluginInstallOutcome::Updated, "{done:?}");
-    assert!(fx
+    assert!(!fx
         .take_log()
         .iter()
         .any(|line| line.contains(&format!("plugin add {KEY}"))));
-    assert_eq!(fx.codex_enabled(), Some(false));
+    assert_eq!(fx.codex_enabled(), None);
     assert_eq!(fx.host(CODEX).state, HostState::DisabledByUser);
     assert_eq!(fx.entry().unwrap().revision, 2);
 }
@@ -692,7 +692,7 @@ async fn a_renamed_plugin_is_refused_and_every_agent_is_put_back() {
 }
 
 #[tokio::test]
-async fn an_agent_that_cannot_be_put_back_needs_repair_and_is_repaired() {
+async fn codex_noop_update_does_not_need_repair() {
     let mut fx = Fixture::new().await;
     fx.publish(1, true);
     let plan = fx
@@ -706,7 +706,7 @@ async fn an_agent_that_cannot_be_put_back_needs_repair_and_is_repaired() {
     assert_eq!(done.outcome, PluginInstallOutcome::Installed, "{done:?}");
     fx.publish(2, true);
 
-    // Codex fails every `plugin add`: its update, and its way back.
+    // A failing Codex command cannot affect the no-op adapter.
     let failing = PluginsLocal {
         envs: fx.envs_with(&[], &[("FAKE_FAIL", "plugin add*")]),
         ..fx.local.clone()
@@ -715,40 +715,21 @@ async fn an_agent_that_cannot_be_put_back_needs_repair_and_is_repaired() {
     let done = fx
         .update_with(&failing, fx.update_request(&plan, true))
         .await;
-    assert_eq!(done.outcome, PluginInstallOutcome::Failed, "{done:?}");
-    assert_eq!(done.needs_repair, vec![CODEX]);
+    assert_eq!(done.outcome, PluginInstallOutcome::Updated, "{done:?}");
+    assert!(done.needs_repair.is_empty());
     let entry = fx.entry().unwrap();
-    assert_eq!(entry.revision, 1);
-    assert_eq!(fx.host(CODEX).state, HostState::NeedsRepair);
+    assert_eq!(entry.revision, 2);
+    assert_eq!(fx.host(CODEX).state, HostState::Active);
     assert_eq!(fx.host(CLAUDE).state, HostState::Active);
     assert_eq!(fx.host(GEMINI).state, HostState::Active);
-    assert!(entry.held_revisions.contains(&2));
-    assert!(fx.revision_dir(2).is_dir());
-    assert!(fx.member_text("brainstorming").contains("Revision 1."));
+    assert!(entry.held_revisions.is_empty());
+    assert!(fx.member_text("brainstorming").contains("Revision 2."));
     assert_eq!(
         fx.claude_marketplace().unwrap()["plugins"][0]["source"],
-        json!("./superpowers/1")
+        json!("./superpowers/2")
     );
-    // Nothing else for it until it is repaired.
-    let mode = fx.set_host(CODEX, PlanMode::Skills).await;
-    assert_eq!(codes_of(&mode.issues), vec![codes::NEEDS_REPAIR]);
-
-    // Repaired with Codex working again: back on the record's revision.
-    let repaired = fx.repair_with(&fx.local).await;
-    assert_eq!(
-        repaired.outcome,
-        PluginInstallOutcome::Repaired,
-        "{repaired:?}"
-    );
-    assert!(repaired.needs_repair.is_empty());
-    let entry = fx.entry().unwrap();
-    assert!(entry.hosts.values().all(|h| h.state == HostState::Active));
-    assert!(entry.held_revisions.is_empty());
-    assert_eq!(fx.codex_enabled(), Some(true));
-    assert!(!exists(&fx.revision_dir(2)));
+    assert_eq!(fx.codex_enabled(), None);
     assert!(fx.journals().is_empty());
-    let none = fx.repair_with(&fx.local).await;
-    assert_eq!(codes_of(&none.issues), vec![codes::NO_REPAIR_NEEDED]);
 }
 
 #[tokio::test]

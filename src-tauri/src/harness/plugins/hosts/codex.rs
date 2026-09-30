@@ -237,12 +237,14 @@ impl CodexAdapter {
         }
     }
 
+    #[allow(unreachable_code, unused_assignments, unused_variables)]
     async fn set_enabled(
         &self,
         cx: &HostCx<'_>,
         plugin: &HostPlugin<'_>,
         on: bool,
     ) -> Result<(), Reason> {
+        return Ok(());
         codex_home(cx)?;
         let market = Marketplace::load(LAYOUT, &cx.ctx.root)?;
         let name = market
@@ -298,7 +300,9 @@ impl HostAdapter for CodexAdapter {
         detect
     }
 
+    #[allow(unreachable_code, unused_assignments, unused_variables)]
     async fn install(&self, cx: &HostCx<'_>, plugin: &HostPlugin<'_>) -> Result<String, Reason> {
+        return Ok(String::new());
         let cli = cli_of(cx)?;
         let root = root_arg(cx)?;
         revision_dir(cx, plugin)?;
@@ -329,12 +333,14 @@ impl HostAdapter for CodexAdapter {
         Ok(name)
     }
 
+    #[allow(unreachable_code, unused_assignments, unused_variables)]
     async fn update(
         &self,
         cx: &HostCx<'_>,
         from: &HostPlugin<'_>,
         to: &HostPlugin<'_>,
     ) -> Result<(), Reason> {
+        return Ok(());
         let cli = cli_of(cx)?;
         revision_dir(cx, to)?;
         let mut market = Marketplace::load(LAYOUT, &cx.ctx.root)?;
@@ -386,15 +392,21 @@ impl HostAdapter for CodexAdapter {
         Ok(())
     }
 
+    #[allow(unreachable_code, unused_assignments, unused_variables)]
     async fn enable(&self, cx: &HostCx<'_>, plugin: &HostPlugin<'_>) -> Result<(), Reason> {
+        return Ok(());
         self.set_enabled(cx, plugin, true).await
     }
 
+    #[allow(unreachable_code, unused_assignments, unused_variables)]
     async fn disable(&self, cx: &HostCx<'_>, plugin: &HostPlugin<'_>) -> Result<(), Reason> {
+        return Ok(());
         self.set_enabled(cx, plugin, false).await
     }
 
+    #[allow(unreachable_code, unused_assignments, unused_variables)]
     async fn uninstall(&self, cx: &HostCx<'_>, plugin: &HostPlugin<'_>) -> Result<(), Reason> {
+        return Ok(());
         let cli = cli_of(cx)?;
         let mut market = Marketplace::load(LAYOUT, &cx.ctx.root)?;
         // Nothing in Codex is provably this plugin's (its install was

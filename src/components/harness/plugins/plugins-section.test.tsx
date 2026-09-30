@@ -136,6 +136,12 @@ describe("PluginsSection — an agent's line", () => {
     const trust = within(line).getByRole("button", {
       name: m.actions.hookTrust,
     })
+    const changeMode = within(line).getByRole("button", {
+      name: m.actions.changeMode,
+    })
+    expect(disable).toBeDisabled()
+    expect(changeMode).toBeDisabled()
+    expect(trust).toBeEnabled()
     // A ghost button of the action group, as Disable is.
     expect(trust.parentElement).toBe(disable.parentElement)
     expect(trust.className).toBe(disable.className)
