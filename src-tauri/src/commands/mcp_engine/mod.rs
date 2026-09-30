@@ -18,13 +18,12 @@
 //! at a time, across processes), [`apply`] (the basis check, the validation,
 //! the restore), `store` and its formats (edits that keep the rest of the
 //! document byte for byte), [`fsio`] (atomic replacement, pre-write copies),
-//! and `acp::codex_catalog_commit::mcp_servers` (the one door to Codex's
+//! and `acp::codex_catalog_commit::mcp_servers` (read-only access to Codex's
 //! config.toml).
 //!
 //! The commands this replaces — `commands::mcp`'s `mcp_scan_local` and its
 //! seven siblings — stay for one release, for older clients of a newer
-//! server. They take the same write lock, and reach Codex's file through
-//! [`legacy_codex_replace_entry`].
+//! server. Their Codex write path remains a successful no-op.
 
 pub(crate) mod agents;
 pub(crate) mod apply;
@@ -293,177 +292,6 @@ pub async fn mcp_parse_snippet(text: String) -> Result<McpSnippet, AppCommandErr
     Ok(mcp_parse_snippet_core(&text))
 }
 
-// ─── The retired commands' way to Codex's file ──────────────────────────
-
-fn toml_to_item(value: &toml::Value) -> toml_edit::Item {
-    fn to_value(value: &toml::Value) -> Option<toml_edit::Value> {
-        Some(match value {
-            toml::Value::String(text) => text.as_str().into(),
-            toml::Value::Integer(number) => (*number).into(),
-            toml::Value::Float(number) => (*number).into(),
-            toml::Value::Boolean(flag) => (*flag).into(),
-            toml::Value::Datetime(when) => {
-                when.to_string().parse::<toml_edit::Datetime>().ok()?.into()
-            }
-            toml::Value::Array(items) => {
-                let mut array = toml_edit::Array::new();
-                for item in items.iter().filter_map(to_value) {
-                    array.push(item);
-                }
-                toml_edit::Value::Array(array)
-            }
-            toml::Value::Table(table) => {
-                let mut inline = toml_edit::InlineTable::new();
-                for (key, item) in table {
-                    if let Some(item) = to_value(item) {
-                        inline.insert(key, item);
-                    }
-                }
-                toml_edit::Value::InlineTable(inline)
-            }
-        })
-    }
-    match value {
-        toml::Value::Table(table) => {
-            let mut out = toml_edit::Table::new();
-            for (key, item) in table {
-                let item = toml_to_item(item);
-                if !item.is_none() {
-                    out.insert(key, item);
-                }
-            }
-            toml_edit::Item::Table(out)
-        }
-        other => to_value(other)
-            .map(toml_edit::Item::Value)
-            .unwrap_or(toml_edit::Item::None),
-    }
-}
-
-/// Put `entry` under `[mcp_servers.<id>]` of the Codex config in `home` — or
-/// take the entry away, with `None` — the way the retired commands mean it:
-/// the whole entry is theirs to replace. Unlike before, the rest of the file
-/// is kept as it is, and the write goes where every write of Codex's files
-/// goes: through `codex_catalog_commit`, under its lock.
-///
-/// Synchronous, for those commands' per-agent walk; the caller holds the MCP
-/// write lock. Returns whether the file changed.
-pub(crate) fn legacy_codex_replace_entry(
-    home: &std::path::Path,
-    id: &str,
-    entry: Option<&toml::Value>,
-) -> Result<bool, AppCommandError> {
-    let invalid = |message: String| AppCommandError::configuration_invalid(message);
-    let locked = codex_catalog_commit::lock_home_blocking(home).map_err(|error| {
-        let issue = codex_lock_issue(&error);
-        coded_error(
-            AppCommandError::task_execution_failed(error.message.clone()),
-            &issue.code,
-            issue.detail,
-        )
-    })?;
-    let path = locked.config_path();
-    let original = locked.read_config_bytes().map_err(|error| {
-        let detail = format!("{}: {error}", path.display());
-        AppCommandError::io(error).with_detail(detail)
-    })?;
-    if original.is_none() && entry.is_none() {
-        return Ok(false);
-    }
-    let text = store::decode(original.as_deref())
-        .map_err(|_| invalid(format!("{} is not UTF-8 text", path.display())))?;
-    let (bom, body) = store::split_bom(text);
-    let mut doc = body
-        .parse::<toml_edit::Document>()
-        .map_err(|e| invalid(format!("invalid TOML at {}: {e}", path.display())))?;
-
-    let mut changed = false;
-    match entry {
-        Some(entry) => {
-            if doc.get("mcp_servers").is_none() {
-                let mut table = toml_edit::Table::new();
-                table.set_implicit(true);
-                doc.as_table_mut()
-                    .insert("mcp_servers", toml_edit::Item::Table(table));
-            }
-            let servers = doc
-                .get_mut("mcp_servers")
-                .and_then(toml_edit::Item::as_table_like_mut)
-                .ok_or_else(|| invalid("Codex mcp_servers must be a TOML table".to_string()))?;
-            servers.insert(id, toml_to_item(entry));
-            changed = true;
-        }
-        None => {
-            if let Some(servers) = doc
-                .get_mut("mcp_servers")
-                .and_then(toml_edit::Item::as_table_like_mut)
-            {
-                changed |= servers.remove(id).is_some();
-            }
-        }
-    }
-    // The copy an older codeg left under `[mcp.servers]` goes either way.
-    let mut legacy_emptied = false;
-    if let Some(mcp) = doc
-        .get_mut("mcp")
-        .and_then(toml_edit::Item::as_table_like_mut)
-    {
-        let mut servers_emptied = false;
-        if let Some(servers) = mcp
-            .get_mut("servers")
-            .and_then(toml_edit::Item::as_table_like_mut)
-        {
-            changed |= servers.remove(id).is_some();
-            servers_emptied = servers.is_empty();
-        }
-        if servers_emptied {
-            mcp.remove("servers");
-        }
-        legacy_emptied = servers_emptied && mcp.is_empty();
-    }
-    if legacy_emptied {
-        doc.as_table_mut().remove("mcp");
-    }
-    if !changed {
-        return Ok(false);
-    }
-    let updated = store::with_bom(bom, doc.to_string());
-    if Some(updated.as_bytes()) == original.as_deref() {
-        return Ok(false);
-    }
-    if let Some(original) = &original {
-        let backups = agents::default_backup_root().join(agents::wire_name(McpAppType::Codex));
-        fsio::backup(&backups, &path, original).map_err(|error| {
-            coded_error(
-                AppCommandError::io_error(format!(
-                    "could not keep a copy of {} before changing it",
-                    path.display()
-                )),
-                codes::BACKUP_FAILED,
-                Some(error.to_string()),
-            )
-        })?;
-    }
-    locked
-        .commit_mcp_servers(
-            original.as_deref(),
-            codex_catalog_commit::McpConfigChange::Write(updated.as_bytes()),
-        )
-        .map_err(|error| {
-            let message = error.to_string();
-            let issue = match error {
-                codex_catalog_commit::McpCommitError::Changed => codes::BASIS_MISMATCH,
-                codex_catalog_commit::McpCommitError::OutsideMcpServers => {
-                    codes::OUTSIDE_MCP_SERVERS
-                }
-                codex_catalog_commit::McpCommitError::Invalid(_) => codes::EDIT_FAILED,
-                codex_catalog_commit::McpCommitError::Io(_) => codes::WRITE_FAILED,
-            };
-            coded_error(AppCommandError::configuration_invalid(message), issue, None)
-        })?;
-    Ok(true)
-}
-
 #[cfg(test)]
 mod engine_tests {
     use super::*;
@@ -509,47 +337,5 @@ mod engine_tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_retired_commands_reach_codex_through_its_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("codex");
-        std::fs::create_dir_all(&home).unwrap();
-        let config = home.join("config.toml");
-        let before = "# mine\nmodel = \"gpt-5.5\" # default\n\n[mcp_servers.keep]\ncommand = \"keep\" # as is\n\n[mcp.servers.old]\ncommand = \"old\"\n";
-        std::fs::write(&config, before).unwrap();
-
-        let entry: toml::Value = "command = \"npx\"\nargs = [\"-y\", \"x\"]\n[env]\nA = \"b\"\n"
-            .parse::<toml::Table>()
-            .map(toml::Value::Table)
-            .unwrap();
-        assert!(legacy_codex_replace_entry(&home, "old", Some(&entry)).unwrap());
-        let after = std::fs::read_to_string(&config).unwrap();
-        assert!(after.contains("# mine"), "{after}");
-        assert!(after.contains("model = \"gpt-5.5\" # default"), "{after}");
-        assert!(after.contains("command = \"keep\" # as is"), "{after}");
-        let parsed: toml::Table = after.parse().unwrap();
-        assert!(parsed.get("mcp").is_none(), "the old copy is gone: {after}");
-        assert_eq!(parsed["mcp_servers"]["old"]["env"]["A"].as_str(), Some("b"));
-        assert_eq!(
-            parsed["mcp_servers"]["old"]["args"]
-                .as_array()
-                .map(Vec::len),
-            Some(2)
-        );
-
-        // Removing what is not there writes nothing.
-        assert!(!legacy_codex_replace_entry(&home, "absent", None).unwrap());
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), after);
-        assert!(legacy_codex_replace_entry(&home, "old", None).unwrap());
-        let parsed: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
-        assert!(parsed["mcp_servers"].get("old").is_none());
-        assert!(parsed["mcp_servers"].get("keep").is_some());
-
-        // No file and nothing to remove: no file is made.
-        let empty = dir.path().join("empty");
-        assert!(!legacy_codex_replace_entry(&empty, "x", None).unwrap());
-        assert!(!empty.join("config.toml").exists());
     }
 }

@@ -352,12 +352,13 @@ fn every_agent_is_listed_with_its_file_and_its_ways() {
     assert_eq!(installed(McpAppType::Codex), Some(false));
     assert_eq!(installed(McpAppType::Gemini), None, "codeg could not tell");
 
-    // A file that is not there: nothing to list, and writable.
+    // A missing Codex file is still listed, but Codeg never writes it.
     let codex = sandbox.agent(McpAppType::Codex);
     assert_eq!(codex.config.status, McpFileStatus::Missing);
     assert_eq!(codex.config.basis.as_deref(), Some(BASIS_MISSING));
     assert_eq!(codex.config.format, McpConfigFormat::Toml);
-    assert!(codex.writable && codex.can_disable);
+    assert!(!codex.writable && codex.can_disable);
+    assert!(codex.config.reason.is_none());
     assert_eq!(codex.transports, [McpTransport::Stdio, McpTransport::Http]);
     assert!(codex.entries.is_empty());
 
@@ -500,8 +501,9 @@ fn an_entry_that_is_no_server_is_listed_with_the_reason() {
 }
 
 #[test]
-fn listed_only_agents_are_read_and_never_written() {
+fn read_only_agents_are_read_and_never_written() {
     let sandbox = Sandbox::new();
+    sandbox.write(McpAppType::Codex, CODEX);
     sandbox.write(
         McpAppType::OpenClaw,
         r#"{"mcp": {"servers": {"a": {"command": "a", "auth": "oauth"}}}}"#,
@@ -510,7 +512,11 @@ fn listed_only_agents_are_read_and_never_written() {
         McpAppType::Pi,
         r#"{"mcpServers": {"p": {"url": "https://p.test"}}}"#,
     );
-    for (app, key) in [(McpAppType::OpenClaw, "a"), (McpAppType::Pi, "p")] {
+    for (app, key, delivery) in [
+        (McpAppType::Codex, "linear", McpDelivery::CodegSession),
+        (McpAppType::OpenClaw, "a", McpDelivery::AgentFile),
+        (McpAppType::Pi, "p", McpDelivery::AgentFile),
+    ] {
         let agent = sandbox.agent(app);
         assert!(!agent.writable, "{app:?}");
         assert_eq!(agent.config.status, McpFileStatus::ReadOnly);
@@ -518,24 +524,24 @@ fn listed_only_agents_are_read_and_never_written() {
             agent.config.reason.map(|reason| reason.code).as_deref(),
             Some(codes::MANAGED_BY_AGENT)
         );
-        assert_eq!(agent.delivery, McpDelivery::AgentFile);
-        assert!(!agent.codeg_mcp);
+        assert_eq!(agent.delivery, delivery);
         let entry = sandbox.entry(app, key);
         assert!(entry.read_only && entry.definition.is_some());
     }
 }
 
 #[tokio::test]
-async fn an_operation_on_a_listed_only_agent_is_refused() {
+async fn an_operation_on_a_read_only_agent_is_refused() {
     let sandbox = Sandbox::new();
-    let before = r#"{"mcpServers": {"p": {"url": "https://p.test"}}}"#;
-    sandbox.write(McpAppType::Pi, before);
-    let result = sandbox.apply(vec![remove(McpAppType::Pi, "p")]).await;
+    sandbox.write(McpAppType::Codex, CODEX);
+    let result = sandbox
+        .apply(vec![remove(McpAppType::Codex, "linear")])
+        .await;
     assert_eq!(result.outcome, McpApplyOutcome::Invalid);
-    let pi = result_of(&result, McpAppType::Pi);
-    assert_eq!(pi.status, McpAgentStatus::ReadOnly);
-    assert_eq!(issue_codes(pi), [codes::AGENT_READ_ONLY]);
-    assert_eq!(sandbox.read(McpAppType::Pi).as_deref(), Some(before));
+    let codex = result_of(&result, McpAppType::Codex);
+    assert_eq!(codex.status, McpAgentStatus::ReadOnly);
+    assert_eq!(issue_codes(codex), [codes::AGENT_READ_ONLY]);
+    assert_eq!(sandbox.read(McpAppType::Codex).as_deref(), Some(CODEX));
 }
 
 // ─── Editing ────────────────────────────────────────────────────────────
@@ -585,7 +591,7 @@ async fn editing_one_agents_entry_leaves_every_other_file_alone() {
 }
 
 #[tokio::test]
-async fn codexs_config_keeps_its_comments_its_order_and_its_other_tables() {
+async fn codex_config_changes_are_refused() {
     let sandbox = Sandbox::new();
     sandbox.write(McpAppType::Codex, CODEX);
     let result = sandbox
@@ -603,52 +609,15 @@ async fn codexs_config_keeps_its_comments_its_order_and_its_other_tables() {
             enable(McpAppType::Codex, "files", true),
         ])
         .await;
-    assert_eq!(result.outcome, McpApplyOutcome::Applied, "{result:?}");
-    let effects: Vec<McpOpEffect> = result_of(&result, McpAppType::Codex)
-        .ops
-        .iter()
-        .map(|op| op.effect)
-        .collect();
-    assert_eq!(
-        effects,
-        [
-            McpOpEffect::Updated,
-            McpOpEffect::Created,
-            McpOpEffect::Enabled
-        ]
-    );
-    let expected = r#"# my codex config
-model = "gpt-5.5" # the default
-
-[mcp_servers.linear]
-url = "https://mcp.linear.app/v2" # streamable
-bearer_token_env_var = "LINEAR_TOKEN"
-startup_timeout_sec = 20
-
-[mcp_servers.linear.http_headers]
-X-Team = "core"
-
-[mcp_servers.files]
-command = "npx"
-args = ["-y", "server-files"]
-enabled = true
-
-[mcp_servers.fresh]
-command = "uvx"
-args = ["server"]
-
-[mcp_servers.fresh.env]
-TOKEN = "t"
-
-[profiles.fast]
-model = "gpt-5.5-mini"
-"#;
-    assert_eq!(sandbox.read(McpAppType::Codex).unwrap(), expected);
+    assert_eq!(result.outcome, McpApplyOutcome::Invalid, "{result:?}");
+    let codex = result_of(&result, McpAppType::Codex);
+    assert_eq!(codex.status, McpAgentStatus::ReadOnly);
+    assert_eq!(issue_codes(codex), [codes::AGENT_READ_ONLY]);
+    assert!(codex.ops.is_empty());
+    assert_eq!(sandbox.read(McpAppType::Codex).as_deref(), Some(CODEX));
 }
 
-/// Gemini's `trust`, Cline's `autoApprove` and `disabled`, Codex's
-/// `bearer_token_env_var` and timeouts: still there after an edit, and in no
-/// other agent's file.
+/// Each agent's private fields stay after an edit and in no other agent's file.
 #[tokio::test]
 async fn each_agents_own_fields_stay_where_they_are() {
     let sandbox = Sandbox::new();
@@ -660,17 +629,12 @@ async fn each_agents_own_fields_stay_where_they_are() {
         McpAppType::Cline,
         r#"{"mcpServers": {"x": {"command": "old", "autoApprove": ["read"], "disabled": true, "timeout": 60}}}"#,
     );
-    sandbox.write(
-        McpAppType::Codex,
-        "[mcp_servers.x]\ncommand = \"old\"\nstartup_timeout_sec = 20\ntool_timeout_sec = 90\nenabled_tools = [\"a\"]\n",
-    );
     let wanted = stdio("new", &["--flag"], &[("K", "v")]);
     let result = sandbox
         .apply(vec![
             set(McpAppType::Gemini, "x", wanted.clone()),
             set(McpAppType::Cline, "x", wanted.clone()),
-            set(McpAppType::Codex, "x", wanted.clone()),
-            // And a fourth agent that never had it gets the definition alone.
+            // An agent that never had it gets the definition alone.
             set(McpAppType::Kiro, "x", wanted.clone()),
         ])
         .await;
@@ -684,12 +648,6 @@ async fn each_agents_own_fields_stay_where_they_are() {
         parse_json(&sandbox.read(McpAppType::Cline).unwrap())["mcpServers"]["x"],
         json!({"command": "new", "autoApprove": ["read"], "disabled": true, "timeout": 60, "args": ["--flag"], "env": {"K": "v"}})
     );
-    let codex: toml::Table = sandbox.read(McpAppType::Codex).unwrap().parse().unwrap();
-    let entry = &codex["mcp_servers"]["x"];
-    assert_eq!(entry["command"].as_str(), Some("new"));
-    assert_eq!(entry["startup_timeout_sec"].as_integer(), Some(20));
-    assert_eq!(entry["tool_timeout_sec"].as_integer(), Some(90));
-    assert_eq!(entry["enabled_tools"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         parse_json(&sandbox.read(McpAppType::Kiro).unwrap()),
         json!({"mcpServers": {"x": {"command": "new", "args": ["--flag"], "env": {"K": "v"}}}})
@@ -699,7 +657,6 @@ async fn each_agents_own_fields_stay_where_they_are() {
     let fingerprints: Vec<Option<String>> = [
         McpAppType::Gemini,
         McpAppType::Cline,
-        McpAppType::Codex,
         McpAppType::Kiro,
     ]
     .into_iter()
@@ -837,7 +794,6 @@ async fn an_entry_is_turned_off_with_the_agents_own_flag_and_kept() {
         McpAppType::Kiro,
         r#"{"mcpServers": {"x": {"command": "x"}}}"#,
     );
-    sandbox.write(McpAppType::Codex, "[mcp_servers.x]\ncommand = \"x\"\n");
     sandbox.write(
         McpAppType::CodeBuddy,
         r#"{"mcpServers": {"x": {"command": "x"}}}"#,
@@ -850,7 +806,6 @@ async fn an_entry_is_turned_off_with_the_agents_own_flag_and_kept() {
         McpAppType::OpenCode,
         McpAppType::Cline,
         McpAppType::Kiro,
-        McpAppType::Codex,
         McpAppType::CodeBuddy,
     ];
 
@@ -877,10 +832,6 @@ async fn an_entry_is_turned_off_with_the_agents_own_flag_and_kept() {
         .read(McpAppType::OpenCode)
         .unwrap()
         .contains("// mine"));
-    assert!(sandbox
-        .read(McpAppType::Codex)
-        .unwrap()
-        .contains("enabled = false"));
     assert_eq!(
         parse_json(&sandbox.read(McpAppType::CodeBuddy).unwrap())["disabledMcpServers"],
         json!(["x"])
@@ -1054,15 +1005,12 @@ async fn one_operation_that_cannot_be_done_stops_all_of_them() {
         result_of(&result, McpAppType::ClaudeCode).status,
         McpAgentStatus::NotWritten
     );
-    for app in [McpAppType::Codex, McpAppType::ZCode] {
-        let agent = result_of(&result, app);
-        assert_eq!(agent.status, McpAgentStatus::Invalid, "{app:?}");
-        assert_eq!(
-            issue_codes(agent),
-            [codes::TRANSPORT_UNSUPPORTED],
-            "{app:?}"
-        );
-    }
+    let codex = result_of(&result, McpAppType::Codex);
+    assert_eq!(codex.status, McpAgentStatus::ReadOnly);
+    assert_eq!(issue_codes(codex), [codes::AGENT_READ_ONLY]);
+    let zcode = result_of(&result, McpAppType::ZCode);
+    assert_eq!(zcode.status, McpAgentStatus::Invalid);
+    assert_eq!(issue_codes(zcode), [codes::TRANSPORT_UNSUPPORTED]);
     assert_eq!(
         sandbox.read(McpAppType::ClaudeCode).as_deref(),
         Some(CLAUDE)
@@ -1146,26 +1094,15 @@ async fn older_locations_are_listed_and_move_when_edited() {
     assert!(!sandbox.entry(McpAppType::OpenCode, "old").enabled);
 
     let result = sandbox
-        .apply(vec![
-            enable(McpAppType::OpenCode, "old", true),
-            set(McpAppType::Codex, "old", stdio("new", &[], &[])),
-        ])
+        .apply(vec![enable(McpAppType::OpenCode, "old", true)])
         .await;
     assert_eq!(result.outcome, McpApplyOutcome::Applied, "{result:?}");
     assert_eq!(
         parse_json(&sandbox.read(McpAppType::OpenCode).unwrap()),
         json!({"mcp": {"servers": {"old": {"type": "local", "command": ["old"], "disabled": false}}}})
     );
-    let codex: toml::Table = sandbox.read(McpAppType::Codex).unwrap().parse().unwrap();
-    assert!(codex.get("mcp").is_none());
-    assert_eq!(codex["mcp_servers"]["old"]["command"].as_str(), Some("new"));
-    assert_eq!(
-        codex["mcp_servers"]["old"]["tool_timeout_sec"].as_integer(),
-        Some(9)
-    );
-    for app in [McpAppType::OpenCode, McpAppType::Codex] {
-        assert!(!sandbox.entry(app, "old").legacy, "{app:?}");
-    }
+    assert!(!sandbox.entry(McpAppType::OpenCode, "old").legacy);
+    assert!(sandbox.entry(McpAppType::Codex, "old").legacy);
 }
 
 // ─── A key that is there twice ──────────────────────────────────────────
@@ -1758,28 +1695,25 @@ async fn a_rename_takes_the_older_copy_under_the_old_name_with_it() {
     }
 
     let result = sandbox
-        .apply(vec![
-            rename(McpAppType::OpenCode, "x", "y"),
-            rename(McpAppType::Codex, "x", "y"),
-        ])
+        .apply(vec![rename(McpAppType::OpenCode, "x", "y")])
         .await;
     assert_eq!(result.outcome, McpApplyOutcome::Applied, "{result:?}");
-    for app in [McpAppType::OpenCode, McpAppType::Codex] {
-        assert_eq!(result_of(&result, app).ops[0].effect, McpOpEffect::Renamed);
-        assert_eq!(keys(app), ["y"], "{app:?}");
-        assert_eq!(
-            sandbox.entry(app, "y").definition,
-            Some(stdio("current", &[], &[]))
-        );
-    }
+    assert_eq!(
+        result_of(&result, McpAppType::OpenCode).ops[0].effect,
+        McpOpEffect::Renamed
+    );
+    assert_eq!(keys(McpAppType::OpenCode), ["y"]);
+    assert_eq!(keys(McpAppType::Codex), ["x"]);
+    assert_eq!(
+        sandbox.entry(McpAppType::OpenCode, "y").definition,
+        Some(stdio("current", &[], &[]))
+    );
     let opencode = parse_json(&sandbox.read(McpAppType::OpenCode).unwrap());
     assert_eq!(
         opencode,
         json!({"mcp": {"servers": {"y": {"type": "local", "command": ["current"]}}}})
     );
-    let codex: toml::Table = sandbox.read(McpAppType::Codex).unwrap().parse().unwrap();
-    assert!(codex.get("mcp").is_none(), "{codex:?}");
-    // What a Codex session is sent: the renamed server alone.
+    // What a Codex session is sent: the original current server alone.
     let codex_home = sandbox
         .path(McpAppType::Codex)
         .parent()
@@ -1790,7 +1724,7 @@ async fn a_rename_takes_the_older_copy_under_the_old_name_with_it() {
         &AgentEnv::with_overrides(&[("CODEX_HOME", codex_home.to_str().unwrap())]),
     )
     .unwrap();
-    assert_eq!(sent.keys().collect::<Vec<_>>(), ["y"]);
+    assert_eq!(sent.keys().collect::<Vec<_>>(), ["x"]);
 }
 
 // ─── A name that is the document's own ──────────────────────────────────
@@ -2050,7 +1984,7 @@ async fn a_preflight_writes_nothing_and_hands_back_the_basis_to_commit_with() {
     assert!(!refused.ok);
     assert_eq!(
         result_of(&refused, McpAppType::Codex).status,
-        McpAgentStatus::Invalid
+        McpAgentStatus::ReadOnly
     );
     assert_eq!(
         result_of(&refused, McpAppType::Gemini).status,
@@ -2471,12 +2405,10 @@ mod retired {
     use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
     use std::sync::Arc;
 
-    /// `mcp_remove_server`, the way an older client of this server still
-    /// calls it: it waits its turn at the MCP write lock, reaches Codex's
-    /// config.toml through the commit — so the rest of the file stays as it
-    /// is — and says which agent changed, and nothing else.
+    /// Older clients may still call `mcp_remove_server`; Codex remains a
+    /// successful no-op and announces no change.
     #[tokio::test]
-    async fn a_retired_command_takes_the_lock_and_says_which_agent_changed() {
+    async fn a_retired_codex_command_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("codex-home");
         let config = home.join("config.toml");
@@ -2491,33 +2423,8 @@ mod retired {
         };
 
         temp_env::async_with_vars([("CODEX_HOME", Some(home.as_os_str()))], async {
-            // Another writer holds the lock: the command writes nothing yet.
-            let held = crate::commands::mcp_engine::lock::acquire().await.unwrap();
-            let removing = tokio::spawn(remove_from_codex(emitter.clone()));
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
-            assert!(events.try_recv().is_err(), "nothing changed yet");
-            drop(held);
-            assert!(removing.await.unwrap().unwrap(), "the server was removed");
-
-            let after = std::fs::read_to_string(&config).unwrap();
-            assert!(after.contains("# mine"), "{after}");
-            assert!(
-                after.contains("model = \"gpt-5.5\" # the default"),
-                "{after}"
-            );
-            assert!(after.contains("command = \"kept\" # as is"), "{after}");
-            let parsed: toml::Table = after.parse().unwrap();
-            assert!(parsed["mcp_servers"].get("gone").is_none(), "{after}");
-            assert!(parsed["mcp_servers"].get("kept").is_some(), "{after}");
-
-            let event = events.try_recv().expect("the change is announced");
-            assert_eq!(event.channel, MCP_CHANGED_EVENT);
-            assert_eq!(*event.payload, json!({"agents": ["codex"]}));
-
-            // Nothing left to remove: nothing written, nothing announced.
             assert!(!remove_from_codex(emitter.clone()).await.unwrap());
-            assert_eq!(std::fs::read_to_string(&config).unwrap(), after);
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
             assert!(events.try_recv().is_err());
         })
         .await;
@@ -2586,7 +2493,7 @@ mod codex {
             .unwrap();
     }
 
-    fn assert_both_landed(config: &str) {
+    fn assert_only_catalog_landed(config: &str) {
         assert!(config.contains("# mine"), "{config}");
         assert!(config.contains("command = \"keep\" # as is"), "{config}");
         let parsed: toml::Table = config.parse().unwrap();
@@ -2596,20 +2503,14 @@ mod codex {
             parsed["model_catalog_json"].as_str(),
             Some("codeg-model-catalog.json")
         );
-        // … and the MCP server.
-        assert_eq!(
-            parsed["mcp_servers"]["added"]["command"].as_str(),
-            Some("npx")
-        );
         assert_eq!(
             parsed["mcp_servers"]["keep"]["command"].as_str(),
             Some("keep")
         );
+        assert!(parsed["mcp_servers"].get("added").is_none());
     }
 
-    /// The MCP save lands while a model-catalog save is between its
-    /// preparation and its commit: the commit starts from the file as the
-    /// MCP save left it.
+    /// A model-catalog save still lands after a refused MCP write.
     #[tokio::test]
     async fn an_mcp_save_before_a_model_catalog_commit_survives_it() {
         let env = Env::new();
@@ -2624,17 +2525,15 @@ mod codex {
                 stdio("npx", &["-y", "added"], &[]),
             )])
             .await;
-        assert_eq!(result.outcome, McpApplyOutcome::Applied, "{result:?}");
+        assert_eq!(result.outcome, McpApplyOutcome::Invalid, "{result:?}");
         let locked = lock_home(&env.home()).await.unwrap();
         commit_catalog(&locked, &prepared).await;
         drop(locked);
 
-        assert_both_landed(&env.read(CONFIG_REL).unwrap());
+        assert_only_catalog_landed(&env.read(CONFIG_REL).unwrap());
     }
 
-    /// The MCP save arrives while a model-catalog commit holds Codex's lock:
-    /// it waits, finds the file is no longer the one the user saw, and writes
-    /// nothing; saved again on the new file, both changes are there.
+    /// A refused MCP write cannot clobber a concurrent model-catalog commit.
     #[tokio::test]
     async fn an_mcp_save_during_a_model_catalog_commit_waits_and_does_not_clobber_it() {
         let env = Env::new();
@@ -2664,17 +2563,17 @@ mod codex {
         drop(locked);
 
         let result = waiting.await.unwrap();
-        assert_eq!(result.outcome, McpApplyOutcome::ChangedElsewhere);
+        assert_eq!(result.outcome, McpApplyOutcome::Invalid);
         assert_eq!(
             env.read(CONFIG_REL).unwrap(),
             after_catalog,
             "nothing written over the model catalog's commit"
         );
 
-        // The page scans again and the user confirms on the file as it is.
+        // Rescanning does not make Codex configuration writable.
         let again = sandbox.apply(ops).await;
-        assert_eq!(again.outcome, McpApplyOutcome::Applied, "{again:?}");
-        assert_both_landed(&env.read(CONFIG_REL).unwrap());
+        assert_eq!(again.outcome, McpApplyOutcome::Invalid, "{again:?}");
+        assert_only_catalog_landed(&env.read(CONFIG_REL).unwrap());
     }
 
     /// Codex's file is never written without its lock: when the lock cannot
@@ -2703,9 +2602,13 @@ mod codex {
         assert_eq!(sandbox.read(McpAppType::Codex).as_deref(), Some(CODEX));
         assert_eq!(sandbox.read(McpAppType::Gemini).as_deref(), Some("{}"));
 
-        // And a commit that reached this far without the lock refuses too.
+        // A request that can read the file is still refused by the policy.
         let result = apply::apply_locked(&sandbox.ctx, &request, &CodexAccess::Unlocked);
-        assert_eq!(result.outcome, McpApplyOutcome::WriteFailed);
+        assert_eq!(result.outcome, McpApplyOutcome::Invalid);
+        assert_eq!(
+            result_of(&result, McpAppType::Codex).status,
+            McpAgentStatus::ReadOnly
+        );
         assert_eq!(sandbox.read(McpAppType::Codex).as_deref(), Some(CODEX));
         assert_eq!(
             sandbox.read(McpAppType::Gemini).as_deref(),
@@ -2760,51 +2663,34 @@ mod codex {
         assert_eq!(sandbox.read(McpAppType::Gemini).as_deref(), Some("{}"));
         assert!(super::super::apply::changed_agents(&result).is_empty());
 
-        // The model catalog is done: the same save, confirmed again, lands.
+        // The model catalog is done: the same save remains refused.
         drop(locked);
         let again = sandbox.apply(ops).await;
-        assert_eq!(again.outcome, McpApplyOutcome::Applied, "{again:?}");
-        assert!(env
-            .read(CONFIG_REL)
-            .unwrap()
-            .contains("[mcp_servers.added]"));
-        assert!(sandbox.read(McpAppType::Gemini).unwrap().contains("\"x\""));
+        assert_eq!(again.outcome, McpApplyOutcome::Invalid, "{again:?}");
+        assert_eq!(env.read(CONFIG_REL).as_deref(), Some(CONFIG));
+        assert_eq!(sandbox.read(McpAppType::Gemini).as_deref(), Some("{}"));
     }
 
-    /// Undoing a write of Codex's file goes through its commit as well.
+    /// A refused Codex write prevents every file in the atomic request from
+    /// being changed.
     #[tokio::test]
     async fn a_failed_save_puts_codexs_file_back_through_its_commit() {
-        let _hooks = HooksGuard;
         let sandbox = Sandbox::new();
         sandbox.write(McpAppType::Codex, CODEX);
         sandbox.write(McpAppType::Gemini, "{}");
-        hooks::fail_write_of(Some(sandbox.path(McpAppType::Gemini)));
         let result = sandbox
             .apply(vec![
                 set(McpAppType::Codex, "x", stdio("x", &[], &[])),
                 set(McpAppType::Gemini, "x", stdio("x", &[], &[])),
             ])
             .await;
-        assert_eq!(result.outcome, McpApplyOutcome::WriteFailed);
+        assert_eq!(result.outcome, McpApplyOutcome::Invalid);
         assert_eq!(
             result_of(&result, McpAppType::Codex).status,
-            McpAgentStatus::Restored
+            McpAgentStatus::ReadOnly
         );
         assert_eq!(sandbox.read(McpAppType::Codex).as_deref(), Some(CODEX));
-
-        // A config.toml the save itself created is taken away again.
-        std::fs::remove_file(sandbox.path(McpAppType::Codex)).unwrap();
-        let result = sandbox
-            .apply(vec![
-                set(McpAppType::Codex, "x", stdio("x", &[], &[])),
-                set(McpAppType::Gemini, "x", stdio("x", &[], &[])),
-            ])
-            .await;
-        assert_eq!(
-            result_of(&result, McpAppType::Codex).status,
-            McpAgentStatus::Restored
-        );
-        assert!(sandbox.read(McpAppType::Codex).is_none());
+        assert_eq!(sandbox.read(McpAppType::Gemini).as_deref(), Some("{}"));
     }
 }
 

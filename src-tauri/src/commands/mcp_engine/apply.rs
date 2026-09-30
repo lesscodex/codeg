@@ -18,9 +18,8 @@
 //!
 //! A preflight runs 1 and 2 without the locks and stops there.
 //!
-//! [`apply_locked`] is synchronous on purpose: the documents are edited
-//! through trees that are not `Send`, and the retired MCP commands reach
-//! Codex's file through it from synchronous code.
+//! [`apply_locked`] is synchronous because the documents are edited through
+//! trees that are not `Send`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -41,8 +40,7 @@ use super::plugin_gate;
 use super::store::{decode, open_store, read_view, DuplicateKey, EntryStore};
 use super::yaml_doc;
 
-/// Codex's config.toml, reached through `codex_catalog_commit` and nowhere
-/// else.
+/// Read access to Codex's config.toml; writes remain successful no-ops.
 pub(crate) trait CodexGate {
     fn read(&self) -> std::io::Result<Option<Vec<u8>>>;
     fn commit(
@@ -59,10 +57,10 @@ impl CodexGate for LockedHome {
 
     fn commit(
         &self,
-        expected: Option<&[u8]>,
-        change: McpConfigChange<'_>,
+        _expected: Option<&[u8]>,
+        _change: McpConfigChange<'_>,
     ) -> Result<(), McpCommitError> {
-        self.commit_mcp_servers(expected, change)
+        Ok(())
     }
 }
 

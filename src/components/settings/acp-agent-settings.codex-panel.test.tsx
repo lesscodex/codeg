@@ -2,14 +2,11 @@
  * The Codex configuration card, driven through the real panel:
  * - the Fast and Skills switches are gone (the composer owns Fast per
  *   session; codex dropped the `skills` flag in 0.80.0);
- * - the WebSocket switch exists only in the provider modes, and writes the
- *   provider's `supports_websockets` and nothing else;
- * - config.toml is shown and saved as it is on disk — no forced
+ * - the WebSocket switch exists only in the provider modes and is disabled;
+ * - config.toml is shown read-only as it is on disk — no forced
  *   `disable_response_storage = true`.
  */
-import { render, screen, waitFor, within } from "@testing-library/react"
-import { parse as parseTomlDocument } from "smol-toml"
-import userEvent from "@testing-library/user-event"
+import { render, screen, within } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -136,48 +133,30 @@ describe("AcpAgentSettings — the Codex configuration card", () => {
     expect(screen.queryByText("Enable Skills")).toBeNull()
   })
 
-  it("shows config.toml as it is on disk, without forcing disable_response_storage", async () => {
-    const user = userEvent.setup()
+  it("shows config.toml read-only as it is on disk", async () => {
     await openPanel(codexAgent())
-    expect(configTomlEditor().value).toBe(API_KEY_CONFIG)
-
-    await user.click(screen.getByRole("button", { name: "Save Codex Config" }))
-    await waitFor(() => expect(acpUpdateAgentConfig).toHaveBeenCalledTimes(1))
-    const [, saved] = vi.mocked(acpUpdateAgentConfig).mock.calls[0]
-    expect(saved.codex_config_toml).toBe(API_KEY_CONFIG)
+    expect(configTomlEditor()).toHaveValue(API_KEY_CONFIG)
+    expect(configTomlEditor()).toHaveAttribute("readonly")
+    expect(
+      screen.getByRole("button", { name: "Save Codex Config" })
+    ).toBeDisabled()
+    expect(acpUpdateAgentConfig).not.toHaveBeenCalled()
+    expect(acpUpdateAgentEnv).not.toHaveBeenCalled()
   })
 
-  it("writes only supports_websockets from the WebSocket switch", async () => {
-    const user = userEvent.setup()
+  it("shows the provider WebSocket setting without allowing changes", async () => {
     await openPanel(codexAgent())
     const ws = screen.getByRole("switch", WEBSOCKET_SWITCH)
+    expect(ws).toBeDisabled()
     expect(ws).toHaveAttribute("aria-checked", "false")
-
-    await user.click(ws)
-    expect(screen.getByRole("switch", WEBSOCKET_SWITCH)).toHaveAttribute(
-      "aria-checked",
-      "true"
-    )
-    // Exactly one key changed, on the active provider's own table.
-    const original = parseTomlDocument(API_KEY_CONFIG) as {
-      model_providers: { codeg: Record<string, unknown> }
-    }
-    expect(parseTomlDocument(configTomlEditor().value)).toEqual({
-      ...original,
-      model_providers: {
-        codeg: { ...original.model_providers.codeg, supports_websockets: true },
-      },
-    })
-
-    await user.click(screen.getByRole("switch", WEBSOCKET_SWITCH))
-    expect(parseTomlDocument(configTomlEditor().value)).toEqual(original)
+    expect(configTomlEditor()).toHaveValue(API_KEY_CONFIG)
+    expect(acpUpdateAgentConfig).not.toHaveBeenCalled()
   })
 
   // codex refuses to load a config carrying `approval_policy = "untrusted"`
   // (0.160 and 0.164 alike), so the panel names the value it found, says it has
   // to go, and never offers it.
-  it("flags a retired untrusted approval policy and never offers it", async () => {
-    const user = userEvent.setup()
+  it("flags a retired untrusted approval policy and keeps it read-only", async () => {
     await openPanel(
       codexAgent({
         codex_config_toml: `approval_policy = "untrusted"\n${API_KEY_CONFIG}`,
@@ -207,17 +186,12 @@ describe("AcpAgentSettings — the Codex configuration card", () => {
     expect(trigger).toHaveTextContent(
       enMessages.AcpAgentSettings.codex.approvalPolicy_untrusted
     )
-    await user.click(trigger)
-    const untrusted = await screen.findByRole("option", {
-      name: enMessages.AcpAgentSettings.codex.approvalPolicy_untrusted,
-    })
-    expect(untrusted).toHaveAttribute("aria-disabled", "true")
-    await user.click(
-      screen.getByRole("option", {
-        name: enMessages.AcpAgentSettings.codex["approvalPolicy_on-request"],
-      })
+    expect(trigger).toBeDisabled()
+    expect(configTomlEditor()).toHaveValue(
+      `approval_policy = "untrusted"\n${API_KEY_CONFIG}`
     )
-    expect(screen.queryByText(retired)).toBeNull()
+    expect(acpUpdateAgentConfig).not.toHaveBeenCalled()
+    expect(acpUpdateAgentEnv).not.toHaveBeenCalled()
   })
 
   // codex keeps its built-in providers whatever config.toml says about them.
