@@ -1146,9 +1146,15 @@ describe("syncTurnMetadata transcript-lag polling", () => {
   const BOUNDARY = 6
   /** Two live rounds: user, reply, user, reply (assistants at 1 and 3). */
   const liveTurns: MessageTurn[] = [
-    turn("live-77-a", "user", 6),
+    {
+      ...turn("live-77-a", "user", 6),
+      blocks: [{ type: "text", text: "turn-6" }],
+    },
     turn("live-77-b", "assistant", 7),
-    turn("live-77-c", "user", 8),
+    {
+      ...turn("live-77-c", "user", 8),
+      blocks: [{ type: "text", text: "turn-8" }],
+    },
     turn("live-77-d", "assistant", 9),
   ]
   const usage = {
@@ -1202,7 +1208,7 @@ describe("syncTurnMetadata transcript-lag polling", () => {
     expect(session()?.localTurns[3]?.completed_at).toBe(ts(9))
   })
 
-  it("names EARLIER replies once the lagging tail lands", async () => {
+  it("names earlier replies before the lagging tail lands", async () => {
     vi.useFakeTimers()
     seedBatch()
     mockGet
@@ -1212,10 +1218,10 @@ describe("syncTurnMetadata transcript-lag polling", () => {
     actions().syncTurnMetadata(CID)
     await vi.advanceTimersByTimeAsync(1600)
     await vi.advanceTimersByTimeAsync(3100)
-    // One reply short, the parse can name nothing — including the FIRST
-    // reply, which is no longer the thread tail and therefore greys its
-    // "fork from here" out until it has a name the backend can resolve.
-    expect(session()?.localTurns[1]?.source_turn_id).toBeUndefined()
+    // The next persisted user turn closes the first reply even though its own
+    // reply is still missing, so historical fork becomes available at once.
+    expect(session()?.localTurns[1]?.source_turn_id).toBe("turn-7")
+    expect(session()?.localTurns[3]?.source_turn_id).toBeUndefined()
     await vi.advanceTimersByTimeAsync(5100)
     expect(session()?.localTurns[1]?.source_turn_id).toBe("turn-7")
     expect(session()?.localTurns[3]?.source_turn_id).toBe("turn-9")
@@ -1287,17 +1293,28 @@ describe("syncTurnMetadata transcript-lag polling", () => {
     expect(session()?.localTurns[3]?.usage?.input_tokens).toBe(10)
   })
 
-  it("skips the roundtrip while a prompt is in flight, then resumes", async () => {
+  it("reconciles closed replies while a newer prompt is in flight", async () => {
     vi.useFakeTimers()
-    seedBatch({ syncState: "awaiting_persist" })
-    mockGet.mockResolvedValue(parseWindow(4))
+    seedBatch({
+      syncState: "awaiting_persist",
+      optimisticTurns: [
+        {
+          ...turn("live-77-e", "user", 10),
+          blocks: [{ type: "text", text: "turn-10" }],
+        },
+      ],
+    })
+    mockGet.mockResolvedValue(
+      windowedDetail(BOUNDARY, {
+        turns: [...parsed, turn("turn-10", "user", 10)],
+        turns_total: BOUNDARY + parsed.length + 1,
+      })
+    )
     actions().syncTurnMetadata(CID)
     await vi.advanceTimersByTimeAsync(1600)
-    expect(mockGet).not.toHaveBeenCalled()
-    actions().setSyncState(CID, "idle")
-    await vi.advanceTimersByTimeAsync(3100)
     expect(mockGet).toHaveBeenCalledTimes(1)
-    expect(session()?.localTurns[3]?.usage?.input_tokens).toBe(10)
+    expect(session()?.localTurns[1]?.source_turn_id).toBe("turn-7")
+    expect(session()?.localTurns[3]?.source_turn_id).toBe("turn-9")
   })
 
   it("stays on the schedule after a failed read", async () => {
