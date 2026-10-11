@@ -2315,6 +2315,7 @@
       "forkSessionSuccess": "セッションのフォークに成功しました",
       "forkSessionFailed": "セッションのフォークに失敗しました：{error}",
       "forkSessionBusy": "分岐に失敗しました: ターンの実行中です",
+      "forkConfirmDescription": "このメッセージから新しい会話ブランチを作成しますか？",
       "exportConversation": "会話をエクスポート",
       "exportImage": "画像",
       "exportMarkdown": "Markdown",

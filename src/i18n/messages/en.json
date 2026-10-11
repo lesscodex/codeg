@@ -2315,6 +2315,7 @@
       "forkSessionSuccess": "Session forked successfully",
       "forkSessionFailed": "Failed to fork session: {error}",
       "forkSessionBusy": "Failed to fork session: a turn is running",
+      "forkConfirmDescription": "Create a new conversation branch from this message?",
       "exportConversation": "Export Conversation",
       "exportImage": "Image",
       "exportMarkdown": "Markdown",

@@ -2315,6 +2315,7 @@
       "forkSessionSuccess": "Sitzung erfolgreich geforkt",
       "forkSessionFailed": "Sitzung konnte nicht geforkt werden: {error}",
       "forkSessionBusy": "Verzweigen fehlgeschlagen: Ein Zug läuft",
+      "forkConfirmDescription": "Einen neuen Gesprächsbranch aus dieser Nachricht erstellen?",
       "exportConversation": "Konversation exportieren",
       "exportImage": "Bild",
       "exportMarkdown": "Markdown",

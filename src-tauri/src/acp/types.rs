@@ -480,6 +480,13 @@ pub enum AcpEvent {
     /// snapshot carries the connection's recent ones for a client that attaches
     /// later; both end up as a chip on the call's row in the transcript.
     ToolApproval { approval: ToolApprovalInfo },
+    /// Codex-only native turn identity, emitted when the app-server accepts a
+    /// live turn. The frontend uses it only to promote the live reply into a
+    /// forkable completed turn; standard ACP agents never emit this event.
+    TurnStarted {
+        session_id: String,
+        native_turn_id: String,
+    },
     /// Turn completed
     TurnComplete {
         session_id: String,
@@ -2295,6 +2302,29 @@ pub struct ForkResultInfo {
     /// the pre-fork (S1) history. The current connection's conversation row
     /// (still bound in `SessionState`) gets re-pointed to S2 in the same call.
     pub sibling_conversation_id: i32,
+}
+
+/// Result of a Codex historical fork. Unlike [`ForkResultInfo`], this flow
+/// leaves the source conversation/session untouched and creates the returned
+/// conversation for the forked session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoricalForkResultInfo {
+    pub forked_session_id: String,
+    pub original_session_id: String,
+    pub forked_conversation_id: i32,
+    pub forked_conversation_title: Option<String>,
+}
+
+/// Result of the shared `acp_fork` command. The standard fork-send response
+/// keeps its historical wire shape; a detached historical fork returns the
+/// target conversation instead. Untagged serialization preserves both shapes
+/// for existing clients while letting the same command route both operations.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum AcpForkResult {
+    Standard(ForkResultInfo),
+    Historical(HistoricalForkResultInfo),
 }
 
 #[cfg(test)]

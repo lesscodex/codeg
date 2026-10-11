@@ -2315,6 +2315,7 @@
       "forkSessionSuccess": "Sesión bifurcada exitosamente",
       "forkSessionFailed": "Error al bifurcar la sesión: {error}",
       "forkSessionBusy": "Error al bifurcar: hay un turno en curso",
+      "forkConfirmDescription": "¿Crear una nueva rama de conversación desde este mensaje?",
       "exportConversation": "Exportar conversación",
       "exportImage": "Imagen",
       "exportMarkdown": "Markdown",

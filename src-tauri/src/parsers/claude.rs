@@ -4218,6 +4218,7 @@ pub(crate) fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn
 
             turns.push(MessageTurn {
                 id,
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks,
                 timestamp,
@@ -4230,6 +4231,7 @@ pub(crate) fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn
         } else if matches!(msg.role, MessageRole::System) {
             turns.push(MessageTurn {
                 id: format!("turn-{}", turns.len()),
+                native_turn_id: None,
                 role: TurnRole::System,
                 blocks: msg.content.clone(),
                 timestamp: msg.timestamp,
@@ -4243,6 +4245,7 @@ pub(crate) fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn
         } else {
             turns.push(MessageTurn {
                 id: format!("turn-{}", turns.len()),
+                native_turn_id: None,
                 role: TurnRole::User,
                 blocks: msg.content.clone(),
                 timestamp: msg.timestamp,
@@ -5426,6 +5429,7 @@ mod tests {
             model: None,
             completed_at: None,
             agent_message_id: Some(id.into()),
+            native_turn_id: None,
         };
         let compaction = |post: u64| MessageTurn {
             id: "turn-c".into(),
@@ -5440,6 +5444,7 @@ mod tests {
             model: None,
             completed_at: None,
             agent_message_id: None,
+            native_turn_id: None,
         };
 
         // Nothing since the compaction: the boundary is the only honest number.
@@ -6378,6 +6383,7 @@ mod tests {
         let turns = vec![
             MessageTurn {
                 id: "turn-0".to_string(),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: vec![],
                 timestamp,
@@ -6394,6 +6400,7 @@ mod tests {
             },
             MessageTurn {
                 id: "turn-1".to_string(),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: vec![],
                 timestamp,

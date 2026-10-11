@@ -265,6 +265,14 @@ pub enum TurnRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageTurn {
     pub id: String,
+    /// Native provider turn identifier, when the provider exposes one.
+    ///
+    /// This is intentionally separate from `id`: parsers may use synthetic
+    /// generic IDs (for example `turn-0`) for stable history/UI correlation,
+    /// while a provider such as Codex exposes an app-server turn ID that must
+    /// be preserved verbatim for provider-specific operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_turn_id: Option<String>,
     pub role: TurnRole,
     pub blocks: Vec<ContentBlock>,
     pub timestamp: DateTime<Utc>,
@@ -298,4 +306,58 @@ pub struct MessageTurn {
     /// synthesized turns, which name nothing the agent stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_message_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContentBlock, MessageTurn, TurnRole};
+
+    fn turn(native_turn_id: Option<&str>) -> MessageTurn {
+        MessageTurn {
+            id: "turn-1".to_string(),
+            native_turn_id: native_turn_id.map(str::to_string),
+            role: TurnRole::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: "done".to_string(),
+            }],
+            timestamp: "2026-03-01T10:00:00Z".parse().expect("valid timestamp"),
+            usage: None,
+            duration_ms: None,
+            model: None,
+            completed_at: None,
+            agent_message_id: None,
+        }
+    }
+
+    #[test]
+    fn native_turn_id_round_trips_without_changing_generic_id() {
+        let encoded = serde_json::to_value(turn(Some("codex-native-1"))).expect("serialize");
+        assert_eq!(encoded["id"], "turn-1");
+        assert_eq!(encoded["native_turn_id"], "codex-native-1");
+
+        let decoded: MessageTurn = serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded.id, "turn-1");
+        assert_eq!(decoded.native_turn_id.as_deref(), Some("codex-native-1"));
+    }
+
+    #[test]
+    fn missing_native_turn_id_is_legacy_compatible_and_omitted() {
+        let encoded = serde_json::to_value(turn(None)).expect("serialize");
+        assert!(encoded.get("native_turn_id").is_none());
+
+        let legacy = serde_json::json!({
+            "id": "turn-0",
+            "role": "user",
+            "blocks": [{"type": "text", "text": "done"}],
+            "timestamp": "2026-03-01T10:00:00Z",
+            "usage": null,
+            "duration_ms": null,
+            "model": null,
+            "completed_at": null
+        });
+        let decoded: MessageTurn = serde_json::from_value(legacy).expect("legacy record");
+        assert_eq!(decoded.id, "turn-0");
+        assert!(matches!(decoded.role, TurnRole::User));
+        assert!(decoded.native_turn_id.is_none());
+    }
 }

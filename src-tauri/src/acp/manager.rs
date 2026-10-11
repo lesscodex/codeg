@@ -16,6 +16,7 @@ use crate::acp::connection::{
 };
 use crate::acp::agent_mentions::strip_route_separator_from_prompt;
 use crate::acp::error::AcpError;
+use crate::acp::fork::FORK_REQUEST_TIMEOUT;
 use crate::acp::feedback::{
     bounded_feedback_batch, FeedbackItem, FeedbackStatus, PendingFeedback,
     SessionFeedbackAccess, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_RESPONSE_BYTES,
@@ -30,7 +31,8 @@ use crate::acp::question::{
 use crate::acp::terminal_runtime::TerminalShellRuntimeConfig;
 use crate::acp::types::{
     AcpEvent, AgentOptionsSnapshot, ConfigStaleKind, ConnectionInfo, ConnectionStatus,
-    ForkResultInfo, PermissionAnswerOrigin, PromptCapabilitiesInfo, PromptInputBlock,
+    ForkResultInfo, HistoricalForkResultInfo, PermissionAnswerOrigin, PromptCapabilitiesInfo,
+    PromptInputBlock,
 };
 use crate::db::entities::conversation::{self, ConversationKind, ConversationStatus};
 use crate::db::service::conversation_service;
@@ -1241,6 +1243,441 @@ impl ConnectionManager {
             .await
     }
 
+    /// Fork a Codex turn into a new conversation without changing the source
+    /// session, connection, queue, or conversation binding.
+    ///
+    /// The standard ACP `session/fork` request can carry both the AIR fork
+    /// point and Codex's optional `lastTurnId`. When the source loop is
+    /// prompting, the connection handles the request in a detached task and
+    /// keeps consuming the active turn. Persistence is also detached so an
+    /// HTTP/Tauri caller disappearing cannot leave a successful Codex fork
+    /// without its target row. Each accepted request creates its own fork; the
+    /// UI confirms deliberate repeats.
+    pub async fn fork_session_at_turn(
+        &self,
+        db: &AppDatabase,
+        conn_id: &str,
+        link_conversation_id: Option<i32>,
+        link_folder_id: Option<i32>,
+        native_turn_id: String,
+    ) -> Result<HistoricalForkResultInfo, AcpError> {
+        self.fork_session_historical(
+            db,
+            conn_id,
+            link_conversation_id,
+            link_folder_id,
+            Some(native_turn_id),
+            None,
+        )
+        .await
+    }
+
+    /// Historical fork entry point used by the Codeg message action. It keeps
+    /// the source tab/session untouched while routing the fork through the
+    /// standard ACP `session/fork` request. Either identity may be absent, but
+    /// at least one is required; when both are present they are sent together
+    /// so the adapter can use the UUID as the exact cut and AIR as its stable
+    /// fallback.
+    pub async fn fork_session_historical(
+        &self,
+        db: &AppDatabase,
+        conn_id: &str,
+        link_conversation_id: Option<i32>,
+        link_folder_id: Option<i32>,
+        native_turn_id: Option<String>,
+        fork_from_turn_id: Option<String>,
+    ) -> Result<HistoricalForkResultInfo, AcpError> {
+        let native_turn_id = native_turn_id
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| id.trim().to_string());
+        let fork_from_turn_id = fork_from_turn_id
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| id.trim().to_string());
+        if native_turn_id.is_none() && fork_from_turn_id.is_none() {
+            return Err(AcpError::protocol(
+                "historical fork requires a native turn ID or rendered turn ID".to_string(),
+            ));
+        }
+
+        let (state_arc, cmd_tx, emitter, agent_type) = {
+            let connections = self.connections.lock().await;
+            let conn = connections
+                .get(conn_id)
+                .ok_or_else(|| AcpError::ConnectionNotFound(conn_id.into()))?;
+            (
+                conn.state.clone(),
+                conn.cmd_tx.clone(),
+                conn.emitter.clone(),
+                conn.agent_type,
+            )
+        };
+        let source_external_id_before_lock = state_arc.read().await.external_id.clone();
+
+        if agent_type != AgentType::Codex {
+            return Err(AcpError::protocol(
+                "historical turn fork is only supported for Codex sessions".to_string(),
+            ));
+        }
+
+        // Serialize the source-row linkage and fork lifecycle with ordinary
+        // prompts and fork-send. The connection loop does not use this lock,
+        // so an active source turn keeps streaming; holding it here only keeps
+        // a competing prompt/fork from rebinding the source row until the
+        // detached historical operation has persisted S2.
+        let prompt_lock = self.clone_prompt_lock(conn_id).await?;
+        let prompt_guard = prompt_lock.lock_owned().await;
+        let (source_conversation_id, link_conversation) = {
+            let state = state_arc.read().await;
+            let status = state.status.clone();
+            if !matches!(status, ConnectionStatus::Connected | ConnectionStatus::Prompting) {
+                return Err(AcpError::protocol(
+                    "historical turn fork requires a connected or prompting session".to_string(),
+                ));
+            }
+            if !state.fork_supported {
+                return Err(AcpError::protocol(
+                    "This agent does not support session/fork.".to_string(),
+                ));
+            }
+
+            if let Some(expected) = source_external_id_before_lock.as_deref() {
+                if state.external_id.as_deref() != Some(expected) {
+                    return Err(AcpError::protocol(
+                        "source session changed before the historical fork could start"
+                            .to_string(),
+                    ));
+                }
+            }
+
+            match state.conversation_id {
+                Some(conversation_id) => (conversation_id, None),
+                None => match (link_conversation_id, link_folder_id) {
+                    (Some(conversation_id), Some(folder_id)) => (
+                        conversation_id,
+                        Some((conversation_id, folder_id)),
+                    ),
+                    _ => {
+                        return Err(AcpError::protocol(
+                            "historical turn fork requires a linked conversation row"
+                                .to_string(),
+                        ));
+                    }
+                },
+            }
+        };
+        let fork_point = match fork_from_turn_id {
+            None => None,
+            Some(turn_id) => {
+                match crate::commands::conversations::get_folder_conversation_core(
+                    &db.conn,
+                    source_conversation_id,
+                )
+                .await
+                {
+                    Ok((detail, _)) => {
+                        let point = crate::acp::fork::resolve_fork_point(
+                            &detail.turns,
+                            &turn_id,
+                            agent_type,
+                        );
+                        if point.is_none() {
+                            tracing::info!(
+                                connection_id = %conn_id,
+                                turn_id = %turn_id,
+                                "[ACP] no historical fork point resolved; forking at the tail"
+                            );
+                        }
+                        point
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            connection_id = %conn_id,
+                            turn_id = %turn_id,
+                            "[ACP] could not read the conversation to resolve its historical fork point ({error}); forking at the tail"
+                        );
+                        None
+                    }
+                }
+            }
+        };
+        let db_conn = db.conn.clone();
+        let emitter_for_task = emitter.clone();
+        let state_for_task = state_arc.clone();
+        let source_external_id_for_task = source_external_id_before_lock.clone();
+        let conn_id_for_task = conn_id.to_string();
+        let handle = tokio::spawn(async move {
+            let _prompt_guard = prompt_guard;
+            let outcome: Result<HistoricalForkResultInfo, AcpError> = async {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                let protocol_result = match tokio::time::timeout(FORK_REQUEST_TIMEOUT, async {
+                    cmd_tx
+                        .send(ConnectionCommand::Fork {
+                            fork_point,
+                            native_turn_id,
+                            historical: true,
+                            reply: reply_tx,
+                        })
+                        .await
+                        .map_err(|_| AcpError::ProcessExited)?;
+                    reply_rx
+                        .await
+                        .map_err(|_| {
+                            AcpError::protocol("historical fork reply channel closed".to_string())
+                        })?
+                })
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        return Err(AcpError::protocol(format!(
+                            "historical fork timed out after {} seconds",
+                            FORK_REQUEST_TIMEOUT.as_secs()
+                        )));
+                    }
+                };
+
+                // The connection loop keeps processing source events while
+                // Codex answers the fork request. Refuse to persist S2 if a
+                // competing lifecycle transition changed the source binding
+                // during that window. A connection that was initially
+                // unbound may legitimately learn S1 here; it must not learn a
+                // different session.
+                {
+                    let state = state_for_task.read().await;
+                    let external_matches = match (
+                        source_external_id_for_task.as_deref(),
+                        state.external_id.as_deref(),
+                    ) {
+                        (Some(initial), Some(current)) => {
+                            initial == current
+                                && current == protocol_result.original_session_id.as_str()
+                        }
+                        (Some(_), None) => false,
+                        (None, Some(current)) => {
+                            current == protocol_result.original_session_id.as_str()
+                        }
+                        (None, None) => true,
+                    };
+                    if !external_matches {
+                        return Err(AcpError::protocol(
+                            "source session changed during the historical fork".to_string(),
+                        ));
+                    }
+                    if link_conversation.is_none()
+                        && state.conversation_id != Some(source_conversation_id)
+                    {
+                        return Err(AcpError::protocol(
+                            "source conversation changed during the historical fork".to_string(),
+                        ));
+                    }
+                    if let Some((conversation_id, _)) = link_conversation {
+                        if state.conversation_id.is_some_and(|current| current != conversation_id)
+                        {
+                            return Err(AcpError::protocol(
+                                "source conversation changed during the historical fork"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                let (forked_conversation_id, forked_conversation_title) =
+                    Self::persist_historical_fork_outcome(
+                        &db_conn,
+                        source_conversation_id,
+                        protocol_result.forked_session_id.clone(),
+                        protocol_result.original_session_id.clone(),
+                    )
+                    .await?;
+
+                // A resumed historical connection can be unbound until its
+                // first prompt. Delay the in-memory linkage until the
+                // protocol request and target-row transaction have both
+                // succeeded, so cancellation or a failed fork leaves no
+                // partial source transition. The detached task owns this
+                // publication, just like the DB write and protocol reply.
+                if let Some((conversation_id, folder_id)) = link_conversation {
+                    let current_conversation_id =
+                        state_for_task.read().await.conversation_id;
+                    match current_conversation_id {
+                        None => {
+                            emit_with_state(
+                                &state_for_task,
+                                &emitter_for_task,
+                                AcpEvent::ConversationLinked {
+                                    conversation_id,
+                                    folder_id,
+                                    parent_conversation_id: None,
+                                    parent_tool_use_id: None,
+                                },
+                            )
+                            .await;
+                        }
+                        Some(current) if current == conversation_id => {}
+                        Some(_) => {
+                            return Err(AcpError::protocol(
+                                "source conversation changed before the historical fork could be linked"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                crate::commands::conversations::emit_conversation_upsert(
+                    &emitter_for_task,
+                    &db_conn,
+                    forked_conversation_id,
+                )
+                .await;
+
+                let result = HistoricalForkResultInfo {
+                    forked_session_id: protocol_result.forked_session_id,
+                    original_session_id: protocol_result.original_session_id,
+                    forked_conversation_id,
+                    forked_conversation_title,
+                };
+                Ok(result)
+            }
+            .await;
+            if let Err(error) = &outcome {
+                tracing::error!(
+                    "[ACP][ERROR] historical fork failed (conn={conn_id_for_task}): {error}"
+                );
+            }
+            outcome
+        });
+
+        match handle.await {
+            Ok(result) => result,
+            Err(join_err) => Err(AcpError::protocol(format!(
+                "historical fork task did not complete: {join_err}"
+            ))),
+        }
+    }
+
+    /// Insert the target row for a historical fork. The source row is read
+    /// and validated but never repointed or otherwise rewritten. An existing
+    /// live holder for the forked session is adopted, which makes a retry
+    /// after a caller cancellation safe under the unique external-id index.
+    async fn persist_historical_fork_outcome(
+        db_conn: &DatabaseConnection,
+        source_conversation_id: i32,
+        forked_session_id: String,
+        original_session_id: String,
+    ) -> Result<(i32, Option<String>), AcpError> {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, QueryFilter};
+
+        if forked_session_id.is_empty() || forked_session_id == original_session_id {
+            return Err(AcpError::protocol(
+                "historical fork returned an invalid session id".to_string(),
+            ));
+        }
+
+        db_conn
+            .transaction::<_, (i32, Option<String>), sea_orm::DbErr>(|txn| {
+                Box::pin(async move {
+                    // Claim SQLite's writer lock without changing any source
+                    // value. This keeps the source snapshot current and
+                    // prevents a concurrent rename/delete or target insert
+                    // from interposing between the read and INSERT, while the
+                    // source conversation remains bound to S1.
+                    let claimed = conversation::Entity::update_many()
+                        .col_expr(
+                            conversation::Column::UpdatedAt,
+                            Expr::col(conversation::Column::UpdatedAt).into(),
+                        )
+                        .filter(conversation::Column::Id.eq(source_conversation_id))
+                        .filter(conversation::Column::DeletedAt.is_null())
+                        .exec(txn)
+                        .await?;
+                    if claimed.rows_affected == 0 {
+                        return Err(sea_orm::DbErr::Custom(format!(
+                            "conversation {source_conversation_id} not found or deleted"
+                        )));
+                    }
+
+                    let source = conversation::Entity::find_by_id(source_conversation_id)
+                        .one(txn)
+                        .await?
+                        .ok_or_else(|| {
+                            sea_orm::DbErr::Custom(format!(
+                                "conversation {source_conversation_id} not found"
+                            ))
+                        })?;
+                    if source.deleted_at.is_some() {
+                        return Err(sea_orm::DbErr::Custom(format!(
+                            "conversation {source_conversation_id} is deleted"
+                        )));
+                    }
+                    if source.external_id.as_deref() != Some(original_session_id.as_str()) {
+                        return Err(sea_orm::DbErr::Custom(format!(
+                            "conversation {source_conversation_id} is no longer bound to the source session"
+                        )));
+                    }
+
+                    if let Some(existing) = conversation::Entity::find()
+                        .filter(conversation::Column::ExternalId.eq(forked_session_id.clone()))
+                        .filter(conversation::Column::AgentType.eq(source.agent_type.clone()))
+                        .one(txn)
+                        .await?
+                    {
+                        if existing.deleted_at.is_some() {
+                            return Err(sea_orm::DbErr::Custom(format!(
+                                "forked session {} belongs to a deleted conversation",
+                                forked_session_id
+                            )));
+                        }
+                        return Ok((existing.id, existing.title));
+                    }
+
+                    let clean_title = source.title.as_ref().map(|title| {
+                        title
+                            .strip_prefix("[Fork]")
+                            .map(str::trim_start)
+                            .unwrap_or(title.as_str())
+                            .to_string()
+                    });
+                    let forked_title = clean_title
+                        .as_ref()
+                        .map(|title| format!("[Fork] {title}"));
+                    let now = chrono::Utc::now();
+                    let target = conversation::ActiveModel {
+                        id: NotSet,
+                        folder_id: Set(source.folder_id),
+                        title: Set(forked_title.clone()),
+                        title_locked: Set(forked_title.is_some() || source.title_locked),
+                        agent_type: Set(source.agent_type.clone()),
+                        // S2 is forked at a completed historical turn and has
+                        // no prompt running yet. Its independent connection
+                        // will move the row back to InProgress on the first
+                        // prompt, just like any resumed completed conversation.
+                        status: Set(ConversationStatus::PendingReview),
+                        kind: Set(source.kind.clone()),
+                        model: Set(source.model.clone()),
+                        git_branch: Set(source.git_branch.clone()),
+                        external_id: Set(Some(forked_session_id)),
+                        parent_id: Set(source.parent_id),
+                        parent_tool_use_id: Set(source.parent_tool_use_id.clone()),
+                        delegation_call_id: Set(source.delegation_call_id.clone()),
+                        message_count: Set(source.message_count),
+                        created_at: Set(now),
+                        updated_at: Set(now),
+                        deleted_at: Set(None),
+                        pinned_at: Set(None),
+                        origin_cwd: Set(source.origin_cwd.clone()),
+                        assistant_id: Set(source.assistant_id),
+                        assistant_snapshot: Set(source.assistant_snapshot.clone()),
+                        source: Set(source.source.clone()),
+                    };
+                    let inserted = target.insert(txn).await?;
+                    Ok((inserted.id, inserted.title))
+                })
+            })
+            .await
+            .map_err(|error| AcpError::protocol(error.to_string()))
+    }
+
     /// Send a prompt while ensuring a `Conversation` DB row is bound to this
     /// connection. On the first call (when `state.conversation_id` is None),
     /// either:
@@ -2229,6 +2666,10 @@ impl ConnectionManager {
         // `send_prompt_linked`'s Branch A contract).
         link_conversation_id: Option<i32>,
         link_folder_id: Option<i32>,
+        // Optional native Codex turn ID. When present, the connection sends it
+        // as `lastTurnId` on the standard ACP `session/fork` request; no other
+        // agent may interpret this value.
+        native_turn_id: Option<String>,
         // Fork at this rendered turn instead of at the tail ("fork from here").
         // Resolved to an agent-specific `ForkPoint` below; a turn this agent
         // cannot name simply forks at the tail, which is what fork-send has
@@ -2259,6 +2700,21 @@ impl ConnectionManager {
         // back to `Cancelled`.
         let prompt_lock = self.clone_prompt_lock(conn_id).await?;
         let prompt_guard = prompt_lock.lock_owned().await;
+
+        let agent_type = state_arc.read().await.agent_type;
+        if let Some(native_turn_id) = native_turn_id.as_deref() {
+            if native_turn_id.trim().is_empty() {
+                return Err(AcpError::protocol(
+                    "native Codex turn ID must not be empty".to_string(),
+                ));
+            }
+            if agent_type != AgentType::Codex {
+                return Err(AcpError::protocol(
+                    "native Codex turn ID fork is only supported for Codex sessions"
+                        .to_string(),
+                ));
+            }
+        }
 
         // Link the conversation row on demand, under the prompt lock so it
         // can't race a concurrent first prompt. A conversation opened from
@@ -2297,42 +2753,42 @@ impl ConnectionManager {
         // nothing. Failing to resolve is not an error — it degrades to the tail
         // fork rather than refusing the user's click.
         let fork_point = match fork_from_turn_id {
-            None => None,
-            Some(turn_id) => {
-                let agent_type = state_arc.read().await.agent_type;
-                match crate::commands::conversations::get_folder_conversation_core(
-                    &db.conn,
-                    conversation_id,
-                )
-                .await
-                {
-                    Ok((detail, _)) => {
-                        let point = crate::acp::fork::resolve_fork_point(
-                            &detail.turns,
-                            &turn_id,
-                            agent_type,
-                        );
-                        if point.is_none() {
-                            tracing::info!(
+                None => None,
+                Some(turn_id) => {
+                    let agent_type = state_arc.read().await.agent_type;
+                    match crate::commands::conversations::get_folder_conversation_core(
+                        &db.conn,
+                        conversation_id,
+                    )
+                    .await
+                    {
+                        Ok((detail, _)) => {
+                            let point = crate::acp::fork::resolve_fork_point(
+                                &detail.turns,
+                                &turn_id,
+                                agent_type,
+                            );
+                            if point.is_none() {
+                                tracing::info!(
+                                    connection_id = %conn_id,
+                                    turn_id = %turn_id,
+                                    agent = %agent_type,
+                                    "[ACP] no fork point for this turn; forking at the tail"
+                                );
+                            }
+                            point
+                        }
+                        Err(e) => {
+                            tracing::warn!(
                                 connection_id = %conn_id,
                                 turn_id = %turn_id,
-                                agent = %agent_type,
-                                "[ACP] no fork point for this turn; forking at the tail"
+                                "[ACP] could not read the conversation to resolve a fork point \
+                                 ({e}); forking at the tail"
                             );
+                            None
                         }
-                        point
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            connection_id = %conn_id,
-                            turn_id = %turn_id,
-                            "[ACP] could not read the conversation to resolve a fork point \
-                             ({e}); forking at the tail"
-                        );
-                        None
                     }
                 }
-            }
         };
 
         // Reject if a turn is already in flight. `prompt_lock` is FREE between a
@@ -2375,16 +2831,30 @@ impl ConnectionManager {
             let outcome: Result<ForkResultInfo, AcpError> = async {
                 // Protocol-only round trip — no DB writes inside the loop.
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                cmd_tx
-                    .send(ConnectionCommand::Fork {
-                        fork_point,
-                        reply: reply_tx,
-                    })
-                    .await
-                    .map_err(|_| AcpError::ProcessExited)?;
-                let protocol_result = reply_rx
-                    .await
-                    .map_err(|_| AcpError::protocol("Fork reply channel closed".to_string()))??;
+                let protocol_result = match tokio::time::timeout(FORK_REQUEST_TIMEOUT, async {
+                    cmd_tx
+                        .send(ConnectionCommand::Fork {
+                            fork_point,
+                            native_turn_id,
+                            historical: false,
+                            reply: reply_tx,
+                        })
+                        .await
+                        .map_err(|_| AcpError::ProcessExited)?;
+                    reply_rx.await.map_err(|_| {
+                        AcpError::protocol("Fork reply channel closed".to_string())
+                    })?
+                })
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        return Err(AcpError::protocol(format!(
+                            "fork timed out after {} seconds",
+                            FORK_REQUEST_TIMEOUT.as_secs()
+                        )));
+                    }
+                };
 
                 let forked_session_id = protocol_result.forked_session_id;
                 let original_session_id = protocol_result.original_session_id;
@@ -6820,7 +7290,9 @@ mod tests {
             s.turn_in_flight = true; // a turn is already running
         }
 
-        let res = mgr.fork_session(&db, conn_id, None, None, None).await;
+        let res = mgr
+            .fork_session(&db, conn_id, None, None, None, None)
+            .await;
         assert!(
             matches!(res, Err(AcpError::TurnInProgress)),
             "fork must reject with TurnInProgress while a turn is in flight, got {res:?}"
@@ -6829,6 +7301,496 @@ mod tests {
             cmd_rx.try_recv().is_err(),
             "a rejected fork must NOT enqueue a Fork command"
         );
+    }
+
+    #[tokio::test]
+    async fn fork_session_rejects_native_turn_id_for_non_codex() {
+        use crate::db::test_helpers;
+        let db = test_helpers::fresh_in_memory_db().await;
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-fork-non-codex";
+        let mut cmd_rx = insert_live_connection(&mgr, conn_id, AgentType::ClaudeCode, None).await;
+        mgr.get_state(conn_id)
+            .await
+            .unwrap()
+            .write()
+            .await
+            .conversation_id = Some(7);
+
+        let err = mgr
+            .fork_session(
+                &db,
+                conn_id,
+                None,
+                None,
+                Some("native-codex-turn".into()),
+                None,
+            )
+            .await
+            .expect_err("a native Codex turn must not fork a non-Codex session");
+        assert!(
+            err.to_string()
+                .contains("only supported for Codex sessions"),
+            "unsupported error should identify the Codex-only restriction, got: {err}"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "unsupported native fork must not enqueue a Fork command"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_propagates_native_codex_turn_id_and_persists() {
+        use crate::acp::connection::ConnectionCommand;
+        use crate::db::test_helpers;
+
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/fork-native-turn").await;
+        let pre = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("Native turn".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(&db.conn, pre.id, "session-S1", &[])
+            .await
+            .unwrap();
+
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-fork-native-turn";
+        let (tx, mut rx) = mpsc::channel::<ConnectionCommand>(4);
+        let mut state = SessionState::new(
+            conn_id.to_string(),
+            AgentType::Codex,
+            None,
+            "test-window".to_string(),
+            None,
+        );
+        state.conversation_id = Some(pre.id);
+        state.status = ConnectionStatus::Connected;
+        let conn = AgentConnection {
+            id: conn_id.to_string(),
+            agent_type: AgentType::Codex,
+            status: ConnectionStatus::Connected,
+            owner_window_label: "test-window".to_string(),
+            cmd_tx: tx,
+            state: Arc::new(RwLock::new(state)),
+            emitter: EventEmitter::Noop,
+            prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        mgr.connections
+            .lock()
+            .await
+            .insert(conn_id.to_string(), conn);
+
+        let join = tokio::spawn(async move {
+            let command = rx.recv().await.expect("fork command should be enqueued");
+            let reply = match command {
+                ConnectionCommand::Fork {
+                    native_turn_id,
+                    reply,
+                    ..
+                } => {
+                    assert_eq!(native_turn_id.as_deref(), Some("native-turn-7"));
+                    reply
+                }
+                _ => panic!("expected Fork command"),
+            };
+            let _ = reply.send(Ok(crate::acp::types::ForkProtocolResult {
+                forked_session_id: "session-S2".into(),
+                original_session_id: "session-S1".into(),
+            }));
+        });
+
+        let result = mgr
+            .fork_session(
+                &db,
+                conn_id,
+                None,
+                None,
+                Some("native-turn-7".into()),
+                None,
+            )
+            .await
+            .expect("Codex fork-at-turn should persist through the standard path");
+        join.await.expect("fake fork loop should finish");
+
+        assert_eq!(result.forked_session_id, "session-S2");
+        let current = conversation_service::get_by_id(&db.conn, pre.id)
+            .await
+            .unwrap();
+        assert_eq!(current.external_id.as_deref(), Some("session-S2"));
+        let sibling = conversation_service::get_by_id(&db.conn, result.sibling_conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(sibling.external_id.as_deref(), Some("session-S1"));
+    }
+
+    #[tokio::test]
+    async fn historical_fork_at_turn_keeps_prompting_source_untouched() {
+        use crate::acp::connection::ConnectionCommand;
+        use crate::db::test_helpers;
+        use sea_orm::EntityTrait;
+
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/historical-fork").await;
+        let source = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("Topic".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(&db.conn, source.id, "session-S1", &[])
+            .await
+            .unwrap();
+        let source_before = conversation_service::get_by_id(&db.conn, source.id)
+            .await
+            .unwrap();
+
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-historical-fork";
+        let (tx, mut rx) = mpsc::channel::<ConnectionCommand>(4);
+        let mut state = SessionState::new(
+            conn_id.to_string(),
+            AgentType::Codex,
+            None,
+            "test-window".to_string(),
+            None,
+        );
+        state.conversation_id = Some(source.id);
+        state.external_id = Some("session-S1".into());
+        state.status = ConnectionStatus::Prompting;
+        state.fork_supported = true;
+        state.turn_in_flight = true;
+        let source_state = Arc::new(RwLock::new(state));
+        mgr.connections.lock().await.insert(
+            conn_id.to_string(),
+            AgentConnection {
+                id: conn_id.to_string(),
+                agent_type: AgentType::Codex,
+                status: ConnectionStatus::Prompting,
+                owner_window_label: "test-window".into(),
+                cmd_tx: tx,
+                state: source_state.clone(),
+                emitter: EventEmitter::Noop,
+                prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+                config_fingerprint: String::new(),
+                last_observed_fingerprint: String::new(),
+                child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            },
+        );
+
+        let command_task = tokio::spawn(async move {
+            match rx.recv().await.expect("historical fork command") {
+                ConnectionCommand::Fork {
+                    native_turn_id,
+                    fork_point,
+                    historical,
+                    reply,
+                } => {
+                    assert_eq!(native_turn_id.as_deref(), Some("codex-turn-17"));
+                    assert!(fork_point.is_none());
+                    assert!(historical);
+                    reply
+                        .send(Ok(crate::acp::types::ForkProtocolResult {
+                            forked_session_id: "session-S2".into(),
+                            original_session_id: "session-S1".into(),
+                        }))
+                        .expect("historical caller is listening");
+                }
+                _ => panic!("expected historical Fork command"),
+            }
+        });
+
+        let result = mgr
+            .fork_session_at_turn(
+                &db,
+                conn_id,
+                Some(source.id),
+                Some(folder_id),
+                "codex-turn-17".into(),
+            )
+            .await
+            .expect("historical fork should succeed while source is prompting");
+        command_task.await.unwrap();
+
+        assert_eq!(result.forked_session_id, "session-S2");
+        assert_ne!(result.forked_conversation_id, source.id);
+        let source_after = conversation_service::get_by_id(&db.conn, source.id)
+            .await
+            .unwrap();
+        assert_eq!(source_after.external_id.as_deref(), Some("session-S1"));
+        assert_eq!(source_after.title.as_deref(), Some("Topic"));
+        assert_eq!(source_after.updated_at, source_before.updated_at);
+        {
+            let state = source_state.read().await;
+            assert_eq!(state.conversation_id, Some(source.id));
+            assert_eq!(state.external_id.as_deref(), Some("session-S1"));
+            assert!(state.turn_in_flight);
+            assert_eq!(state.status, ConnectionStatus::Prompting);
+        }
+
+        let target = conversation::Entity::find_by_id(result.forked_conversation_id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .expect("target conversation should be persisted");
+        assert_eq!(target.external_id.as_deref(), Some("session-S2"));
+        assert_eq!(target.title.as_deref(), Some("[Fork] Topic"));
+        assert_eq!(target.status, ConversationStatus::PendingReview);
+        assert_eq!(target.folder_id, folder_id);
+        assert_eq!(
+            mgr.find_connection_by_conversation_id(source.id).await.as_deref(),
+            Some(conn_id),
+            "the source conversation must retain its original connection"
+        );
+        assert_eq!(
+            mgr.find_connection_by_conversation_id(result.forked_conversation_id)
+                .await,
+            None,
+            "the historical target must not borrow the source connection"
+        );
+
+        source_state.write().await.apply_event(&AcpEvent::TurnComplete {
+            session_id: "session-S1".into(),
+            stop_reason: "end_turn".into(),
+            agent_type: AgentType::Codex.to_string(),
+        });
+        assert!(!source_state.read().await.turn_in_flight);
+    }
+
+    #[tokio::test]
+    async fn historical_fork_links_unbound_source_without_self_deadlock() {
+        use crate::acp::connection::ConnectionCommand;
+        use crate::db::test_helpers;
+
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id =
+            test_helpers::seed_folder(&db, "/tmp/historical-fork-unbound").await;
+        let source = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("Unbound topic".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(&db.conn, source.id, "session-U1", &[])
+            .await
+            .unwrap();
+
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-historical-unbound";
+        let mut rx = insert_live_connection(&mgr, conn_id, AgentType::Codex, None).await;
+        {
+            let state = mgr.get_state(conn_id).await.unwrap();
+            let mut state = state.write().await;
+            state.external_id = Some("session-U1".into());
+            state.fork_supported = true;
+            assert!(state.conversation_id.is_none());
+        }
+
+        let command_task = tokio::spawn(async move {
+            match rx.recv().await.expect("historical fork command") {
+                ConnectionCommand::Fork {
+                    historical: true,
+                    reply,
+                    ..
+                } => reply
+                    .send(Ok(crate::acp::types::ForkProtocolResult {
+                        forked_session_id: "session-U2".into(),
+                        original_session_id: "session-U1".into(),
+                    }))
+                    .expect("historical caller is listening"),
+                _ => panic!("expected historical Fork command"),
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            mgr.fork_session_at_turn(
+                &db,
+                conn_id,
+                Some(source.id),
+                Some(folder_id),
+                "codex-turn-unbound".into(),
+            ),
+        )
+        .await
+        .expect("unbound source linkage must not deadlock")
+        .expect("historical fork should succeed");
+        command_task.await.unwrap();
+
+        assert_eq!(result.forked_session_id, "session-U2");
+        let state = mgr.get_state(conn_id).await.unwrap();
+        assert_eq!(state.read().await.conversation_id, Some(source.id));
+    }
+
+    #[tokio::test]
+    async fn historical_fork_at_turn_rejects_connections_without_fork_support() {
+        use crate::db::test_helpers;
+
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/historical-fork-capability").await;
+        let source = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("Capability topic".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(&db.conn, source.id, "session-capability", &[])
+            .await
+            .unwrap();
+
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-historical-capability";
+        mgr.insert_test_connection(conn_id, AgentType::Codex, None, EventEmitter::Noop)
+            .await;
+        {
+            let state = mgr.get_state(conn_id).await.unwrap();
+            let mut state = state.write().await;
+            state.conversation_id = Some(source.id);
+            state.external_id = Some("session-capability".into());
+            state.status = ConnectionStatus::Connected;
+            // The synthetic connection defaults to false, matching a session
+            // before ACP capability negotiation has advertised session/fork.
+            assert!(!state.fork_supported);
+        }
+
+        let error = mgr
+            .fork_session_at_turn(
+                &db,
+                conn_id,
+                None,
+                None,
+                "codex-turn-capability".into(),
+            )
+            .await
+            .expect_err("unsupported sessions must reject historical forks");
+        assert!(
+            error.to_string().contains("does not support session/fork"),
+            "unexpected capability error: {error}"
+        );
+
+        let conversations = conversation::Entity::find().all(&db.conn).await.unwrap();
+        assert_eq!(conversations.len(), 1, "capability rejection must not persist S2");
+    }
+
+    #[tokio::test]
+    async fn historical_fork_at_turn_retries_after_failure_and_allows_repeat() {
+        use crate::acp::connection::ConnectionCommand;
+        use crate::db::test_helpers;
+
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/historical-fork-retry").await;
+        let source = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("Retry topic".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(&db.conn, source.id, "session-R1", &[])
+            .await
+            .unwrap();
+
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-historical-retry";
+        mgr.insert_test_connection(conn_id, AgentType::Codex, None, EventEmitter::Noop)
+            .await;
+        {
+            let state = mgr.get_state(conn_id).await.unwrap();
+            let mut state = state.write().await;
+            state.conversation_id = Some(source.id);
+            state.external_id = Some("session-R1".into());
+            state.status = ConnectionStatus::Connected;
+            state.fork_supported = true;
+        }
+        let failed = mgr
+            .fork_session_at_turn(
+                &db,
+                conn_id,
+                None,
+                None,
+                "codex-turn-retry".into(),
+            )
+            .await;
+        assert!(failed.is_err(), "a dead source receiver should fail");
+
+        mgr.connections.lock().await.remove(conn_id);
+        let mut rx = insert_live_connection(&mgr, conn_id, AgentType::Codex, None).await;
+        {
+            let state = mgr.get_state(conn_id).await.unwrap();
+            let mut state = state.write().await;
+            state.conversation_id = Some(source.id);
+            state.external_id = Some("session-R1".into());
+            state.fork_supported = true;
+        }
+
+        let reply_task = tokio::spawn(async move {
+            for forked_session_id in ["session-R2", "session-R3"] {
+                match rx.recv().await.expect("retry command") {
+                    ConnectionCommand::Fork {
+                        historical: true,
+                        reply,
+                        ..
+                    } => {
+                        reply
+                            .send(Ok(crate::acp::types::ForkProtocolResult {
+                                forked_session_id: forked_session_id.into(),
+                                original_session_id: "session-R1".into(),
+                            }))
+                            .unwrap();
+                    }
+                    _ => panic!("expected historical Fork on retry"),
+                }
+            }
+        });
+
+        let first = mgr
+            .fork_session_at_turn(
+                &db,
+                conn_id,
+                None,
+                None,
+                "codex-turn-retry".into(),
+            )
+            .await
+            .unwrap();
+        let second = mgr
+            .fork_session_at_turn(
+                &db,
+                conn_id,
+                None,
+                None,
+                "codex-turn-retry".into(),
+            )
+            .await
+            .unwrap();
+        reply_task.await.unwrap();
+
+        assert_ne!(
+            first.forked_conversation_id,
+            second.forked_conversation_id
+        );
+        assert_eq!(first.forked_session_id, "session-R2");
+        assert_eq!(second.forked_session_id, "session-R3");
+        assert_eq!(conversation::Entity::find().all(&db.conn).await.unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -6859,7 +7821,9 @@ mod tests {
             .await
             .conversation_id = Some(9);
 
-        let res = mgr.fork_session(&db, conn_id, None, None, None).await;
+        let res = mgr
+            .fork_session(&db, conn_id, None, None, None, None)
+            .await;
         assert!(res.is_err(), "fork with a dead receiver must fail");
         assert!(
             !mgr.get_state(conn_id)
@@ -6875,6 +7839,97 @@ mod tests {
             lock.try_lock().is_ok(),
             "a failed fork must release prompt_lock so the connection stays usable"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fork_reply_timeout_releases_prompt_lock() {
+        use crate::acp::connection::ConnectionCommand;
+
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let folder_id = crate::db::test_helpers::seed_folder(&db, "/tmp/fork-timeout").await;
+        let source = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("Fork timeout".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(&db.conn, source.id, "session-S1", &[])
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let mgr = ConnectionManager::new();
+        let conn_id = "conn-fork-timeout";
+        let mut rx = insert_live_connection(&mgr, conn_id, AgentType::Codex, None).await;
+        {
+            let state = mgr.get_state(conn_id).await.unwrap();
+            let mut state = state.write().await;
+            state.conversation_id = Some(source.id);
+            state.external_id = Some("session-S1".into());
+            state.fork_supported = true;
+        }
+
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let fake_loop = tokio::spawn(async move {
+            if let Some(ConnectionCommand::Fork {
+                historical: true,
+                reply,
+                ..
+            }) = rx.recv().await
+            {
+                let _ = seen_tx.send(());
+                let _ = release_rx.await;
+                drop(reply);
+            }
+        });
+
+        let db_for_call = AppDatabase {
+            conn: db.conn.clone(),
+        };
+        let mgr_for_call = mgr.clone_ref();
+        let call = tokio::spawn(async move {
+            mgr_for_call
+                .fork_session_historical(
+                    &db_for_call,
+                    conn_id,
+                    None,
+                    None,
+                    Some("codex-turn".into()),
+                    None,
+                )
+                .await
+        });
+
+        seen_rx.await.expect("fork command should be delivered");
+        assert!(
+            mgr.clone_prompt_lock(conn_id)
+                .await
+                .unwrap()
+                .try_lock()
+                .is_err(),
+            "a pending fork must hold prompt_lock until its bounded wait ends"
+        );
+
+        tokio::time::advance(FORK_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+        let result = call.await.expect("fork task should finish");
+        assert!(
+            result.is_err(),
+            "a fork with no protocol reply must return a bounded error"
+        );
+        assert!(
+            mgr.clone_prompt_lock(conn_id)
+                .await
+                .unwrap()
+                .try_lock()
+                .is_ok(),
+            "a timed-out fork must release prompt_lock"
+        );
+
+        let _ = release_tx.send(());
+        fake_loop.await.expect("fake loop should finish");
     }
 
     #[tokio::test]
@@ -6956,7 +8011,7 @@ mod tests {
         // DROPS this caller future. The detached persistence task must survive.
         let timed = tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            mgr.fork_session(&db, "c-shield", None, None, None),
+            mgr.fork_session(&db, "c-shield", None, None, None, None),
         )
         .await;
         assert!(
@@ -8677,7 +9732,16 @@ mod tests {
         let original = original_session_id.to_string();
         let join = tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
-                if let ConnectionCommand::Fork { reply, .. } = cmd {
+                if let ConnectionCommand::Fork {
+                    native_turn_id,
+                    reply,
+                    ..
+                } = cmd
+                {
+                    assert!(
+                        native_turn_id.is_none(),
+                        "legacy fork calls must not send a native turn ID"
+                    );
                     let _ = reply.send(Ok(crate::acp::types::ForkProtocolResult {
                         forked_session_id: forked.clone(),
                         original_session_id: original.clone(),
@@ -8714,7 +9778,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-fork", pre.id, "session-S2", "session-S1").await;
         let result = mgr
-            .fork_session(&db, "c-fork", None, None, None)
+            .fork_session(&db, "c-fork", None, None, None, None)
             .await
             .expect("fork_session should succeed");
         let _ = join.await;
@@ -8778,7 +9842,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-fork-tags", pre.id, "session-S2", "session-S1").await;
         let result = mgr
-            .fork_session(&db, "c-fork-tags", None, None, None)
+            .fork_session(&db, "c-fork-tags", None, None, None, None)
             .await
             .expect("fork_session should succeed");
         let _ = join.await;
@@ -8813,7 +9877,10 @@ mod tests {
         .unwrap();
         let (mgr, join) =
             manager_with_fake_fork("c-restack", pre.id, "session-S2", "session-S1").await;
-        let result = mgr.fork_session(&db, "c-restack", None, None, None).await.unwrap();
+        let result = mgr
+            .fork_session(&db, "c-restack", None, None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let current = conversation_service::get_by_id(&db.conn, pre.id)
@@ -8868,7 +9935,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-raced", pre.id, "session-S2", "session-S1").await;
         let result = mgr
-            .fork_session(&db, "c-raced", None, None, None)
+            .fork_session(&db, "c-raced", None, None, None, None)
             .await
             .expect("fork must survive the lifecycle subscriber winning the race");
         let _ = join.await;
@@ -8920,7 +9987,9 @@ mod tests {
         .unwrap();
         let (mgr, join) =
             manager_with_fake_fork("c-nosp", pre.id, "session-S2", "session-S1").await;
-        mgr.fork_session(&db, "c-nosp", None, None, None).await.unwrap();
+        mgr.fork_session(&db, "c-nosp", None, None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let current = conversation_service::get_by_id(&db.conn, pre.id)
@@ -8966,7 +10035,10 @@ mod tests {
 
         let (mgr, join) =
             manager_with_fake_fork("c-latest", pre.id, "session-S2", "session-S1").await;
-        let result = mgr.fork_session(&db, "c-latest", None, None, None).await.unwrap();
+        let result = mgr
+            .fork_session(&db, "c-latest", None, None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let current = conversation_service::get_by_id(&db.conn, pre.id)
@@ -9016,7 +10088,10 @@ mod tests {
 
         let (mgr, join) =
             manager_with_fake_fork("c-fork-lock", pre.id, "session-S2", "session-S1").await;
-        let result = mgr.fork_session(&db, "c-fork-lock", None, None, None).await.unwrap();
+        let result = mgr
+            .fork_session(&db, "c-fork-lock", None, None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let sibling_id = result.sibling_conversation_id;
@@ -9086,7 +10161,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-fork-prefix", pre.id, "session-S2", "session-S1").await;
         let result = mgr
-            .fork_session(&db, "c-fork-prefix", None, None, None)
+            .fork_session(&db, "c-fork-prefix", None, None, None, None)
             .await
             .unwrap();
         let _ = join.await;
@@ -9142,7 +10217,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-fork-untitled", pre.id, "session-S2", "session-S1").await;
         let result = mgr
-            .fork_session(&db, "c-fork-untitled", None, None, None)
+            .fork_session(&db, "c-fork-untitled", None, None, None, None)
             .await
             .unwrap();
         let _ = join.await;
@@ -9194,7 +10269,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-fork-unlocked", pre.id, "session-S2", "session-S1").await;
         let result = mgr
-            .fork_session(&db, "c-fork-unlocked", None, None, None)
+            .fork_session(&db, "c-fork-unlocked", None, None, None, None)
             .await
             .unwrap();
         let _ = join.await;
@@ -9237,7 +10312,7 @@ mod tests {
         )
         .await;
         let err = mgr
-            .fork_session(&db, "c-missing", None, None, None)
+            .fork_session(&db, "c-missing", None, None, None, None)
             .await
             .expect_err("fork against a missing row must error");
         let _ = join.await;
@@ -9286,7 +10361,7 @@ mod tests {
         let (mgr, join) =
             manager_with_fake_fork("c-deleted", pre.id, "session-S2", "session-S1").await;
         let err = mgr
-            .fork_session(&db, "c-deleted", None, None, None)
+            .fork_session(&db, "c-deleted", None, None, None, None)
             .await
             .expect_err("fork against a soft-deleted row must error");
         let _ = join.await;
@@ -9332,7 +10407,7 @@ mod tests {
             map.insert("c-unbound".into(), fake_connection("c-unbound", None));
         }
         let err = mgr
-            .fork_session(&db, "c-unbound", None, None, None)
+            .fork_session(&db, "c-unbound", None, None, None, None)
             .await
             .expect_err("unbound fork must error");
         assert!(
@@ -9410,7 +10485,14 @@ mod tests {
         });
 
         let result = mgr
-            .fork_session(&db, "c-relink", Some(pre.id), Some(folder_id), None)
+            .fork_session(
+                &db,
+                "c-relink",
+                Some(pre.id),
+                Some(folder_id),
+                None,
+                None,
+            )
             .await
             .expect("fork must link the unbound row from caller ids and succeed");
         let _ = join.await;

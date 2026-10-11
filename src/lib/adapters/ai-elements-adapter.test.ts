@@ -132,6 +132,53 @@ describe("groupConsecutiveDelegationStatus", () => {
   })
 })
 
+describe("adaptMessageTurn native turn identity", () => {
+  it("preserves the provider-native Codex turn ID separately from the synthetic ID", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "turn-17",
+        native_turn_id: "codex-turn-17",
+        role: "assistant",
+        blocks: [{ type: "text", text: "done" }],
+        timestamp: "2026-08-26T00:00:00.000Z",
+      },
+      {
+        attachedResources: "Attached resources",
+        toolCallFailed: "failed",
+        pageHandoffName,
+      }
+    )
+
+    expect(adapted.id).toBe("turn-17")
+    expect(adapted.native_turn_id).toBe("codex-turn-17")
+  })
+
+  it("invalidates the historical cache when the native turn ID changes", () => {
+    const adapter = createMessageTurnAdapter()
+    const first = {
+      id: "turn-17",
+      native_turn_id: "codex-turn-17",
+      role: "assistant" as const,
+      blocks: [{ type: "text" as const, text: "done" }],
+      timestamp: "2026-08-26T00:00:00.000Z",
+    }
+    const text = {
+      attachedResources: "Attached resources",
+      toolCallFailed: "failed",
+      pageHandoffName,
+    }
+
+    const firstAdapted = adapter.adapt([first], text)[0]
+    const secondAdapted = adapter.adapt(
+      [{ ...first, native_turn_id: "codex-turn-18" }],
+      text
+    )[0]
+
+    expect(firstAdapted).not.toBe(secondAdapted)
+    expect(secondAdapted.native_turn_id).toBe("codex-turn-18")
+  })
+})
+
 describe("dropHiddenFeedbackChecks", () => {
   const FEEDBACK_OUT =
     'Wall time: 0.003 seconds\nOutput:\n{"count":1,"feedback":[{"created_at":"2026-06-09T07:47:12Z","text":"还有package"}]}'

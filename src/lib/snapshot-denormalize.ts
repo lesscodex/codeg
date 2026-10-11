@@ -212,6 +212,7 @@ function denormalizeLiveMessage(
       .map((block) => denormalizeBlock(block, toolMap))
       .filter((b): b is LocalLiveContentBlock => b !== null),
     startedAt: Number.isNaN(startedAtMs) ? Date.now() : startedAtMs,
+    nativeTurnId: wire.native_turn_id ?? null,
   }
 }
 

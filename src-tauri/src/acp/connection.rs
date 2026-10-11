@@ -1397,6 +1397,23 @@ pub enum ConnectionCommand {
         /// tail-fork the fork-send composer has always done; see
         /// [`crate::acp::fork::ForkPoint`] for how each agent resolves it.
         fork_point: Option<crate::acp::fork::ForkPoint>,
+        /// Optional native Codex turn ID. When present it is sent as the
+        /// Codex-compatible `lastTurnId` extension on the standard ACP
+        /// `session/fork` request. It may be sent together with `fork_point`;
+        /// the UUID is the precise cut and AIR metadata remains the fallback.
+        native_turn_id: Option<String>,
+        /// Historical forks run the standard protocol request detached from
+        /// this connection. The source session stays active (including while
+        /// it is prompting) and the manager persists only the new target row.
+        historical: bool,
+        reply:
+            tokio::sync::oneshot::Sender<Result<crate::acp::types::ForkProtocolResult, AcpError>>,
+    },
+    /// Legacy compatibility command for a detached completed-turn fork. New
+    /// Codeg callers send `ConnectionCommand::Fork { historical: true }` so
+    /// the standard `session/fork` request carries both possible cut points.
+    ForkAtTurn {
+        last_turn_id: String,
         reply:
             tokio::sync::oneshot::Sender<Result<crate::acp::types::ForkProtocolResult, AcpError>>,
     },
@@ -12986,6 +13003,34 @@ struct ForkExitInfo {
     connection: ConnectionTo<Agent>,
 }
 
+/// Send the Codex historical-fork request and project the wire response to the
+/// manager-facing protocol result. The request never attaches the returned
+/// session to this connection; callers may therefore run it while the source
+/// session is processing a later turn.
+async fn request_historical_fork(
+    cx: ConnectionTo<Agent>,
+    session_id: SessionId,
+    cwd: String,
+    fork_point: Option<crate::acp::fork::ForkPoint>,
+    last_turn_id: Option<String>,
+) -> Result<crate::acp::types::ForkProtocolResult, AcpError> {
+    let (response, _) = crate::acp::fork::fork_session(
+        &cx,
+        &session_id,
+        AgentType::Codex,
+        &cwd,
+        &[],
+        &ClaudeSessionOptions::default(),
+        fork_point.as_ref(),
+        last_turn_id.as_deref(),
+    )
+    .await?;
+    Ok(crate::acp::types::ForkProtocolResult {
+        forked_session_id: response.session_id.0.to_string(),
+        original_session_id: session_id.0.to_string(),
+    })
+}
+
 /// After `run_conversation_loop` returns, handle normal exit or fork transition.
 ///
 /// When fork is requested, the original session has already been dropped by the
@@ -15209,6 +15254,86 @@ async fn run_conversation_loop(
                                     )
                                     .await;
                                 }
+                                Some(ConnectionCommand::Fork {
+                                    fork_point,
+                                    native_turn_id,
+                                    historical,
+                                    reply,
+                                }) if historical => {
+                                    if !supports_fork {
+                                        let _ = reply.send(Err(AcpError::protocol(
+                                            "This agent does not support session/fork."
+                                                .to_string(),
+                                        )));
+                                        continue;
+                                    }
+                                    // Historical forks use the same standard
+                                    // session/fork request as fork-send, but
+                                    // stay detached from this source loop so
+                                    // an active turn continues streaming.
+                                    let fork_connection = cx.clone();
+                                    let fork_session_id = sid.clone();
+                                    let fork_cwd = cwd.to_string();
+                                    if let Err(error) = cx.spawn(async move {
+                                        let result = request_historical_fork(
+                                            fork_connection,
+                                            fork_session_id,
+                                            fork_cwd,
+                                            fork_point,
+                                            native_turn_id,
+                                        )
+                                        .await;
+                                        let _ = reply.send(result);
+                                        Ok(())
+                                    }) {
+                                        tracing::debug!(
+                                            "[ACP] historical fork task could not be spawned: {error}"
+                                        );
+                                    }
+                                }
+                                Some(ConnectionCommand::ForkAtTurn {
+                                    last_turn_id,
+                                    reply,
+                                }) => {
+                                    if !supports_fork {
+                                        let _ = reply.send(Err(AcpError::protocol(
+                                            "This agent does not support session/fork."
+                                                .to_string(),
+                                        )));
+                                        continue;
+                                    }
+                                    // A historical fork is deliberately
+                                    // detached from this loop's session
+                                    // transition. Run the request in its own
+                                    // task so streaming updates, permission
+                                    // responses, and the active prompt's
+                                    // completion remain serviced while Codex
+                                    // creates S2.
+                                    let fork_connection = cx.clone();
+                                    let fork_session_id = sid.clone();
+                                    let fork_cwd = cwd.to_string();
+                                    if let Err(error) = cx.spawn(async move {
+                                        let result = request_historical_fork(
+                                            fork_connection,
+                                            fork_session_id,
+                                            fork_cwd,
+                                            None,
+                                            Some(last_turn_id),
+                                        )
+                                        .await;
+                                        let _ = reply.send(result);
+                                        Ok(())
+                                    }) {
+                                        // `cx.spawn` drops the task (and its
+                                        // reply sender) when the ACP
+                                        // connection is already shutting down;
+                                        // the manager observes the closed
+                                        // channel and releases its locks.
+                                        tracing::debug!(
+                                            "[ACP] historical fork task could not be spawned: {error}"
+                                        );
+                                    }
+                                }
                                 Some(ConnectionCommand::SetMode { mode_id, reply }) => {
                                     let req = SetSessionModeRequest::new(sid.clone(), mode_id.clone());
                                     let outcome = match cx.send_request_to(Agent, req).block_task().await {
@@ -15704,6 +15829,41 @@ async fn run_conversation_loop(
                 let sid = session.session_id().clone();
                 let _ = reply.send(send_stop_async_task_request(&cx, &sid, &task_id).await);
             }
+            Some(ConnectionCommand::ForkAtTurn {
+                last_turn_id,
+                reply,
+            }) => {
+                if !supports_fork {
+                    let _ = reply.send(Err(AcpError::protocol(
+                        "This agent does not support session/fork.".to_string(),
+                    )));
+                    continue;
+                }
+                // Keep the protocol wait in a connection-scoped task even
+                // while idle, so the command loop stays responsive. Unlike
+                // the standard Fork arm below, this path never attaches S2 or
+                // exits the source session loop.
+                let fork_connection = session.connection();
+                let task_connection = fork_connection.clone();
+                let fork_session_id = session.session_id().clone();
+                let fork_cwd = cwd.to_string();
+                if let Err(error) = fork_connection.spawn(async move {
+                    let result = request_historical_fork(
+                        task_connection,
+                        fork_session_id,
+                        fork_cwd,
+                        None,
+                        Some(last_turn_id),
+                    )
+                    .await;
+                    let _ = reply.send(result);
+                    Ok(())
+                }) {
+                    tracing::debug!(
+                        "[ACP] historical fork task could not be spawned: {error}"
+                    );
+                }
+            }
             Some(ConnectionCommand::Cancel) => {
                 let cx = session.connection();
                 let sid = session.session_id().clone();
@@ -15754,7 +15914,19 @@ async fn run_conversation_loop(
                     cancel_grok_agent_turn_asks(delegation_injection, conn_id).await;
                 }
             }
-            Some(ConnectionCommand::Fork { fork_point, reply }) => {
+            Some(ConnectionCommand::Fork {
+                fork_point,
+                native_turn_id,
+                historical,
+                reply,
+            }) => {
+                if native_turn_id.is_some() && agent_type != AgentType::Codex {
+                    let _ = reply.send(Err(AcpError::protocol(
+                        "native Codex turn ID fork is only supported for Codex sessions"
+                            .to_string(),
+                    )));
+                    continue;
+                }
                 if !supports_fork {
                     let _ = reply.send(Err(AcpError::protocol(
                         "This agent does not support session/fork".to_string(),
@@ -15770,13 +15942,40 @@ async fn run_conversation_loop(
                 }
                 let cx = session.connection();
                 let sid = session.session_id().clone();
+                if historical {
+                    // Historical forks never transition this connection to
+                    // S2. Keep the source loop responsive while the standard
+                    // session/fork request runs in a connection-scoped task.
+                    let fork_cwd = cwd.to_string();
+                    let fork_connection = cx.clone();
+                    let fork_session_id = sid.clone();
+                    if let Err(error) = cx.spawn(async move {
+                        let result = request_historical_fork(
+                            fork_connection,
+                            fork_session_id,
+                            fork_cwd,
+                            fork_point,
+                            native_turn_id,
+                        )
+                        .await;
+                        let _ = reply.send(result);
+                        Ok(())
+                    }) {
+                        tracing::debug!(
+                            "[ACP] historical fork task could not be spawned: {error}"
+                        );
+                    }
+                    continue;
+                }
+
                 let inherited_mode_id =
                     live_mode_for_fork(&*state.read().await, session.modes().as_ref());
                 tracing::info!(
-                    "[ACP] Sending session/fork for session_id={} cwd={} fork_point={:?}",
+                    "[ACP] Sending session/fork for session_id={} cwd={} fork_point={:?} last_turn_id={:?}",
                     sid.0,
                     cwd,
-                    fork_point.as_ref().map(|p| &p.message_id)
+                    fork_point.as_ref().map(|point| &point.message_id),
+                    native_turn_id
                 );
                 // The fork's establishment starts here. A Grok catalog broadcast
                 // that landed before it is already on this session's picker, and
@@ -15793,6 +15992,7 @@ async fn run_conversation_loop(
                     mcp_servers,
                     &claude,
                     fork_point.as_ref(),
+                    native_turn_id.as_deref(),
                 )
                 .await;
                 match result {
@@ -20553,6 +20753,32 @@ fn map_claude_sdk_ext_notification(notification: &UntypedMessage) -> Option<AcpE
     })
 }
 
+/// Map Codex's private turn-start notification into the native identity carried
+/// by the live session. This deliberately stays on the Codex extension
+/// boundary; standard ACP agents never emit or consume this event.
+fn map_codex_turn_started_notification(
+    notification: &UntypedMessage,
+    agent_type: AgentType,
+) -> Option<AcpEvent> {
+    if agent_type != AgentType::Codex
+        || notification.method() != crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD
+    {
+        return None;
+    }
+
+    let params = notification.params();
+    let session_id = params.get("sessionId")?.as_str()?.trim();
+    let native_turn_id = params.get("turnId")?.as_str()?.trim();
+    if session_id.is_empty() || native_turn_id.is_empty() {
+        return None;
+    }
+
+    Some(AcpEvent::TurnStarted {
+        session_id: session_id.to_string(),
+        native_turn_id: native_turn_id.to_string(),
+    })
+}
+
 /// The JSON-RPC methods grok uses for its private, namespaced session updates.
 /// Both share the standard `session/update` envelope (`params.update.
 /// sessionUpdate` + fields, verified live against grok 0.2.111) but carry
@@ -23045,8 +23271,11 @@ fn handle_auth_status_update(agent_type: AgentType, notif: AuthStatusUpdateNotif
 /// its unmapped payloads just get logged (noise, still visible). The dangerous
 /// direction is the reverse: listing a method no mapper claims would silence
 /// exactly the gap this log exists to expose.
-fn is_known_ext_method(method: &str) -> bool {
-    method == CLAUDE_SDK_EXT_METHOD || GROK_EXT_UPDATE_METHODS.contains(&method)
+fn is_known_ext_method(method: &str, agent_type: AgentType) -> bool {
+    method == CLAUDE_SDK_EXT_METHOD
+        || (agent_type == AgentType::Codex
+            && method == crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD)
+        || GROK_EXT_UPDATE_METHODS.contains(&method)
 }
 
 /// Keep the text of a claude `Read` / `Grep` / `Glob` result off the raw SDK
@@ -23326,6 +23555,18 @@ async fn maybe_emit_ext_notification(
             emit_with_state(state, emitter, AcpEvent::PluginLoadFailures { failures }).await;
         }
     }
+
+    // Codex publishes its app-server turn id through its private notification
+    // boundary. It is meaningful only for the active prompt; a late/stale
+    // notification must never stamp a subsequent live turn.
+    if notification.method() == crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD {
+        if let Some(event) = map_codex_turn_started_notification(&notification, agent_type) {
+            if turn_active {
+                emit_with_state(state, emitter, event).await;
+            }
+            return;
+        }
+    }
     // A grok `subagent_spawned` can yield TWO events (the card's session stamp
     // and the background-activity report), so this mapper hands back a list; an
     // empty one means "not mine", and the chain continues as before.
@@ -23343,7 +23584,7 @@ async fn maybe_emit_ext_notification(
         if let Some(error) = companion {
             emit_with_state(state, emitter, error).await;
         }
-    } else if !is_known_ext_method(notification.method()) {
+    } else if !is_known_ext_method(notification.method(), agent_type) {
         // The gap #409's second point was reaching for: an agent emitting an ext
         // method codeg has never heard of was previously indistinguishable from
         // an agent saying nothing at all.
@@ -31651,18 +31892,64 @@ mod tests {
     }
 
     #[test]
+    fn map_codex_turn_started_notification_maps_native_id() {
+        let raw = UntypedMessage::new(
+            crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD,
+            serde_json::json!({
+                "sessionId": "session-123",
+                "turnId": "turn-456"
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            map_codex_turn_started_notification(&raw, AgentType::Codex),
+            Some(AcpEvent::TurnStarted {
+                session_id,
+                native_turn_id
+            }) if session_id == "session-123" && native_turn_id == "turn-456"
+        ));
+    }
+
+    #[test]
+    fn map_codex_turn_started_notification_is_codex_only_and_validates_ids() {
+        let method = crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD;
+        let valid = UntypedMessage::new(
+            method,
+            serde_json::json!({"sessionId": "session-123", "turnId": "turn-456"}),
+        )
+        .unwrap();
+        assert!(map_codex_turn_started_notification(&valid, AgentType::ClaudeCode).is_none());
+
+        let missing_id = UntypedMessage::new(
+            method,
+            serde_json::json!({"sessionId": "session-123", "turnId": "  "}),
+        )
+        .unwrap();
+        assert!(map_codex_turn_started_notification(&missing_id, AgentType::Codex).is_none());
+    }
+
+    #[test]
     fn is_known_ext_method_covers_every_mapped_method() {
         // The anti-log-storm invariant: `_claude/sdkMessage` arrives for EVERY
         // SDK message but only maps when it is an API retry, so it must be
         // recognized here — otherwise each unmapped one logs a line on a
         // per-message hot path.
-        assert!(is_known_ext_method(CLAUDE_SDK_EXT_METHOD));
+        assert!(is_known_ext_method(CLAUDE_SDK_EXT_METHOD, AgentType::ClaudeCode));
+        assert!(is_known_ext_method(
+            crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD,
+            AgentType::Codex
+        ));
+        assert!(!is_known_ext_method(
+            crate::acp::codex_backend::CODEX_TURN_STARTED_METHOD,
+            AgentType::ClaudeCode
+        ));
         for method in GROK_EXT_UPDATE_METHODS {
-            assert!(is_known_ext_method(method), "{method} must be known");
+            assert!(is_known_ext_method(method, AgentType::Grok), "{method} must be known");
         }
         // A method no mapper claims is exactly what the log is for.
-        assert!(!is_known_ext_method("_vendor/somethingNew"));
-        assert!(!is_known_ext_method("session/update"));
+        assert!(!is_known_ext_method("_vendor/somethingNew", AgentType::Grok));
+        assert!(!is_known_ext_method("session/update", AgentType::Grok));
     }
 
     #[test]
@@ -44894,6 +45181,8 @@ mod tests {
         let (reply, answer) = oneshot::channel();
         grok.send(ConnectionCommand::Fork {
             fork_point: None,
+            native_turn_id: None,
+            historical: false,
             reply,
         })
         .await;
@@ -45345,6 +45634,8 @@ mod tests {
         let (reply, answer) = oneshot::channel();
         grok.send(ConnectionCommand::Fork {
             fork_point: None,
+            native_turn_id: None,
+            historical: false,
             reply,
         })
         .await;
@@ -46202,6 +46493,8 @@ mod tests {
             self.cmd_tx
                 .send(ConnectionCommand::Fork {
                     fork_point: None,
+                    native_turn_id: None,
+                    historical: false,
                     reply,
                 })
                 .await
