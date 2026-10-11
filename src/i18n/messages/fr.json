@@ -2417,6 +2417,7 @@
       "editMessageBusy": "Impossible de modifier le message : un tour est en cours",
       "editMessageFailed": "Impossible de modifier le message : {error}",
       "editMessageQueued": "Impossible de modifier le message : envoyez ou retirez d’abord les messages en file d’attente",
+      "forkConfirmDescription": "Créer une nouvelle branche de conversation depuis ce message ?",
       "exportConversation": "Exporter la conversation",
       "exportImage": "Image",
       "exportMarkdown": "Markdown",

@@ -2417,6 +2417,7 @@
       "editMessageBusy": "Couldn't edit the message: a turn is running",
       "editMessageFailed": "Couldn't edit the message: {error}",
       "editMessageQueued": "Couldn't edit the message: send or remove the queued messages first",
+      "forkConfirmDescription": "Create a new conversation branch from this message?",
       "exportConversation": "Export Conversation",
       "exportImage": "Image",
       "exportMarkdown": "Markdown",

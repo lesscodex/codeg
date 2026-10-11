@@ -2417,6 +2417,7 @@
       "editMessageBusy": "无法编辑这条消息：有回合正在运行",
       "editMessageFailed": "无法编辑这条消息：{error}",
       "editMessageQueued": "无法编辑这条消息：请先发送或移除排队中的消息",
+      "forkConfirmDescription": "要从这条消息创建新的会话分支吗？",
       "exportConversation": "导出会话",
       "exportImage": "图片",
       "exportMarkdown": "Markdown",

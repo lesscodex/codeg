@@ -11617,6 +11617,7 @@ mod tests {
             session_id: "sess".into(),
             turns: vec![MessageTurn {
                 id: "bg-0-0".into(),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: answer.into(),

@@ -990,6 +990,7 @@ fn build_turns(
                 if !user_blocks.is_empty() {
                     turns.push(MessageTurn {
                         id: String::new(),
+                        native_turn_id: None,
                         role: TurnRole::User,
                         blocks: user_blocks,
                         timestamp: ts,
@@ -1007,6 +1008,7 @@ fn build_turns(
                 }
                 turns.push(MessageTurn {
                     id: String::new(),
+                    native_turn_id: None,
                     role: TurnRole::Assistant,
                     blocks,
                     timestamp: ts,
@@ -1040,6 +1042,7 @@ fn build_turns(
             }
             turns.push(MessageTurn {
                 id: String::new(),
+                native_turn_id: None,
                 role: TurnRole::User,
                 blocks: vec![ContentBlock::Text {
                     text: format!("! {command}"),
@@ -1063,6 +1066,7 @@ fn build_turns(
             }
             turns.push(MessageTurn {
                 id: String::new(),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: vec![
                     ContentBlock::ToolUse {

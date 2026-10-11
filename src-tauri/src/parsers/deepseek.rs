@@ -930,6 +930,7 @@ fn parse_session_events(text: &str, attachments: Option<&Path>) -> SessionParse 
                 blocks.extend(images);
                 sp.turns.push(MessageTurn {
                     id: format!("turn-{}", sp.turns.len()),
+                    native_turn_id: None,
                     role: TurnRole::User,
                     blocks,
                     timestamp: ts,
@@ -1300,6 +1301,7 @@ fn ensure_assistant<'a>(
         None => {
             turns.push(MessageTurn {
                 id: format!("turn-{}", turns.len()),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: Vec::new(),
                 timestamp: ts,

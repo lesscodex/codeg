@@ -238,6 +238,7 @@ mod tests {
     fn turn(id: &str, role: TurnRole, text: &str, agent_message_id: Option<&str>) -> MessageTurn {
         MessageTurn {
             id: id.to_string(),
+            native_turn_id: None,
             role,
             blocks: vec![ContentBlock::Text {
                 text: text.to_string(),

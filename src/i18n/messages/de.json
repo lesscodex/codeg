@@ -2417,6 +2417,7 @@
       "editMessageBusy": "Nachricht konnte nicht bearbeitet werden: ein Durchgang läuft",
       "editMessageFailed": "Nachricht konnte nicht bearbeitet werden: {error}",
       "editMessageQueued": "Nachricht konnte nicht bearbeitet werden: zuerst die wartenden Nachrichten senden oder entfernen",
+      "forkConfirmDescription": "Einen neuen Gesprächsbranch aus dieser Nachricht erstellen?",
       "exportConversation": "Konversation exportieren",
       "exportImage": "Bild",
       "exportMarkdown": "Markdown",

@@ -152,8 +152,51 @@ export interface ForkResult {
   siblingConversationId: number
 }
 
-export async function acpFork(connectionId: string): Promise<ForkResult> {
-  return invoke("acp_fork", { connectionId })
+export interface HistoricalForkResult {
+  forkedSessionId: string
+  originalSessionId: string
+  forkedConversationId: number
+  forkedConversationTitle: string | null
+}
+
+export type AcpForkResult = ForkResult | HistoricalForkResult
+
+export async function acpFork(
+  connectionId: string,
+  conversationId?: number | null,
+  folderId?: number | null,
+  nativeTurnId?: string | null,
+  forkFromTurnId?: string | null,
+  historicalFork = false
+): Promise<AcpForkResult> {
+  const params: {
+    connectionId: string
+    conversationId?: number | null
+    folderId?: number | null
+    nativeTurnId?: string
+    forkFromTurnId?: string
+    historicalFork?: boolean
+  } = { connectionId }
+  if (conversationId !== undefined) params.conversationId = conversationId
+  if (folderId !== undefined) params.folderId = folderId
+  if (nativeTurnId != null) params.nativeTurnId = nativeTurnId
+  if (forkFromTurnId != null) params.forkFromTurnId = forkFromTurnId
+  if (historicalFork) params.historicalFork = true
+  return invoke("acp_fork", params)
+}
+
+export async function acpForkAtTurn(
+  connectionId: string,
+  conversationId: number | null | undefined,
+  folderId: number | null | undefined,
+  nativeTurnId: string
+): Promise<HistoricalForkResult> {
+  return invoke("acp_fork_at_turn", {
+    connectionId,
+    conversationId: conversationId ?? null,
+    folderId: folderId ?? null,
+    nativeTurnId,
+  })
 }
 
 export async function acpRespondPermission(

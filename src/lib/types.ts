@@ -324,6 +324,8 @@ export interface SessionStats {
 
 export interface MessageTurn {
   id: string
+  /** Provider-native turn ID, when the history parser preserves one. */
+  native_turn_id?: string | null
   role: TurnRole
   blocks: ContentBlock[]
   timestamp: string
@@ -360,6 +362,13 @@ export interface MessageTurn {
    * Absent on turns that came from the parser to begin with — those already ARE
    * `turn-N` — so read it as `turn.source_turn_id ?? turn.id`. */
   source_turn_id?: string | null
+}
+
+export interface HistoricalForkTarget {
+  /** Rendered/parser turn id used to build the AIR fork point. */
+  turnId: string
+  /** Codex app-server turn UUID, when the live/history path preserved it. */
+  nativeTurnId?: string | null
 }
 
 export interface ConversationDetail {
@@ -5652,6 +5661,12 @@ export type AcpEvent =
       origin?: PermissionAnswerOrigin
     }
   | {
+      /** Codex-only app-server turn identity for the active live response. */
+      type: "turn_started"
+      session_id: string
+      native_turn_id: string
+    }
+  | {
       /**
        * What an answer decided about the card's tool call. Follows the
        * `permission_resolved` that retired the card, only for answers.
@@ -6201,6 +6216,8 @@ export interface LiveMessage {
    *  applied while it ran): the reducer's closing `turn_error` block, for a
    *  client hydrating before `TurnComplete`. */
   turn_error?: string | null
+  /** Codex app-server turn id, present only for genuine native turns. */
+  native_turn_id?: string | null
 }
 
 export interface PendingPermissionState {

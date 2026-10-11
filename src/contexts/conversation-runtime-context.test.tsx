@@ -1010,6 +1010,49 @@ describe("ConversationRuntimeProvider streaming/local turn dedup", () => {
     expect(ids.filter((id) => id === "live-99-lm-dup2")).toHaveLength(1)
     expect(new Set(ids).size).toBe(ids.length)
   })
+
+  it("preserves a native turn id arriving after the first streaming build", () => {
+    const liveMsg: LiveMessage = {
+      id: "lm-late-native",
+      role: "assistant",
+      content: [{ type: "text", text: "streaming reply" }],
+      startedAt: 0,
+    }
+    const before = buildStreamingTurnsFromLiveMessage(99, liveMsg)
+    expect(before.turns[0].native_turn_id).toBeUndefined()
+
+    const updated = { ...liveMsg, nativeTurnId: "codex-turn-late" }
+    const after = buildStreamingTurnsFromLiveMessage(99, updated)
+    expect(after.turns[0].native_turn_id).toBe("codex-turn-late")
+    expect(after.turns[0]).not.toBe(before.turns[0])
+    expect(buildStreamingTurnsFromLiveMessage(99, updated).turns[0]).toBe(
+      after.turns[0]
+    )
+  })
+
+  it("promotes a Codex native turn id with the completed live response", () => {
+    const liveMsg: LiveMessage = {
+      id: "lm-native",
+      role: "assistant",
+      content: [{ type: "text", text: "completed reply" }],
+      startedAt: 0,
+      nativeTurnId: "codex-turn-17",
+    }
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+
+    act(() => {
+      api().setLiveMessage(99, liveMsg, true)
+      api().completeTurn(99, liveMsg)
+    })
+
+    const session = api().getSession(99)
+    expect(session?.liveMessage).toBeNull()
+    expect(
+      session?.localTurns.find((turn) => turn.id === "live-99-lm-native")
+        ?.native_turn_id
+    ).toBe("codex-turn-17")
+  })
 })
 
 /**

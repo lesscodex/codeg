@@ -2417,6 +2417,7 @@
       "editMessageBusy": "メッセージを編集できません：ターンが実行中です",
       "editMessageFailed": "メッセージを編集できません：{error}",
       "editMessageQueued": "メッセージを編集できません：先にキュー内のメッセージを送信または削除してください",
+      "forkConfirmDescription": "このメッセージから新しい会話ブランチを作成しますか？",
       "exportConversation": "会話をエクスポート",
       "exportImage": "画像",
       "exportMarkdown": "Markdown",

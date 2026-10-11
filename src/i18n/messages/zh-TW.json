@@ -2417,6 +2417,7 @@
       "editMessageBusy": "無法編輯這則訊息：有回合正在執行",
       "editMessageFailed": "無法編輯這則訊息：{error}",
       "editMessageQueued": "無法編輯這則訊息：請先傳送或移除排隊中的訊息",
+      "forkConfirmDescription": "要從這則訊息建立新的會話分支嗎？",
       "exportConversation": "匯出對話",
       "exportImage": "圖片",
       "exportMarkdown": "Markdown",

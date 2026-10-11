@@ -2417,6 +2417,7 @@
       "editMessageBusy": "تعذّر تعديل الرسالة: هناك دور قيد التشغيل",
       "editMessageFailed": "تعذّر تعديل الرسالة: {error}",
       "editMessageQueued": "تعذّر تعديل الرسالة: أرسل الرسائل المنتظرة أو أزلها أولًا",
+      "forkConfirmDescription": "هل تريد إنشاء فرع محادثة جديد من هذه الرسالة؟",
       "exportConversation": "تصدير المحادثة",
       "exportImage": "صورة",
       "exportMarkdown": "Markdown",

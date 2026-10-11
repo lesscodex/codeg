@@ -2417,6 +2417,7 @@
       "editMessageBusy": "Não foi possível editar a mensagem: há um turno em execução",
       "editMessageFailed": "Não foi possível editar a mensagem: {error}",
       "editMessageQueued": "Não foi possível editar a mensagem: envie ou remova primeiro as mensagens na fila",
+      "forkConfirmDescription": "Criar uma nova ramificação de conversa a partir desta mensagem?",
       "exportConversation": "Exportar conversa",
       "exportImage": "Imagem",
       "exportMarkdown": "Markdown",

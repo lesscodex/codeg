@@ -248,6 +248,7 @@ function denormalizeLiveMessage(
         : []),
     ],
     startedAt: Number.isNaN(startedAtMs) ? Date.now() : startedAtMs,
+    nativeTurnId: wire.native_turn_id ?? null,
   }
 }
 

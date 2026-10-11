@@ -230,6 +230,8 @@ const BLOCKED_RESOURCE_MENTION_RE = /@([^\s@]+)\s*\[blocked[^\]]*\]/gi
  */
 export interface AdaptedMessage {
   id: string
+  /** Provider-native turn ID, when the history parser preserves one. */
+  native_turn_id?: string | null
   role: MessageRole
   content: AdaptedContentPart[]
   userResources?: UserResourceDisplay[]
@@ -2733,6 +2735,7 @@ export function adaptMessageTurn(
 
   return {
     id: turn.id,
+    native_turn_id: turn.native_turn_id,
     role: turn.role,
     content: userSplit.parts,
     userResources:
@@ -2782,6 +2785,7 @@ interface TurnCacheEntry {
   model: string | null | undefined
   completed_at: string | null | undefined
   source_turn_id: string | null | undefined
+  native_turn_id: string | null | undefined
   /** Adapted as a turn still being written. */
   isStreaming: boolean
   /** Its calls still running as it was adapted (`inProgressKey`). */
@@ -2838,7 +2842,8 @@ export interface MessageTurnAdapter {
  * survives across re-renders triggered by streaming deltas.
  *
  * Cache invalidation: an entry is reused only when `(text, blocks,
- * blocksLen, timestamp, role, usage, duration_ms, model)` all match. The
+ * blocksLen, timestamp, role, usage, duration_ms, model, completed_at,
+ * source_turn_id, native_turn_id)` all match. The
  * blocks reference catches whole-turn rewrites (e.g. detail refetch
  * replacing `detail.turns`) where blocksLen/timestamp may stay equal but
  * a tool's output_preview was updated; PATCH_TURN_METADATA preserves the
@@ -2887,6 +2892,7 @@ export function createMessageTurnAdapter(): MessageTurnAdapter {
           cached.model === turn.model &&
           cached.completed_at === turn.completed_at &&
           cached.source_turn_id === turn.source_turn_id &&
+          cached.native_turn_id === turn.native_turn_id &&
           cached.isStreaming === isStreaming &&
           cached.inProgressKey === running &&
           (!live || cached.hints === hints)
@@ -2923,6 +2929,7 @@ export function createMessageTurnAdapter(): MessageTurnAdapter {
           model: turn.model,
           completed_at: turn.completed_at,
           source_turn_id: turn.source_turn_id,
+          native_turn_id: turn.native_turn_id,
           isStreaming,
           inProgressKey: running,
           hints,
