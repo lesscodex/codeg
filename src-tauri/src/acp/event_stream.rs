@@ -1006,6 +1006,7 @@ mod tests {
         };
         let turn = MessageTurn {
             id: "bg-123456-0".into(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: vec![
                 ContentBlock::Text {

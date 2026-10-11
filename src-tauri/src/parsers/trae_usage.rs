@@ -424,6 +424,7 @@ mod tests {
     fn assistant(start: &str, end: &str) -> MessageTurn {
         MessageTurn {
             id: start.to_string(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "answer".to_string(),
