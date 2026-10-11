@@ -1259,6 +1259,7 @@ mod tests {
     fn turn(id: &str, usage: Option<TurnUsage>, at: &str) -> MessageTurn {
         MessageTurn {
             id: id.into(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: vec![],
             timestamp: ts(at),

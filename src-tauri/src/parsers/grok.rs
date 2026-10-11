@@ -779,6 +779,7 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                         .and_then(Value::as_i64);
                     out.turns.push(MessageTurn {
                         id: String::new(), // assigned in a final pass
+                        native_turn_id: None,
                         role: TurnRole::User,
                         blocks: block.into_iter().collect(),
                         timestamp: now,
@@ -1653,6 +1654,7 @@ fn ensure_assistant(
     if assistant.is_none() {
         *assistant = Some(MessageTurn {
             id: String::new(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: Vec::new(),
             timestamp: ts,

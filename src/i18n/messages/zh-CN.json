@@ -2277,6 +2277,7 @@
       "forkSessionSuccess": "会话分叉成功",
       "forkSessionFailed": "会话分叉失败：{error}",
       "forkSessionBusy": "分叉失败：当前有回合正在进行",
+      "forkConfirmDescription": "要从这条消息创建新的会话分支吗？",
       "exportConversation": "导出会话",
       "exportImage": "图片",
       "exportMarkdown": "Markdown",

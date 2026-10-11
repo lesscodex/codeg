@@ -3048,6 +3048,7 @@ mod tests {
     ) -> MessageTurn {
         MessageTurn {
             id: "t1".into(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 tool_use_id: tool_use_id.map(String::from),
@@ -3093,6 +3094,7 @@ mod tests {
     fn user_text_turn(id: &str, text: &str, ts: chrono::DateTime<chrono::Utc>) -> MessageTurn {
         MessageTurn {
             id: id.into(),
+            native_turn_id: None,
             role: TurnRole::User,
             blocks: vec![ContentBlock::Text { text: text.into() }],
             timestamp: ts,
@@ -3112,6 +3114,7 @@ mod tests {
     ) -> MessageTurn {
         MessageTurn {
             id: id.into(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: vec![ContentBlock::Text { text: text.into() }],
             timestamp: ts,
@@ -3400,6 +3403,7 @@ mod tests {
     fn stamps_image_user_turn_only_on_exact_match() {
         let image_turn = |id: &str, data: &str| MessageTurn {
             id: id.into(),
+            native_turn_id: None,
             role: TurnRole::User,
             blocks: vec![ContentBlock::Image {
                 data: data.into(),
@@ -3606,6 +3610,7 @@ mod tests {
     fn tool_result_turn(tool_use_id: &str, output: &str) -> MessageTurn {
         MessageTurn {
             id: "t2".into(),
+            native_turn_id: None,
             // Tool results are folded into the assistant turn that owns them.
             role: TurnRole::Assistant,
             blocks: vec![ContentBlock::ToolResult {
@@ -3867,6 +3872,7 @@ mod tests {
         let pre_existing = serde_json::json!({ "codeg.delegation": { "status": "running", "child_conversation_id": 999 } });
         let mut turns = vec![MessageTurn {
             id: "t1".into(),
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: vec![ContentBlock::ToolUse {
                 tool_use_id: Some("tu-1".into()),

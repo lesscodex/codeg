@@ -668,3 +668,54 @@ describe("ConversationDetailPanel session-load failure surface", () => {
     )
   })
 })
+
+describe("per-turn fork action", () => {
+  it("passes the native turn id through the shared fork action", () => {
+    const start = source.indexOf("const handleForkFromTurn")
+    const end = source.indexOf("const handleStopAsyncTask", start)
+    const handler = source.slice(start, end)
+
+    expect(start).toBeGreaterThan(-1)
+    expect(handler).toContain("nativeTurnId")
+    expect(handler).toContain("turnId")
+    expect(handler).toContain('historical && connStatus === "prompting"')
+    expect(handler).toContain("!forkConnectionReady")
+    // A viewer still has the shared backend connection and may use Codex's
+    // detached historical fork; only the legacy live-fork path keeps the
+    // non-owning-surface guard.
+    expect(handler).toContain("!historical && conn.isViewer")
+    expect(source).toContain('(selectedAgent === "codex" || !conn.isViewer)')
+    expect(messageListViewSource).toContain(
+      'const forkBusy = connStatus === "prompting" && agentType !== "codex"'
+    )
+    expect(handler).toContain("acpFork(")
+    expect(handler).toContain("historical ? nativeTurnId : null")
+    expect(handler).toContain("turnId")
+    expect(handler).toContain("forkedConversationId")
+    expect(handler).toContain("openTab(")
+    expect(handler).toContain('selectedAgent === "codex"')
+    expect(handler).not.toContain("handleForkSessionHere")
+  })
+
+  it("keeps failure recovery local to the shared fork action", () => {
+    const start = source.indexOf("const handleForkFromTurn")
+    const end = source.indexOf("const handleStopAsyncTask", start)
+    const handler = source.slice(start, end)
+
+    expect(handler).toContain("notify({")
+    expect(handler).toContain('t("forkSessionFailed"')
+  })
+
+  it("confirms only repeated forks from the same turn", () => {
+    const start = source.indexOf("const handleForkFromTurn")
+    const end = source.indexOf("const handleStopAsyncTask", start)
+    const handler = source.slice(start, end)
+
+    expect(handler).toContain("forkedTurnKeysRef.current.has(key)")
+    expect(handler).toContain('window.confirm(t("forkConfirmDescription"))')
+    expect(handler).toContain("forkedTurnKeysRef.current.add(key)")
+    expect(handler).toContain("const result = await acpFork(")
+    expect(source).not.toContain("executeForkFromTurn")
+    expect(source).not.toContain("pendingForkTarget")
+  })
+})

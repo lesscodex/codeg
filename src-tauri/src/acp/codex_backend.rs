@@ -20,6 +20,7 @@ use crate::models::agent::AgentType;
 
 const CODEX_ACP_DIR: &str = "codex-acp";
 const CODEX_ACP_ENTRY: &str = "dist/index.js";
+pub(crate) const CODEX_TURN_STARTED_METHOD: &str = "_codex/turn_started";
 #[cfg(not(feature = "tauri-runtime"))]
 const DOCKER_CODEX_ACP_DIR: &str = "/opt/codeg/codex-acp";
 

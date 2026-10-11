@@ -1010,6 +1010,30 @@ describe("ConversationRuntimeProvider streaming/local turn dedup", () => {
     expect(ids.filter((id) => id === "live-99-lm-dup2")).toHaveLength(1)
     expect(new Set(ids).size).toBe(ids.length)
   })
+
+  it("promotes a Codex native turn id with the completed live response", () => {
+    const liveMsg: LiveMessage = {
+      id: "lm-native",
+      role: "assistant",
+      content: [{ type: "text", text: "completed reply" }],
+      startedAt: 0,
+      nativeTurnId: "codex-turn-17",
+    }
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+
+    act(() => {
+      api().setLiveMessage(99, liveMsg, true)
+      api().completeTurn(99, liveMsg)
+    })
+
+    const session = api().getSession(99)
+    expect(session?.liveMessage).toBeNull()
+    expect(
+      session?.localTurns.find((turn) => turn.id === "live-99-lm-native")
+        ?.native_turn_id
+    ).toBe("codex-turn-17")
+  })
 })
 
 /**

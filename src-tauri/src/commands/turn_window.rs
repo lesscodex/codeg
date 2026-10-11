@@ -226,6 +226,7 @@ fn nav_outline_turn(turn: &MessageTurn) -> MessageTurn {
         model: None,
         completed_at: None,
         agent_message_id: None,
+        native_turn_id: None,
     }
 }
 
@@ -280,6 +281,7 @@ mod tests {
     fn turn(role: TurnRole, secs: i64) -> MessageTurn {
         MessageTurn {
             id: format!("turn-{secs}"),
+            native_turn_id: None,
             role,
             blocks: vec![],
             timestamp: Utc.timestamp_opt(secs, 0).unwrap(),

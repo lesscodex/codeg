@@ -2277,6 +2277,7 @@
       "forkSessionSuccess": "تم تفريع الجلسة بنجاح",
       "forkSessionFailed": "فشل في تفريع الجلسة: {error}",
       "forkSessionBusy": "فشل التفريع: هناك دور قيد التنفيذ",
+      "forkConfirmDescription": "هل تريد إنشاء فرع محادثة جديد من هذه الرسالة؟",
       "exportConversation": "تصدير المحادثة",
       "exportImage": "صورة",
       "exportMarkdown": "Markdown",

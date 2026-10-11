@@ -10,12 +10,17 @@ use agent_client_protocol::schema::v1::{
     ForkSessionRequest, ForkSessionResponse, McpServer, Meta, SessionId, AGENT_METHOD_NAMES,
 };
 use agent_client_protocol::{Agent, ConnectionTo};
+use std::time::Duration;
 
 use crate::acp::connection::{claude_raw_sdk_session_meta, send_capturing_models};
 
 use crate::acp::error::AcpError;
 use crate::models::agent::AgentType;
 use crate::models::message::{ContentBlock, MessageTurn, TurnRole};
+
+/// Bound the wire-level fork request so a non-responsive agent cannot leave
+/// the connection's fork task parked forever.
+pub(crate) const FORK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where in the history to fork, for the agents that can honour it.
 ///
@@ -224,21 +229,58 @@ pub async fn fork_session(
     mcp_servers: &[McpServer],
     prompt_suggestions: bool,
     fork_point: Option<&ForkPoint>,
+    last_turn_id: Option<&str>,
 ) -> Result<(ForkSessionResponse, Option<serde_json::Value>), AcpError> {
-    send_capturing_models(
-        cx,
-        AGENT_METHOD_NAMES.session_fork,
-        build_fork_request(
-            session_id,
-            agent_type,
-            cwd,
-            mcp_servers,
-            prompt_suggestions,
-            fork_point,
-        ),
+    let params = build_fork_params(
+        session_id,
+        agent_type,
+        cwd,
+        mcp_servers,
+        prompt_suggestions,
+        fork_point,
+        last_turn_id,
+    )?;
+    tokio::time::timeout(
+        FORK_REQUEST_TIMEOUT,
+        send_capturing_models(cx, AGENT_METHOD_NAMES.session_fork, params),
     )
     .await
+    .map_err(|_| {
+        AcpError::protocol(format!(
+            "session/fork timed out after {} seconds",
+            FORK_REQUEST_TIMEOUT.as_secs()
+        ))
+    })?
     .map_err(|e| AcpError::protocol(format!("session/fork failed: {e}")))
+}
+
+fn build_fork_params(
+    session_id: &SessionId,
+    agent_type: AgentType,
+    cwd: &str,
+    mcp_servers: &[McpServer],
+    prompt_suggestions: bool,
+    fork_point: Option<&ForkPoint>,
+    last_turn_id: Option<&str>,
+) -> Result<serde_json::Value, AcpError> {
+    let mut params = serde_json::to_value(build_fork_request(
+        session_id,
+        agent_type,
+        cwd,
+        mcp_servers,
+        prompt_suggestions,
+        fork_point,
+    ))
+    .map_err(|e| AcpError::protocol(format!("Failed to build fork request: {e}")))?;
+    if let Some(last_turn_id) =
+        last_turn_id.filter(|id| agent_type == AgentType::Codex && !id.trim().is_empty())
+    {
+        let object = params
+            .as_object_mut()
+            .ok_or_else(|| AcpError::protocol("ForkSessionRequest is not an object"))?;
+        object.insert("lastTurnId".into(), serde_json::json!(last_turn_id));
+    }
+    Ok(params)
 }
 
 /// The `session/fork` request: the fork point, if any, and — for Claude only —
@@ -311,12 +353,60 @@ mod tests {
             model: None,
             completed_at: None,
             agent_message_id: agent_message_id.map(str::to_string),
+            native_turn_id: None,
         }
     }
 
-    /// The shape both adapters parse — version 1, and the id under
-    /// `jetbrains.air.fork` — as the request's own top-level `_meta`, which is
-    /// where the typed request puts it.
+    #[test]
+    fn standard_fork_request_carries_last_turn_id_and_air_point_together() {
+        let session_id = SessionId::from("source-session");
+        let point = ForkPoint {
+            message_id: "turn-7".into(),
+            message_fingerprint: Some(fingerprint_agent_message("hello")),
+            message_occurrence: Some(1),
+        };
+        let params = build_fork_params(
+            &session_id,
+            AgentType::Codex,
+            "/workspace",
+            &[],
+            true,
+            Some(&point),
+            Some("codex-turn-7"),
+        )
+        .expect("request serializes");
+        let message = agent_client_protocol::UntypedMessage::new("session/fork", &params)
+            .expect("request builds");
+
+        assert_eq!(message.method(), "session/fork");
+        assert_eq!(message.params()["lastTurnId"], "codex-turn-7");
+        assert_eq!(message.params()["_meta"], point.to_meta());
+    }
+
+    #[test]
+    fn non_codex_fork_keeps_session_settings_without_last_turn_id() {
+        let servers = vec![server("codeg-mcp")];
+        let params = build_fork_params(
+            &SessionId::new("source-session"),
+            AgentType::ClaudeCode,
+            "/workspace",
+            &servers,
+            true,
+            None,
+            Some("codex-turn-7"),
+        )
+        .expect("request serializes");
+
+        assert!(params.get("lastTurnId").is_none());
+        assert_eq!(
+            params["_meta"],
+            serde_json::json!({"claudeCode": {"emitRawSDKMessages": true}})
+        );
+        assert_eq!(params["mcpServers"], serde_json::json!(servers));
+    }
+
+    /// The shape both adapters parse: version 1, and the id under
+    /// `jetbrains.air.fork`.
     #[test]
     fn fork_request_carries_the_air_fork_block_as_its_meta() {
         let point = ForkPoint {
@@ -735,4 +825,5 @@ mod tests {
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
+
 }

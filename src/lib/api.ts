@@ -370,6 +370,15 @@ export interface ForkResult {
   siblingConversationId: number
 }
 
+export interface HistoricalForkResult {
+  forkedSessionId: string
+  originalSessionId: string
+  forkedConversationId: number
+  forkedConversationTitle: string | null
+}
+
+export type AcpForkResult = ForkResult | HistoricalForkResult
+
 export async function acpFork(
   connectionId: string,
   // Linkage for a conversation opened from history: its connection resumed via
@@ -380,22 +389,37 @@ export async function acpFork(
   // new-conversation-then-fork). See `ConnectionManager::fork_session`.
   conversationId?: number | null,
   folderId?: number | null,
+  /** Optional Codex turn UUID forwarded on standard session/fork. */
+  nativeTurnId?: string | null,
   // "Fork from here": the rendered turn to fork at. The UI always passes one;
   // omitting it forks at the tail, which the backend also falls back to for a
   // turn the agent cannot name — its call, see `resolve_fork_point`.
-  forkFromTurnId?: string | null
-): Promise<ForkResult> {
+  forkFromTurnId?: string | null,
+  /** Keep the source session/tab untouched and return the new target row. */
+  historicalFork = false
+): Promise<AcpForkResult> {
   try {
-    return await getTransport().call("acp_fork", {
+    const params: {
+      connectionId: string
+      conversationId: number | null
+      folderId: number | null
+      nativeTurnId?: string
+      forkFromTurnId?: string
+      historicalFork?: boolean
+    } = {
       connectionId,
       conversationId: conversationId ?? null,
       folderId: folderId ?? null,
-      forkFromTurnId: forkFromTurnId ?? null,
-    })
+    }
+    if (nativeTurnId != null) params.nativeTurnId = nativeTurnId
+    if (forkFromTurnId != null) params.forkFromTurnId = forkFromTurnId
+    if (historicalFork) params.historicalFork = true
+    return await getTransport().call("acp_fork", params)
   } catch (e) {
-    // A fork is serialized with prompts on the backend: it returns
-    // TurnInProgress while a turn is in flight. Surface it as TurnBusyError so
-    // callers can treat it as transient (re-queue) rather than a fork failure.
+    // A standard live fork is serialized with prompts on the backend and
+    // returns TurnInProgress while a turn is in flight. Surface it as
+    // TurnBusyError so callers can treat it as transient rather than a fork
+    // failure; historical Codex forks use the detached path.
     if (isTurnInProgressRejection(e)) throw new TurnBusyError()
     throw e
   }
@@ -415,6 +439,20 @@ export async function acpStopAsyncTask(
   taskId: string
 ): Promise<boolean> {
   return getTransport().call("acp_stop_async_task", { connectionId, taskId })
+}
+
+export async function acpForkAtTurn(
+  connectionId: string,
+  conversationId: number | null | undefined,
+  folderId: number | null | undefined,
+  nativeTurnId: string
+): Promise<HistoricalForkResult> {
+  return getTransport().call("acp_fork_at_turn", {
+    connectionId,
+    conversationId: conversationId ?? null,
+    folderId: folderId ?? null,
+    nativeTurnId,
+  })
 }
 
 export async function acpRespondPermission(

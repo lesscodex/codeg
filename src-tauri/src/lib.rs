@@ -2140,6 +2140,7 @@ mod tauri_app {
                 acp_commands::acp_cancel,
                 acp_commands::acp_fork,
                 acp_commands::acp_stop_async_task,
+                acp_commands::acp_fork_at_turn,
                 acp_commands::acp_respond_permission,
                 acp_commands::acp_answer_question,
                 acp_commands::acp_answer_plan_approval,

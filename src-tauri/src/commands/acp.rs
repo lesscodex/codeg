@@ -23,7 +23,9 @@ use crate::acp::types::{
     GrokStructuredConfig,
 };
 #[cfg(feature = "tauri-runtime")]
-use crate::acp::types::{ConnectionInfo, ForkResultInfo, PromptInputBlock};
+use crate::acp::types::{
+    AcpForkResult, ConnectionInfo, HistoricalForkResultInfo, PromptInputBlock,
+};
 use crate::db::service::agent_setting_service;
 use crate::db::service::model_provider_service;
 use crate::db::AppDatabase;
@@ -11822,19 +11824,58 @@ pub async fn acp_fork(
     connection_id: String,
     conversation_id: Option<i32>,
     folder_id: Option<i32>,
+    native_turn_id: Option<String>,
     // "Fork from here": the rendered turn to fork at. `None` = fork at the
     // tail, the composer's fork-send behaviour.
     fork_from_turn_id: Option<String>,
+    // Keep the source session/tab untouched and return the new target row.
+    historical_fork: Option<bool>,
     db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
-) -> Result<ForkResultInfo, AcpError> {
+) -> Result<AcpForkResult, AcpError> {
+    if historical_fork.unwrap_or(false) {
+        return manager
+            .fork_session_historical(
+                &db,
+                &connection_id,
+                conversation_id,
+                folder_id,
+                native_turn_id,
+                fork_from_turn_id,
+            )
+            .await
+            .map(AcpForkResult::Historical);
+    }
     manager
         .fork_session(
             &db,
             &connection_id,
             conversation_id,
             folder_id,
+            native_turn_id,
             fork_from_turn_id,
+        )
+        .await
+        .map(AcpForkResult::Standard)
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn acp_fork_at_turn(
+    connection_id: String,
+    conversation_id: Option<i32>,
+    folder_id: Option<i32>,
+    native_turn_id: String,
+    db: State<'_, AppDatabase>,
+    manager: State<'_, ConnectionManager>,
+) -> Result<HistoricalForkResultInfo, AcpError> {
+    manager
+        .fork_session_at_turn(
+            &db,
+            &connection_id,
+            conversation_id,
+            folder_id,
+            native_turn_id,
         )
         .await
 }

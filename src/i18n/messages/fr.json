@@ -2277,6 +2277,7 @@
       "forkSessionSuccess": "Session dupliquée avec succès",
       "forkSessionFailed": "Échec de la duplication de la session : {error}",
       "forkSessionBusy": "Échec de la bifurcation : un tour est en cours",
+      "forkConfirmDescription": "Créer une nouvelle branche de conversation depuis ce message ?",
       "exportConversation": "Exporter la conversation",
       "exportImage": "Image",
       "exportMarkdown": "Markdown",

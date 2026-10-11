@@ -3126,6 +3126,7 @@ impl CodexParser {
         // rollouts old enough to predate `task_started`.
         let mut task_start_markers: Vec<DateTime<Utc>> = Vec::new();
         let mut turn_context_markers: Vec<DateTime<Utc>> = Vec::new();
+        let mut native_turn_id_markers: Vec<CodexTurnIdMarker> = Vec::new();
         let mut context_window_used_tokens: Option<u64> = None;
         // Not every `token_count` reads the context: see
         // `crate::acp::codex_context`, which the live ring shares.
@@ -3378,6 +3379,17 @@ impl CodexParser {
                     }
                     if let Some(ts) = parse_codex_timestamp(&value) {
                         push_turn_start(&mut turn_context_markers, ts);
+                        if let Some(native_turn_id) = value
+                            .get("payload")
+                            .and_then(|payload| payload.get("turn_id"))
+                            .and_then(|turn_id| turn_id.as_str())
+                            .filter(|turn_id| !turn_id.trim().is_empty())
+                        {
+                            native_turn_id_markers.push(CodexTurnIdMarker {
+                                timestamp: ts,
+                                native_turn_id: native_turn_id.to_string(),
+                            });
+                        }
                     }
                 }
                 "event_msg" => {
@@ -5234,6 +5246,7 @@ impl CodexParser {
         // they leave touching.
         merge_touching_thinking_cards(&mut messages, turn_starts);
         let mut turns = group_into_turns(messages);
+        assign_codex_native_turn_ids(&mut turns, &task_start_markers, &native_turn_id_markers);
         reconcile_turn_usage(&mut turns, &recorded_round_usage);
         super::relocate_orphaned_tool_results(&mut turns);
         super::structurize_read_tool_output(&mut turns);
@@ -5626,6 +5639,62 @@ fn continues_thought(
         && !turn_starts
             .iter()
             .any(|start| *start > paused_at && *start <= resumed_by)
+}
+
+#[derive(Debug, Clone)]
+struct CodexTurnIdMarker {
+    timestamp: DateTime<Utc>,
+    native_turn_id: String,
+}
+
+/// Preserve Codex's app-server turn ID without replacing the generic history
+/// turn ID. A `turn_context` can be re-emitted in the middle of one native
+/// turn, so when reliable `task_started` boundaries exist we use only the
+/// first ID observed in each boundary. Older rollouts have no task markers;
+/// for those, the latest context ID is the best available boundary signal.
+fn assign_codex_native_turn_ids(
+    turns: &mut [MessageTurn],
+    task_start_markers: &[DateTime<Utc>],
+    native_turn_id_markers: &[CodexTurnIdMarker],
+) {
+    if native_turn_id_markers.is_empty() {
+        return;
+    }
+
+    for turn in turns.iter_mut() {
+        if !matches!(turn.role, TurnRole::User | TurnRole::Assistant) {
+            continue;
+        }
+
+        let native_turn_id = if task_start_markers.is_empty() {
+            native_turn_id_markers
+                .iter()
+                .rev()
+                .find(|marker| marker.timestamp <= turn.timestamp)
+                .map(|marker| marker.native_turn_id.clone())
+        } else {
+            let Some(task_index) = task_start_markers
+                .iter()
+                .rposition(|timestamp| *timestamp <= turn.timestamp)
+            else {
+                continue;
+            };
+            let task_start = task_start_markers[task_index];
+            let next_task_start = task_start_markers.get(task_index + 1).copied();
+
+            native_turn_id_markers
+                .iter()
+                .find(|marker| {
+                    marker.timestamp >= task_start
+                        && next_task_start.is_none_or(|next| marker.timestamp < next)
+                })
+                .map(|marker| marker.native_turn_id.clone())
+        };
+
+        if native_turn_id.is_some() {
+            turn.native_turn_id = native_turn_id;
+        }
+    }
 }
 
 /// Close an open reasoning run: emit everything it gathered as a single Thinking
@@ -6809,6 +6878,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
         if matches!(msg.role, MessageRole::User) {
             turns.push(MessageTurn {
                 id: format!("turn-{}", turns.len()),
+                native_turn_id: None,
                 role: TurnRole::User,
                 blocks: msg.content.clone(),
                 timestamp: msg.timestamp,
@@ -6822,6 +6892,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
         } else if matches!(msg.role, MessageRole::System) {
             turns.push(MessageTurn {
                 id: format!("turn-{}", turns.len()),
+                native_turn_id: None,
                 role: TurnRole::System,
                 blocks: msg.content.clone(),
                 timestamp: msg.timestamp,
@@ -6863,6 +6934,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
 
             turns.push(MessageTurn {
                 id: format!("turn-{}", turns.len()),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks,
                 timestamp,
@@ -9120,6 +9192,10 @@ mod tests {
             .parse_conversation_detail(&path, "ctx-1")
             .expect("parse detail ok");
 
+        assert!(detail
+            .turns
+            .iter()
+            .all(|turn| turn.native_turn_id.is_none()));
         let stats: SessionStats = detail.session_stats.expect("session stats should exist");
         assert_eq!(stats.context_window_used_tokens, Some(170));
         assert_eq!(stats.context_window_max_tokens, Some(258400));
@@ -9614,7 +9690,62 @@ mod tests {
         let total: u64 = assistant_durations.iter().flatten().sum();
         assert_eq!(total, 30_000);
 
+        let assistant_native_ids: Vec<Option<&str>> = detail
+            .turns
+            .iter()
+            .filter(|turn| matches!(turn.role, TurnRole::Assistant))
+            .map(|turn| turn.native_turn_id.as_deref())
+            .collect();
+        assert_eq!(assistant_native_ids, vec![Some("t-1"), Some("t-1")]);
+        let user_native_id = detail
+            .turns
+            .iter()
+            .find(|turn| matches!(turn.role, TurnRole::User))
+            .and_then(|turn| turn.native_turn_id.as_deref());
+        assert_eq!(user_native_id, Some("t-1"));
+        let generic_ids: Vec<&str> = detail
+            .turns
+            .iter()
+            .filter(|turn| matches!(turn.role, TurnRole::Assistant))
+            .map(|turn| turn.id.as_str())
+            .collect();
+        assert_eq!(generic_ids, vec!["turn-1", "turn-2"]);
+
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_keeps_native_ids_distinct_across_adjacent_turns() {
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"adjacent-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.100Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.200Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\" native-a \",\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:00.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"first\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:05.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"first reply\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:10.100Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:10.200Z\",\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"native-b\",\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:10.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"second\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:15.300Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"second reply\"}}\n"
+        );
+        let detail = parse_rollout("adjacent-native-ids", content, "adjacent-1");
+
+        let native_ids: Vec<Option<&str>> = detail
+            .turns
+            .iter()
+            .map(|turn| turn.native_turn_id.as_deref())
+            .collect();
+        assert_eq!(
+            native_ids,
+            vec![
+                Some(" native-a "),
+                Some(" native-a "),
+                Some("native-b"),
+                Some("native-b")
+            ]
+        );
+
+        let generic_ids: Vec<&str> = detail.turns.iter().map(|turn| turn.id.as_str()).collect();
+        assert_eq!(generic_ids, vec!["turn-0", "turn-1", "turn-2", "turn-3"]);
     }
 
     #[test]

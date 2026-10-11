@@ -125,6 +125,7 @@ import {
   type ContentBlock,
   type ConversationStatus,
   type EventEnvelope,
+  type HistoricalForkTarget,
   type MessageTurn,
   type PlanApprovalAnswer,
   type PromptDraft,
@@ -303,6 +304,7 @@ const ConversationTabView = memo(function ConversationTabView({
   const folderId = ownFolderId ?? 0
   const {
     bindConversationTab,
+    openTab,
     setChatDraftWorkingDir,
     setTabRuntimeConversationId,
     pinTab,
@@ -420,6 +422,7 @@ const ConversationTabView = memo(function ConversationTabView({
   const createConversationPendingRef = useRef(false)
   // Single-flight guard for the eager scratch-dir prepare (on chat-mode select).
   const prepareChatDirPendingRef = useRef(false)
+  const forkedTurnKeysRef = useRef(new Set<string>())
   const sessionIdRef = useRef<string | null>(null)
   const syncCancelRef = useRef<(() => void) | null>(null)
 
@@ -1378,15 +1381,35 @@ const ConversationTabView = memo(function ConversationTabView({
   // (`resolve_fork_point`): a turn it cannot name forks at the tail rather than
   // failing, so this never has to reason about per-agent identity.
   //
-  // Liveness is read off `connStatusRef` rather than captured: this callback is
-  // handed to every rendered reply, so taking `connStatus` as a dependency
-  // would swap its identity at both ends of every turn and re-render the whole
-  // mounted transcript window for nothing. The ref is also the fresher answer
-  // at click time.
+  // Codex historical forks stay actionable while the source turn is prompting:
+  // the backend runs them detached. Legacy live forks remain idle-only.
+  // Re-check the connection here in case a stale footer outlives that status
+  // transition.
   const handleForkFromTurn = useCallback(
-    async (turnId: string) => {
+    async ({ turnId, nativeTurnId }: HistoricalForkTarget) => {
+      const key = `${effectiveConversationId}:${turnId}:${nativeTurnId ?? ""}`
+      if (
+        forkedTurnKeysRef.current.has(key) &&
+        !window.confirm(t("forkConfirmDescription"))
+      ) {
+        return
+      }
+      forkedTurnKeysRef.current.add(key)
+
       const connectionId = conn.connectionId
-      if (!connectionId || connStatusRef.current !== "connected") return
+      const historical = selectedAgent === "codex"
+      const forkConnectionReady =
+        connStatus === "connected" || (historical && connStatus === "prompting")
+      if (
+        !connectionId ||
+        conn.agentType !== selectedAgent ||
+        !hasPersistedConversation ||
+        !conn.supportsFork ||
+        (!historical && conn.isViewer) ||
+        !forkConnectionReady
+      ) {
+        return
+      }
       // Snapshot which live turns belong to the PRE-fork session, before the
       // await. The fork RPC is a window in which a send can still start — a
       // queued auto-flush, a fast typist, another client — and such a turn
@@ -1394,13 +1417,11 @@ const ConversationTabView = memo(function ConversationTabView({
       // with the history it isn't part of. Naming the stale turns instead of
       // clearing wholesale is what keeps that distinction.
       //
-      // COMPLETED turns only. An optimistic user turn is one whose prompt has
-      // not reached the agent yet, and the backend refuses a fork while a turn
-      // is in flight (`AcpError::TurnInProgress`) — so a fork that SUCCEEDS
-      // proves any optimistic turn standing at this moment never started a
-      // turn on the old session, and it will therefore run on the forked one.
-      // Sweeping it would erase the user's own message while its reply streams
-      // in underneath.
+      // COMPLETED turns only. Legacy live forks are disabled while a turn is in
+      // flight; Codex historical forks are detached and may succeed. A
+      // successful fork still proves any optimistic turn standing at this
+      // moment never started on the old session. Sweeping it would erase the
+      // user's own message while its reply streams in underneath.
       const preForkSession = useConversationRuntimeStore
         .getState()
         .byConversationId.get(effectiveConversationId)
@@ -1408,12 +1429,33 @@ const ConversationTabView = memo(function ConversationTabView({
         (t) => t.id
       )
       try {
-        const { forkedSessionId } = await acpFork(
+        const result = await acpFork(
           connectionId,
           dbConvIdRef.current,
           folderId,
-          turnId
+          historical ? nativeTurnId : null,
+          turnId,
+          historical
         )
+        if (historical) {
+          if (!("forkedConversationId" in result)) {
+            throw new Error("Historical fork returned no target conversation")
+          }
+          const { forkedConversationId, forkedConversationTitle } = result
+          // A Codex historical fork is detached: leave the source session/tab
+          // untouched and open the persisted target row separately.
+          openTab(
+            folderId,
+            forkedConversationId,
+            selectedAgent,
+            true,
+            forkedConversationTitle ?? undefined
+          )
+          void refreshConversations()
+          return
+        }
+
+        const { forkedSessionId } = result
         sessionIdRef.current = forkedSessionId
         setExternalId(effectiveConversationId, forkedSessionId)
         // The backend's two-row reshuffle: the current row now points at S2
@@ -1458,10 +1500,17 @@ const ConversationTabView = memo(function ConversationTabView({
     },
     [
       conn.connectionId,
+      conn.agentType,
+      conn.isViewer,
+      conn.supportsFork,
+      connStatus,
       effectiveConversationId,
       folderId,
+      hasPersistedConversation,
+      openTab,
       refetchDetail,
       refreshConversations,
+      selectedAgent,
       setExternalId,
       t,
     ]
@@ -2156,15 +2205,16 @@ const ConversationTabView = memo(function ConversationTabView({
           // that can see it without racing.
           //
           // "prompting" belongs on this side of the gate (same shape as the
-          // goal-control gate above): this answers "can this surface fork at
-          // all", and a turn in flight is a passing "not right now" that the
-          // view greys the button out for. Dropping the handler instead made
-          // every reply's fork icon disappear for the length of each reply.
+          // goal-control gate above): Codex historical forks can run detached,
+          // while legacy live forks remain disabled until the source is idle.
+          // Dropping the handler instead made every reply's fork icon disappear
+          // for the length of each reply.
           // `handleForkFromTurn` re-checks liveness at click time.
           onForkFromTurn={
             (connStatus === "connected" || connStatus === "prompting") &&
             hasPersistedConversation &&
-            conn.supportsFork
+            conn.supportsFork &&
+            (selectedAgent === "codex" || !conn.isViewer)
               ? handleForkFromTurn
               : undefined
           }

@@ -34,6 +34,8 @@ pub struct LiveMessage {
     pub role: MessageRole,
     pub content: Vec<LiveContentBlock>,
     pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_turn_id: Option<String>,
 }
 
 /// 流式 turn 的内容块。事件按到达顺序追加。
@@ -273,6 +275,10 @@ pub struct SessionState {
     // 状态
     pub status: ConnectionStatus,
     pub live_message: Option<LiveMessage>,
+    /// Codex's app-server turn id for the currently streaming turn. Kept
+    /// separately so a `turn_started` event can arrive before the first live
+    /// content creates `live_message`.
+    pub native_turn_id: Option<String>,
     pub active_tool_calls: BTreeMap<String, ToolCallState>,
     /// The answers codeg sent back for Qoder `AskUserQuestion` calls whose
     /// completion has not arrived yet, keyed by tool-call id: the elicitation
@@ -851,6 +857,7 @@ impl SessionState {
             folder_id,
             status: ConnectionStatus::Connecting,
             live_message: None,
+            native_turn_id: None,
             active_tool_calls: BTreeMap::new(),
             qoder_ask_replies: BTreeMap::new(),
             pending_permission: None,
@@ -1031,6 +1038,7 @@ impl SessionState {
                     // and nothing renders an entry the live message no longer
                     // references.
                     self.live_message = None;
+                    self.native_turn_id = None;
                     // The prediction was for this prompt's place: whatever the
                     // user sent, it is spent (the adapter clears its copy the
                     // same way).
@@ -1272,6 +1280,22 @@ impl SessionState {
                     self.pending_plan_approval = None;
                 }
             }
+            AcpEvent::TurnStarted {
+                session_id,
+                native_turn_id,
+            } => {
+                if self
+                    .external_id
+                    .as_deref()
+                    .is_some_and(|current| current != session_id)
+                {
+                    return;
+                }
+                self.native_turn_id = Some(native_turn_id.clone());
+                if let Some(live) = self.live_message.as_mut() {
+                    live.native_turn_id = Some(native_turn_id.clone());
+                }
+            }
             AcpEvent::TurnComplete { stop_reason, .. } => {
                 // Diagnostic only (no behavior change): pairs with the
                 // StatusChanged log above. This is the ACTUAL point the turn
@@ -1372,6 +1396,7 @@ impl SessionState {
                     }
                 }
                 self.live_message = None;
+                self.native_turn_id = None;
                 self.active_tool_calls.clear();
                 self.qoder_ask_replies.clear();
                 // The turn's user prompt is no longer "in flight" — the
@@ -1422,6 +1447,7 @@ impl SessionState {
                     message_id: message_id.clone(),
                     blocks: blocks.clone(),
                 });
+                self.native_turn_id = None;
                 // Reference instant for the in-flight prompt's recency check in
                 // `apply_in_flight_message_id`. Set here (not at manager enqueue)
                 // so it tracks `pending_user_message` exactly. Truncated to
@@ -2030,6 +2056,7 @@ impl SessionState {
                 role: MessageRole::Assistant,
                 content: Vec::new(),
                 started_at: Utc::now(),
+                native_turn_id: self.native_turn_id.clone(),
             });
         }
         self.live_message
@@ -2738,6 +2765,39 @@ mod tests {
             "win-test".to_string(),
             None,
         )
+    }
+
+    #[test]
+    fn codex_turn_started_id_survives_live_message_creation_and_completion() {
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "ext".into(),
+        });
+        s.apply_event(&AcpEvent::TurnStarted {
+            session_id: "ext".into(),
+            native_turn_id: "codex-turn-17".into(),
+        });
+        assert!(s.live_message.is_none());
+
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "done".into(),
+            parent_tool_use_id: None,
+        });
+        assert_eq!(
+            s.live_message
+                .as_ref()
+                .and_then(|message| message.native_turn_id.as_deref()),
+            Some("codex-turn-17")
+        );
+        assert_eq!(s.native_turn_id.as_deref(), Some("codex-turn-17"));
+
+        s.apply_event(&AcpEvent::TurnComplete {
+            session_id: "ext".into(),
+            stop_reason: "end_turn".into(),
+            agent_type: "codex".into(),
+        });
+        assert!(s.live_message.is_none());
+        assert!(s.native_turn_id.is_none());
     }
 
     /// `ConversationLinked` must forget the live-title skip-cache.
@@ -4943,6 +5003,7 @@ mod tests {
                 },
             ],
             started_at: Utc::now(),
+            native_turn_id: None,
         });
         s.apply_event(&AcpEvent::TurnComplete {
             session_id: "ext".into(),
@@ -4970,6 +5031,7 @@ mod tests {
                 },
             ],
             started_at: Utc::now(),
+            native_turn_id: None,
         });
         s.apply_event(&AcpEvent::TurnComplete {
             session_id: "ext".into(),
@@ -4997,6 +5059,7 @@ mod tests {
                 },
             ],
             started_at: Utc::now(),
+            native_turn_id: None,
         });
         s.apply_event(&AcpEvent::TurnComplete {
             session_id: "ext".into(),
@@ -5032,6 +5095,7 @@ mod tests {
                 },
             ],
             started_at: Utc::now(),
+            native_turn_id: None,
         });
         s.apply_event(&AcpEvent::TurnComplete {
             session_id: "ext".into(),
@@ -5060,6 +5124,7 @@ mod tests {
                 },
             ],
             started_at: Utc::now(),
+            native_turn_id: None,
         });
         s.apply_event(&AcpEvent::TurnComplete {
             session_id: "ext".into(),
@@ -5109,6 +5174,7 @@ mod tests {
                 parent_tool_use_id: None,
             }],
             started_at: Utc::now(),
+            native_turn_id: None,
         });
         let complete = AcpEvent::TurnComplete {
             session_id: "ext".into(),

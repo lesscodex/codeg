@@ -480,6 +480,7 @@ impl ClineParser {
                 {
                     turns.push(MessageTurn {
                         id: failure.id,
+                        native_turn_id: None,
                         role: TurnRole::System,
                         blocks: failure.content,
                         timestamp: failure.timestamp,
@@ -509,6 +510,7 @@ impl ClineParser {
                         .or_else(|| manifest_model.clone());
                     turns.push(MessageTurn {
                         id: next_turn_id(&mut turn_counter),
+                        native_turn_id: None,
                         role: TurnRole::Assistant,
                         blocks,
                         timestamp,
@@ -524,6 +526,7 @@ impl ClineParser {
                     if !parsed.tool_results.is_empty() {
                         turns.push(MessageTurn {
                             id: next_turn_id(&mut turn_counter),
+                            native_turn_id: None,
                             role: TurnRole::System,
                             blocks: parsed.tool_results,
                             timestamp,
@@ -537,6 +540,7 @@ impl ClineParser {
                     if !parsed.user_blocks.is_empty() {
                         turns.push(MessageTurn {
                             id: next_turn_id(&mut turn_counter),
+                            native_turn_id: None,
                             role: TurnRole::User,
                             blocks: parsed.user_blocks,
                             timestamp,
@@ -828,6 +832,7 @@ impl ClineParser {
                     turn_counter += 1;
                     turns.push(MessageTurn {
                         id: format!("{}-{}", conversation_id, turn_counter),
+                        native_turn_id: None,
                         role: TurnRole::Assistant,
                         blocks,
                         timestamp,
@@ -849,6 +854,7 @@ impl ClineParser {
                         turn_counter += 1;
                         turns.push(MessageTurn {
                             id: format!("{}-{}", conversation_id, turn_counter),
+                            native_turn_id: None,
                             role: TurnRole::System,
                             blocks: parsed.tool_results,
                             timestamp,
@@ -865,6 +871,7 @@ impl ClineParser {
                         turn_counter += 1;
                         turns.push(MessageTurn {
                             id: format!("{}-{}", conversation_id, turn_counter),
+                            native_turn_id: None,
                             role: TurnRole::User,
                             blocks: parsed.user_blocks,
                             timestamp,

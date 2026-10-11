@@ -463,6 +463,7 @@ pub fn project_turns(entries: &[TranscriptEntry]) -> Vec<MessageTurn> {
                 let blocks = prompt_blocks(&entry.p);
                 turns.push(MessageTurn {
                     id: format!("acp-{seq}"),
+                    native_turn_id: None,
                     role: TurnRole::User,
                     blocks,
                     timestamp: epoch_ms_to_utc(entry.t),
@@ -552,6 +553,7 @@ fn flush(pending: &mut Option<PendingTurn>, turns: &mut Vec<MessageTurn>, seq: &
     }
     turns.push(MessageTurn {
         id: format!("acp-{seq}"),
+        native_turn_id: None,
         role: TurnRole::Assistant,
         blocks: p.blocks,
         timestamp: epoch_ms_to_utc(p.started_at_ms),
@@ -689,6 +691,7 @@ fn apply_update(
                 _ => {
                     turns.push(MessageTurn {
                         id: format!("acp-{seq}"),
+                        native_turn_id: None,
                         role: TurnRole::User,
                         blocks: vec![block],
                         timestamp: epoch_ms_to_utc(at_ms),

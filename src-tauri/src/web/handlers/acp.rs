@@ -10,7 +10,8 @@ use crate::acp::opencode_plugins::PluginCheckSummary;
 use crate::acp::preflight::PreflightResult;
 use crate::acp::types::{
     AcpAgentInfo, AcpAgentStatus, AgentDiagnosticsReport, AgentSkillContent, AgentSkillLayout,
-    AgentSkillScope, AgentSkillsListResult, ConnectionInfo, ForkResultInfo,
+    AcpForkResult, AgentSkillScope, AgentSkillsListResult, ConnectionInfo,
+    HistoricalForkResultInfo,
 };
 use crate::app_error::{AppCommandError, AppErrorCode};
 use crate::app_state::AppState;
@@ -351,10 +352,63 @@ pub struct AcpForkParams {
     pub conversation_id: Option<i32>,
     #[serde(default)]
     pub folder_id: Option<i32>,
+    /// Native Codex turn UUID forwarded as `lastTurnId` on standard
+    /// `session/fork`. Omitted when the AIR fingerprint is sufficient.
+    #[serde(default)]
+    pub native_turn_id: Option<String>,
     /// "Fork from here": the rendered turn to fork at. Absent = fork at the
     /// tail, the composer's fork-send behaviour.
     #[serde(default)]
     pub fork_from_turn_id: Option<String>,
+    /// Keep the source session/tab untouched and return the newly-created
+    /// target conversation. The wire request still uses standard
+    /// `session/fork`; this flag selects Codeg's detached persistence flow.
+    #[serde(default)]
+    pub historical_fork: bool,
+}
+
+#[cfg(test)]
+mod acp_fork_params_tests {
+    use super::AcpForkParams;
+
+    #[test]
+    fn native_turn_id_is_optional_and_uses_camel_case() {
+        let legacy: AcpForkParams = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn-1",
+        }))
+        .expect("legacy request should deserialize");
+        assert!(legacy.native_turn_id.is_none());
+        assert!(legacy.fork_from_turn_id.is_none());
+        assert!(!legacy.historical_fork);
+
+        let with_native_id: AcpForkParams = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn-1",
+            "nativeTurnId": "codex-turn-7",
+        }))
+        .expect("native Codex fork request should deserialize");
+        assert_eq!(
+            with_native_id.native_turn_id.as_deref(),
+            Some("codex-turn-7")
+        );
+
+        let with_rendered_id: AcpForkParams = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn-1",
+            "forkFromTurnId": "turn-7",
+        }))
+        .expect("rendered-turn fork request should deserialize");
+        assert_eq!(
+            with_rendered_id.fork_from_turn_id.as_deref(),
+            Some("turn-7")
+        );
+
+        let historical: AcpForkParams = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn-1",
+            "forkFromTurnId": "turn-7",
+            "historicalFork": true,
+        }))
+        .expect("historical fork request should deserialize");
+        assert!(historical.historical_fork);
+    }
 }
 
 #[derive(Deserialize)]
@@ -459,14 +513,29 @@ pub async fn acp_cancel(
 pub async fn acp_fork(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpForkParams>,
-) -> Result<Json<ForkResultInfo>, AppCommandError> {
+) -> Result<Json<AcpForkResult>, AppCommandError> {
     let manager = &state.connection_manager;
+    if params.historical_fork {
+        let result = manager
+            .fork_session_historical(
+                &state.db,
+                &params.connection_id,
+                params.conversation_id,
+                params.folder_id,
+                params.native_turn_id,
+                params.fork_from_turn_id,
+            )
+            .await
+            .map_err(|error| AppCommandError::task_execution_failed(error.to_string()))?;
+        return Ok(Json(AcpForkResult::Historical(result)));
+    }
     let result = manager
         .fork_session(
             &state.db,
             &params.connection_id,
             params.conversation_id,
             params.folder_id,
+            params.native_turn_id,
             params.fork_from_turn_id,
         )
         .await
@@ -482,6 +551,27 @@ pub async fn acp_fork(
                 _ => AppCommandError::task_execution_failed(message),
             }
         })?;
+    Ok(Json(AcpForkResult::Standard(result)))
+}
+
+pub async fn acp_fork_at_turn(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<AcpForkParams>,
+) -> Result<Json<HistoricalForkResultInfo>, AppCommandError> {
+    let native_turn_id = params.native_turn_id.ok_or_else(|| {
+        AppCommandError::invalid_input("nativeTurnId is required for a historical fork")
+    })?;
+    let result = state
+        .connection_manager
+        .fork_session_at_turn(
+            &state.db,
+            &params.connection_id,
+            params.conversation_id,
+            params.folder_id,
+            native_turn_id,
+        )
+        .await
+        .map_err(|error| AppCommandError::task_execution_failed(error.to_string()))?;
     Ok(Json(result))
 }
 

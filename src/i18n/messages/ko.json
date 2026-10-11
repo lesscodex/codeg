@@ -2277,6 +2277,7 @@
       "forkSessionSuccess": "세션 포크 성공",
       "forkSessionFailed": "세션 포크 실패: {error}",
       "forkSessionBusy": "분기 실패: 턴이 실행 중입니다",
+      "forkConfirmDescription": "이 메시지에서 새 대화 브랜치를 만들까요?",
       "exportConversation": "대화 내보내기",
       "exportImage": "이미지",
       "exportMarkdown": "Markdown",

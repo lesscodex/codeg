@@ -299,6 +299,8 @@ export interface LiveMessage {
   role: "assistant" | "tool"
   content: LiveContentBlock[]
   startedAt: number
+  /** Codex app-server turn id, when the current response has one. */
+  nativeTurnId?: string | null
 }
 
 /** A stopped turn's record (see `ConnectionState.cancelledTurn`). */
@@ -585,6 +587,11 @@ type Action =
       /** The ending turn's stop reason, when `turn_complete` is what moved
        *  the status. */
       stopReason?: string
+    }
+  | {
+      type: "TURN_STARTED"
+      contextKey: string
+      nativeTurnId: string
     }
   | {
       // One AIR typed session-failure upsert (`session_failure` event).
@@ -2308,6 +2315,21 @@ function connectionsReducer(
         updated.cancelledTurn = cancelledTurnOf(conn.liveMessage)
       }
       next.set(action.contextKey, updated)
+      return next
+    }
+
+    case "TURN_STARTED": {
+      const conn = state.get(action.contextKey)
+      if (!conn || conn.agentType !== "codex") return state
+      const nativeTurnId = action.nativeTurnId.trim()
+      if (!nativeTurnId) return state
+      const prev = ensureLiveMessage(conn.liveMessage)
+      if (prev.nativeTurnId === nativeTurnId) return state
+      const next = new Map(state)
+      next.set(action.contextKey, {
+        ...conn,
+        liveMessage: { ...prev, nativeTurnId },
+      })
       return next
     }
 
@@ -5112,6 +5134,14 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             retireTurnFailures(turnConn?.connectionId ?? contextKey)
           }
           dispatch({ type: "STATUS_CHANGED", contextKey, status: e.status })
+          break
+        case "turn_started":
+          flushStreamingQueue(contextKey)
+          dispatch({
+            type: "TURN_STARTED",
+            contextKey,
+            nativeTurnId: e.native_turn_id,
+          })
           break
         case "content_delta":
           settleRetryIncidentsOnProgress(contextKey)

@@ -95,6 +95,7 @@ import type {
   AgentType,
   AvailableCommandInfo,
   ConnectionStatus,
+  HistoricalForkTarget,
   MessageTurn,
   PlanEntryInfo,
 } from "@/lib/types"
@@ -210,11 +211,11 @@ interface MessageListViewProps {
    * can actually run (live connection, agent supports `session/fork`). Embeds
    * that are not the owning conversation surface leave it unset.
    *
-   * "No turn in flight" is deliberately NOT part of this gate: that condition
-   * is transient and comes back, so the view renders it as a disabled button
-   * (see `forkBusy`) rather than making every reply's footer flicker.
+   * A Codex historical fork can run while a turn is in flight; legacy live
+   * forks render that transient state as a disabled button (see `forkBusy`)
+   * rather than making every reply's footer flicker.
    */
-  onForkFromTurn?: (turnId: string) => void
+  onForkFromTurn?: (target: HistoricalForkTarget) => void
 }
 
 export interface ResolvedMessageGroup {
@@ -233,6 +234,7 @@ export interface ResolvedMessageGroup {
    * post-turn metadata patch may sit on any sub-turn, not just the last.
    */
   completed_at?: string | null
+  native_turn_id?: string | null
 }
 
 export type ThreadRenderItem =
@@ -986,7 +988,9 @@ export function mergeConsecutiveAssistantTurns(
       const merged: AssistantTurnItem = {
         ...last,
         key: `merged-${first.key}`,
-        isResponseComplete: buffer.every((it) => it.isResponseComplete),
+        isResponseComplete: buffer.every(
+          (it) => it.isResponseComplete ?? it.phase === "persisted"
+        ),
         // Concatenate every sub-turn's raw turns so the artifacts card sees all
         // file edits across the merged reply, not just the last sub-turn.
         sourceTurns: buffer.flatMap((b) => b.sourceTurns),
@@ -1143,12 +1147,11 @@ export function markThreadTail(items: ThreadRenderItem[]): void {
  *
  * Anywhere before it is reachable: a reply the user steered mid-turn promotes
  * as assistant / user message / assistant, so its first half is a settled
- * group carrying a fork button while the backfill is a second and a half away.
- * The exception is therefore the thread TAIL, not the newest assistant reply:
- * steer at the very end of a turn and the promotion is assistant + user message
- * with nothing after it, which leaves the newest reply one message short of the
- * tail — and the parse ending on a user turn means `source_turn_id` never
- * arrives to correct it (see `computeTurnMetadataPatches`). Exported for tests.
+ * group carrying a fork button while the backfill is still pending. The
+ * exception is therefore the thread TAIL, not the newest assistant reply:
+ * steer at the very end of a turn and the promotion is assistant + user
+ * message with nothing after it, which leaves the newest reply one message
+ * short of the tail until the next metadata sync names it. Exported for tests.
  */
 export function isForkPointUnnamed(
   forkPoint: MessageTurn | null,
@@ -1183,7 +1186,7 @@ const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
   roundOpen?: boolean
   onRoundOpenChange?: (open: boolean) => void
   foldEpoch?: number
-  onForkFromTurn?: (turnId: string) => void
+  onForkFromTurn?: (target: HistoricalForkTarget) => void
   forkDisabled?: boolean
   /** Whether nothing follows this group in the thread — the one position where
    *  a turn the backend cannot name still forks where the user pointed. */
@@ -1204,6 +1207,14 @@ const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
     ? sourceTurns[sourceTurns.length - 1]
     : null
   const forkPointUnnamed = isForkPointUnnamed(forkPoint, isThreadTail)
+  const forkTarget = forkPoint
+    ? {
+        turnId: forkPoint.source_turn_id ?? forkPoint.id,
+        ...(forkPoint.native_turn_id
+          ? { nativeTurnId: forkPoint.native_turn_id }
+          : {}),
+      }
+    : null
 
   return (
     <div className={dimmed ? "opacity-70" : undefined}>
@@ -1264,9 +1275,9 @@ const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
             // The post-turn reparse backfills the parser's name; `id` is the
             // right answer only for turns that came from the parser already,
             // and for the newest reply, where the tail IS the fork point.
-            onForkFromTurn && isResponseComplete && forkPoint
+            onForkFromTurn && isResponseComplete && forkTarget
               ? () => {
-                  onForkFromTurn(forkPoint.source_turn_id ?? forkPoint.id)
+                  onForkFromTurn(forkTarget)
                 }
               : undefined
           }
@@ -1480,6 +1491,7 @@ export function MessageListView({
           duration_ms: msg.duration_ms,
           model: msg.model,
           completed_at: msg.completed_at,
+          native_turn_id: msg.native_turn_id,
         }
         groupCache.set(msg, group)
       }
@@ -1491,7 +1503,12 @@ export function MessageListView({
       // paging in older history prepends items, and an index-bearing key
       // would shift every existing row's identity — remounting the whole
       // list and dropping the virtualizer's measurement cache mid-scroll.
-      const key = `${phase}-${role}-${msg.id}`
+      const isResponseComplete =
+        phase === "persisted" &&
+        !(timelineTurns[i].inProgressToolCallIds?.size ?? 0)
+      const key = `${phase}-${role}-${msg.id}-${
+        isResponseComplete ? "complete" : "pending"
+      }`
       // Hoist a compaction-only turn to its own standalone divider item so it
       // renders BETWEEN turns instead of being merged into (and wedged inside)
       // the preceding assistant reply by `mergeConsecutiveAssistantTurns`.
@@ -1642,11 +1659,10 @@ export function MessageListView({
     [historicalPlanEntries]
   )
 
-  // A turn in flight doesn't take the fork affordance away, it greys it out:
-  // the host keeps `onForkFromTurn` set for the whole "prompting" window (see
-  // its gate in `conversation-detail-panel`), and every reply's footer says
-  // "not right now" instead of dropping its button and shifting the icon row.
-  const forkBusy = connStatus === "prompting"
+  // Codex historical forks are detached from the source session and remain
+  // usable while it prompts. Legacy live forks still wait for the source to
+  // become idle; keep their buttons stable and explain the temporary state.
+  const forkBusy = connStatus === "prompting" && agentType !== "codex"
 
   const renderThreadItem = useCallback(
     (item: ThreadRenderItem) => {
@@ -1673,7 +1689,9 @@ export function MessageListView({
                 dimmed={item.phase === "optimistic"}
                 showStats={item.showStats}
                 previousUserIndex={item.previousUserIndex}
-                isResponseComplete={item.isResponseComplete}
+                isResponseComplete={
+                  item.isResponseComplete ?? item.phase === "persisted"
+                }
                 sourceTurns={item.sourceTurns}
                 currentRound={item.isLastAssistantRun && fold.armed}
                 roundOpen={fold.roundOpen}
@@ -1704,13 +1722,13 @@ export function MessageListView({
       }
     },
     [
-      userTurnHeader,
       fold.armed,
       fold.roundOpen,
       fold.epoch,
       handleRoundOpenChange,
       onForkFromTurn,
       forkBusy,
+      userTurnHeader,
     ]
   )
 

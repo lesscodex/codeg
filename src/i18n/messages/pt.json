@@ -2277,6 +2277,7 @@
       "forkSessionSuccess": "Sessão bifurcada com sucesso",
       "forkSessionFailed": "Falha ao bifurcar a sessão: {error}",
       "forkSessionBusy": "Falha ao bifurcar: há um turno em andamento",
+      "forkConfirmDescription": "Criar uma nova ramificação de conversa a partir desta mensagem?",
       "exportConversation": "Exportar conversa",
       "exportImage": "Imagem",
       "exportMarkdown": "Markdown",

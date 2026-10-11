@@ -323,6 +323,8 @@ export interface SessionStats {
 
 export interface MessageTurn {
   id: string
+  /** Provider-native turn ID, when the history parser preserves one. */
+  native_turn_id?: string | null
   role: TurnRole
   blocks: ContentBlock[]
   timestamp: string
@@ -341,9 +343,9 @@ export interface MessageTurn {
    *
    * Present only where the turn can be a fork point ("fork from here"), which
    * today means Claude and DeepSeek assistant turns. Its absence does NOT mean
-   * the turn cannot be forked at: codex forks by content fingerprint instead,
-   * and DeepSeek falls back to one — all resolved entirely in the backend, so
-   * never gate the fork affordance on this. */
+   * the turn cannot be forked at: Codex can use a native turn UUID or the
+   * assistant text's AIR fingerprint, and DeepSeek falls back to one — all
+   * resolved entirely in the backend, so never gate the fork affordance on this. */
   agent_message_id?: string | null
   /** CLIENT-ONLY, never on the wire. The id the PARSER gave this turn.
    *
@@ -360,6 +362,13 @@ export interface MessageTurn {
    * Absent on turns that came from the parser to begin with — those already ARE
    * `turn-N` — so read it as `turn.source_turn_id ?? turn.id`. */
   source_turn_id?: string | null
+}
+
+export interface HistoricalForkTarget {
+  /** Rendered/parser turn id used to build the AIR fork point. */
+  turnId: string
+  /** Codex app-server turn UUID, when the live/history path preserved it. */
+  nativeTurnId?: string | null
 }
 
 export interface ConversationDetail {
@@ -2998,6 +3007,12 @@ export type AcpEvent =
       origin?: PermissionAnswerOrigin
     }
   | {
+      /** Codex-only app-server turn identity for the active live response. */
+      type: "turn_started"
+      session_id: string
+      native_turn_id: string
+    }
+  | {
       /**
        * What an answer decided about the card's tool call. Follows the
        * `permission_resolved` that retired the card, only for answers.
@@ -3471,6 +3486,8 @@ export interface LiveMessage {
   role: MessageRole
   content: LiveContentBlock[]
   started_at: string
+  /** Codex app-server turn id, present only for genuine native turns. */
+  native_turn_id?: string | null
 }
 
 export interface PendingPermissionState {

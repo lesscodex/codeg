@@ -111,7 +111,7 @@ describe("TurnStats jump-to-previous-user scrolling", () => {
   })
 })
 
-const forkLabel = enMessages.Folder.chat.messageList.forkFromHere
+const liveForkLabel = enMessages.Folder.chat.messageList.forkFromHere
 
 describe("TurnStats fork-from-here gating", () => {
   it("hides the fork button when the surface passes no handler", () => {
@@ -119,13 +119,13 @@ describe("TurnStats fork-from-here gating", () => {
     // must not render on a disconnected session, an agent without
     // `session/fork`, or a non-owning embed — all of which pass undefined.
     renderStats(<TurnStats copyText="hello" />)
-    expect(screen.queryByLabelText(forkLabel)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(liveForkLabel)).not.toBeInTheDocument()
   })
 
   it("forks from this turn when clicked", async () => {
     const onForkFromHere = vi.fn()
     renderStats(<TurnStats copyText="hello" onForkFromHere={onForkFromHere} />)
-    await userEvent.click(screen.getByLabelText(forkLabel))
+    await userEvent.click(screen.getByLabelText(liveForkLabel))
     expect(onForkFromHere).toHaveBeenCalledTimes(1)
   })
 
@@ -134,7 +134,7 @@ describe("TurnStats fork-from-here gating", () => {
     // keep it open, or a turn with no usage/duration/copy text would silently
     // lose its fork point.
     renderStats(<TurnStats copyText="" onForkFromHere={vi.fn()} />)
-    expect(screen.getByLabelText(forkLabel)).toBeInTheDocument()
+    expect(screen.getByLabelText(liveForkLabel)).toBeInTheDocument()
   })
 
   it("keeps the button in place, disabled, while a turn is in flight", () => {
@@ -143,7 +143,7 @@ describe("TurnStats fork-from-here gating", () => {
     renderStats(
       <TurnStats copyText="hello" onForkFromHere={vi.fn()} forkDisabled />
     )
-    expect(screen.getByLabelText(forkLabel)).toHaveAttribute(
+    expect(screen.getByLabelText(liveForkLabel)).toHaveAttribute(
       "aria-disabled",
       "true"
     )
@@ -160,7 +160,7 @@ describe("TurnStats fork-from-here gating", () => {
         forkDisabled
       />
     )
-    await userEvent.click(screen.getByLabelText(forkLabel))
+    await userEvent.click(screen.getByLabelText(liveForkLabel))
     expect(onForkFromHere).not.toHaveBeenCalled()
   })
 
@@ -171,7 +171,7 @@ describe("TurnStats fork-from-here gating", () => {
     renderStats(
       <TurnStats copyText="hello" onForkFromHere={vi.fn()} forkDisabled />
     )
-    await userEvent.hover(screen.getByLabelText(forkLabel))
+    await userEvent.hover(screen.getByLabelText(liveForkLabel))
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       enMessages.Folder.chat.messageList.forkBusy
     )
@@ -190,7 +190,7 @@ describe("TurnStats fork-from-here gating", () => {
         forkDisabledReason="unnamed"
       />
     )
-    await userEvent.hover(screen.getByLabelText(forkLabel))
+    await userEvent.hover(screen.getByLabelText(liveForkLabel))
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       enMessages.Folder.chat.messageList.forkNotReady
     )
