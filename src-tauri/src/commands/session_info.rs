@@ -443,6 +443,7 @@ mod tests {
     fn turn(role: TurnRole, blocks: Vec<ContentBlock>) -> MessageTurn {
         MessageTurn {
             id: "t".into(),
+            native_turn_id: None,
             role,
             blocks,
             timestamp: Utc::now(),

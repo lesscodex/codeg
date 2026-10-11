@@ -1619,6 +1619,7 @@ export function buildStreamingTurnsFromLiveMessage(
   }
 
   const timestamp = new Date(liveMessage.startedAt).toISOString()
+  const nativeTurnId = liveMessage.nativeTurnId?.trim()
   const turns = groups
     .filter((group) => group.blocks.length > 0)
     .map((group, i) => ({
@@ -1629,6 +1630,7 @@ export function buildStreamingTurnsFromLiveMessage(
       role: group.role,
       blocks: group.blocks,
       timestamp: group.timestamp ?? timestamp,
+      ...(nativeTurnId ? { native_turn_id: nativeTurnId } : {}),
     }))
 
   return { turns, inProgressToolCallIds }
@@ -1641,6 +1643,8 @@ export interface TurnMetadataPatch {
   duration_ms?: number | null
   model?: string | null
   completed_at?: string | null
+  /** Provider-native turn UUID recovered by the history parser. */
+  native_turn_id?: string | null
   /** The id the PARSER gave this turn (`turn-3`). A turn produced in this
    *  session is named `live-<conversationId>-<liveMessageId>` and the backend
    *  has never heard of that id, so anything asking the backend to act on "this
@@ -1684,6 +1688,119 @@ export function parseHoldsTheLatestRound(
     newestLocal !== undefined &&
     isTurnErrorTurn(newestLocal)
   )
+}
+
+/**
+ * Match completed local assistant runs to the parser turns that name their
+ * fork points. User turns are the durable round boundaries shared by the live
+ * stream and transcript; consecutive assistant parser turns form the same
+ * rendered reply and therefore name it by their last turn, just like
+ * `mergeConsecutiveAssistantTurns` does in the message list.
+ *
+ * Only rounds closed by the next matching user turn, or by a settled parser
+ * tail, are returned. A new prompt may therefore close and name the previous
+ * reply while its own reply is still running, without guessing at the active
+ * tail. A mismatched user sequence or assistant-run shape stops that round
+ * from being named rather than risking a fork at the wrong position.
+ */
+export function matchPersistedAssistantForkPoints(params: {
+  localTurns: MessageTurn[]
+  pendingTurns?: MessageTurn[]
+  parsedTurns: MessageTurn[]
+  parsedTailSettled: boolean
+}): Map<number, MessageTurn> {
+  const pendingTurns = params.pendingTurns ?? []
+  const localSequence = [...params.localTurns, ...pendingTurns]
+  const localUserIndices: number[] = []
+  const parsedUserIndices: number[] = []
+
+  for (let i = 0; i < localSequence.length; i++) {
+    if (localSequence[i].role === "user") localUserIndices.push(i)
+  }
+  for (let i = 0; i < params.parsedTurns.length; i++) {
+    if (params.parsedTurns[i].role === "user") parsedUserIndices.push(i)
+  }
+
+  const matches = new Map<number, MessageTurn>()
+
+  // Batch-less adoption paths have no user anchor. Preserve the old exact
+  // 1:1 behavior there; ordinary owner conversations always enter through a
+  // user turn and use the stronger round-boundary path below.
+  if (localUserIndices.length === 0) {
+    if (!params.parsedTailSettled) return matches
+    const localAssistants: number[] = []
+    const parsedAssistants: number[] = []
+    for (let i = 0; i < localSequence.length; i++) {
+      if (localSequence[i].role === "assistant") localAssistants.push(i)
+    }
+    for (let i = 0; i < params.parsedTurns.length; i++) {
+      if (params.parsedTurns[i].role === "assistant") parsedAssistants.push(i)
+    }
+    if (localAssistants.length !== parsedAssistants.length) return matches
+    for (let i = 0; i < localAssistants.length; i++) {
+      const localIndex = localAssistants[i]
+      if (localIndex < params.localTurns.length) {
+        matches.set(localIndex, params.parsedTurns[parsedAssistants[i]])
+      }
+    }
+    return matches
+  }
+
+  let matchedUsers = 0
+  const userCount = Math.min(localUserIndices.length, parsedUserIndices.length)
+  while (matchedUsers < userCount) {
+    const localUser = localSequence[localUserIndices[matchedUsers]]
+    const parsedUser = params.parsedTurns[parsedUserIndices[matchedUsers]]
+    if (userTurnContentKey(localUser) !== userTurnContentKey(parsedUser)) break
+    matchedUsers += 1
+  }
+
+  for (let round = 0; round < matchedUsers; round++) {
+    const localStart = localUserIndices[round] + 1
+    const localEnd = localUserIndices[round + 1] ?? localSequence.length
+    const parsedStart = parsedUserIndices[round] + 1
+    const nextParsedUser = parsedUserIndices[round + 1]
+    const nextUserMatched = round + 1 < matchedUsers
+
+    // A following matching user is definitive proof that this reply is on
+    // disk. Without one, only a settled parser tail can close the round; an
+    // unmatched parsed user means the streams diverged, so do not cross it.
+    if (!nextUserMatched && nextParsedUser !== undefined) break
+    if (!nextUserMatched && !params.parsedTailSettled) break
+
+    const parsedEnd = nextUserMatched
+      ? nextParsedUser
+      : params.parsedTurns.length
+    const localRuns = assistantRunEnds(localSequence, localStart, localEnd)
+    const parsedRuns = assistantRunEnds(
+      params.parsedTurns,
+      parsedStart,
+      parsedEnd
+    )
+    if (localRuns.length !== parsedRuns.length) continue
+
+    for (let i = 0; i < localRuns.length; i++) {
+      const localIndex = localRuns[i]
+      if (localIndex < params.localTurns.length) {
+        matches.set(localIndex, params.parsedTurns[parsedRuns[i]])
+      }
+    }
+  }
+
+  return matches
+}
+
+function assistantRunEnds(
+  turns: MessageTurn[],
+  start: number,
+  end: number
+): number[] {
+  const ends: number[] = []
+  for (let i = start; i < end; i++) {
+    if (turns[i].role !== "assistant") continue
+    if (i + 1 >= end || turns[i + 1].role !== "assistant") ends.push(i)
+  }
+  return ends
 }
 
 /**
@@ -1842,6 +1959,8 @@ export function computeTurnMetadataPatches(params: {
    *  opens at the batch boundary. */
   parsedTurns: readonly MessageTurn[]
   persistedAssistantCount: number
+  /** Exact parser fork points keyed by their completed local-turn index. */
+  forkPointsByLocalIndex?: ReadonlyMap<number, MessageTurn>
   /**
    * Whether `parsedTurns`, past the history above, opens exactly where
    * `localTurns` does: the windowed response, or a full parse cut at the
@@ -1941,7 +2060,13 @@ export function computeTurnMetadataPatches(params: {
   const patches: TurnMetadataPatch[] = []
   localAssistantIndices.forEach((index, i) => {
     const turnStats = stats.get(index)
-    const sourceTurnId = idIsPlaceable ? sessionAssistantTurns[i].id : undefined
+    const forkPoint =
+      params.forkPointsByLocalIndex?.get(index) ??
+      (params.forkPointsByLocalIndex === undefined && idIsPlaceable
+        ? sessionAssistantTurns[i]
+        : undefined)
+    const sourceTurnId = forkPoint?.id
+    const nativeTurnId = forkPoint?.native_turn_id
     // `source_turn_id` counts as something worth emitting on its own: a turn
     // the parser recorded with no stats at all (a plain codex reply carries no
     // per-turn usage) still needs its name, or "fork from here" on it silently
@@ -1951,6 +2076,7 @@ export function computeTurnMetadataPatches(params: {
       !turnStats?.duration_ms &&
       !turnStats?.model &&
       !turnStats?.completed_at &&
+      !nativeTurnId &&
       !sourceTurnId
     ) {
       return
@@ -1961,6 +2087,7 @@ export function computeTurnMetadataPatches(params: {
       duration_ms: turnStats?.duration_ms,
       model: turnStats?.model,
       completed_at: turnStats?.completed_at,
+      ...(nativeTurnId ? { native_turn_id: nativeTurnId } : {}),
       source_turn_id: sourceTurnId,
     })
   })
@@ -2999,12 +3126,14 @@ function reducer(
         const newDuration = turn.duration_ms ?? patch.duration_ms
         const newModel = turn.model ?? patch.model
         const newCompletedAt = turn.completed_at ?? patch.completed_at
+        const newNativeTurnId = turn.native_turn_id ?? patch.native_turn_id
         const newSourceTurnId = turn.source_turn_id ?? patch.source_turn_id
         if (
           newUsage !== turn.usage ||
           newDuration !== turn.duration_ms ||
           newModel !== turn.model ||
           newCompletedAt !== turn.completed_at ||
+          newNativeTurnId !== turn.native_turn_id ||
           newSourceTurnId !== turn.source_turn_id
         ) {
           patchedTurns[patch.index] = {
@@ -3013,6 +3142,7 @@ function reducer(
             duration_ms: newDuration,
             model: newModel,
             completed_at: newCompletedAt,
+            native_turn_id: newNativeTurnId,
             source_turn_id: newSourceTurnId,
           }
           changed = true
@@ -3325,12 +3455,10 @@ const VIEWER_DETAIL_SYNC_LOAD_WAIT_CAP_MS = 30_000
 // its completion clock — can stay unreadable for several seconds; a longer
 // session makes the wait longer still). This used to be two attempts, 1.5s
 // then 3s: past 4.5s the reply's footer simply stayed empty (no model, no
-// tokens, no time) and every earlier reply of the session stayed unnameable —
-// `source_turn_id` is only placeable while the parse is 1:1 with what this
-// client streamed, so a parse that is still behind greys out their "fork from
-// here" as "not ready yet" for good. Both only recovered by reopening the
-// conversation, which re-renders straight from a fresh parse. So the poll now
-// backs off across ~30s and stops as soon as the transcript has caught up.
+// tokens, no time) and every earlier reply of the session stayed unnameable.
+// Fork identities now settle round by round, but they share this persistence
+// race and bounded retry schedule. The poll backs off across ~30s and stops as
+// soon as the transcript has caught up.
 const TURN_METADATA_SYNC_DELAYS_MS = [1500, 3000, 5000, 8000, 13000] as const
 
 // Active viewer-sync polls, keyed by conversationId, so a fresh nudge supersedes
@@ -4737,17 +4865,11 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
         if (cancelled) return
         const session = get().byConversationId.get(runtimeId)
         if (!session || session.localTurns.length === 0) return
-        // A prompt is in flight again — the user typed ahead inside our
-        // backoff, or the queue auto-flushed the moment the reply settled.
-        // Patching is unsafe mid-turn, but ABANDONING the schedule is worse:
-        // the reply that just finished may still be unflushed, and this poll
-        // is the only thing that would ever fill in its stats. Skip the
-        // roundtrip, keep the schedule. (A completion cancels this sync and
-        // starts a fresh one, so nothing double-runs.)
-        if (session.syncState === "awaiting_persist") {
-          scheduleNext(attempt)
-          return
-        }
+        // A newer prompt may already be in flight. Still read the transcript:
+        // its persisted user turn is the strongest boundary proving that the
+        // PREVIOUS reply is complete, and the matcher below patches only
+        // closed local rounds. The active reply lives outside `localTurns`, so
+        // no in-flight content can be overwritten here.
 
         // Windowed fetch anchored at the batch boundary: the response then
         // holds exactly this batch's turns (plus anything appended after),
@@ -4763,10 +4885,6 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
             if (cancelled) return
             const cur = get().byConversationId.get(runtimeId)
             if (!cur || cur.localTurns.length === 0) return
-            if (cur.syncState === "awaiting_persist") {
-              scheduleNext(attempt)
-              return
-            }
 
             const localAssistantIndices: number[] = []
             for (let i = 0; i < cur.localTurns.length; i++) {
@@ -4827,6 +4945,23 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
               responseWindowed || legacyCut
                 ? 0
                 : (cur.historyAssistantBaseline ?? 0)
+            const reconciliationTurns = [
+              ...cur.localTurns,
+              ...cur.optimisticTurns,
+            ]
+            const parsedTailSettled = parseHoldsTheLatestRound(
+              parsedTurns,
+              reconciliationTurns
+            )
+            const forkPointsByLocalIndex =
+              windowVerified || legacyCut
+                ? matchPersistedAssistantForkPoints({
+                    localTurns: cur.localTurns,
+                    pendingTurns: cur.optimisticTurns,
+                    parsedTurns,
+                    parsedTailSettled,
+                  })
+                : new Map<number, MessageTurn>()
             const patches =
               responseWindowed && !windowVerified
                 ? []
@@ -4835,6 +4970,7 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
                     parsedTurns,
                     persistedAssistantCount,
                     parseOpensAtBatch: windowVerified || legacyCut,
+                    forkPointsByLocalIndex,
                     parseEndsWithAssistant: parseHoldsTheLatestRound(
                       parsed.turns,
                       cur.localTurns
@@ -4867,14 +5003,11 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
             // patches, so a value an earlier round already pinned counts as
             // covered (first-write-wins).
             //
-            // NOTHING at all (no usage, no completion time): the parse either
-            // does not hold that reply yet, or holds it UNFINALIZED — deepseek
-            // attaches both from the single `turn/end` record, which can land
-            // several frames after the reply's text. That is also the state
-            // that withholds `source_turn_id` from EVERY reply of the batch
-            // (see `idIsPlaceable`), i.e. what leaves the earlier replies'
-            // "fork from here" greyed out as "not ready yet" — so it gets the
-            // whole schedule.
+            // Any still-unnamed live reply keeps the whole schedule. A newer
+            // prompt may close an earlier reply before the newest reply is on
+            // disk; another read can then name that closed prefix immediately.
+            // Structural ambiguity remains safe: the bounded poll eventually
+            // stops without ever assigning a guessed fork point.
             //
             // Usage ALONE missing is a much shorter wait: the reply's own
             // record is on disk (it carried the completion time) and only a
@@ -4884,10 +5017,10 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
             // reports usage at all (Cursor) from polling out the full schedule
             // on every single turn.
             //
-            // A SURPLUS — the parser split the reply, or an out-of-turn record
-            // landed — is deliberately not a retry signal: it leaves turns
-            // unnamed for the rest of the session however long we poll, and it
-            // patches the newest reply, so it stops here.
+            // A structural mismatch keeps identities unset and therefore uses
+            // the same bounded schedule. Re-reading cannot force a permanent
+            // mismatch to fit, but it can catch a transcript that was merely
+            // observed between two writes.
             const after = get().byConversationId.get(runtimeId)
             const lastLocalAssistantIndex =
               localAssistantIndices[localAssistantIndices.length - 1]
@@ -4895,6 +5028,18 @@ export const useConversationRuntimeStore = create<ConversationRuntimeStore>()((
               lastLocalAssistantIndex === undefined
                 ? undefined
                 : after?.localTurns[lastLocalAssistantIndex]
+            const hasUnnamedLocalReply = localAssistantIndices.some((index) => {
+              const turn = after?.localTurns[index]
+              return (
+                turn !== undefined &&
+                isLiveTurnId(turn.id) &&
+                turn.source_turn_id == null
+              )
+            })
+            if (hasUnnamedLocalReply) {
+              if (!windowUnverifiableForGood) scheduleNext(attempt)
+              return
+            }
             if (newest != null && newest.usage == null) {
               if (newest.completed_at == null) {
                 if (!windowUnverifiableForGood) scheduleNext(attempt)

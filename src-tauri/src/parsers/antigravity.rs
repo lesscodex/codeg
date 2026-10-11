@@ -793,6 +793,7 @@ impl PendingAssistant {
         let timestamp = self.first_ts.unwrap_or(fallback_ts);
         MessageTurn {
             id,
+            native_turn_id: None,
             role: TurnRole::Assistant,
             blocks: std::mem::take(&mut self.blocks),
             timestamp,
@@ -897,6 +898,7 @@ fn project_steps(steps: &[Step]) -> SessionParse {
                 .get_or_insert_with(|| title_from_user_text(&text));
             parsed.turns.push(MessageTurn {
                 id: format!("agy-{idx}-user"),
+                native_turn_id: None,
                 role: TurnRole::User,
                 blocks: vec![ContentBlock::Text {
                     text: truncate_str(&text, TEXT_CAP),

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest"
 import {
   computeTurnMetadataPatches,
+  matchPersistedAssistantForkPoints,
   resetConversationRuntimeStore,
   useConversationRuntimeStore,
 } from "@/stores/conversation-runtime-store"
@@ -68,6 +69,98 @@ const HISTORY: MessageTurn[] = [
 function durations(patches: { index: number; duration_ms?: number | null }[]) {
   return Object.fromEntries(patches.map((p) => [p.index, p.duration_ms]))
 }
+
+describe("matchPersistedAssistantForkPoints", () => {
+  it("names a completed reply once the next user turn reaches the transcript", () => {
+    const localTurns = [
+      user("live-u1"),
+      asst({ id: "live-a1" }),
+      user("live-u2"),
+      asst({ id: "live-a2" }),
+    ]
+    const parsedTurns = [
+      user("turn-u1"),
+      asst({ id: "turn-a1", native_turn_id: "native-a1" }),
+      user("turn-u2"),
+    ]
+
+    const matches = matchPersistedAssistantForkPoints({
+      localTurns,
+      parsedTurns,
+      parsedTailSettled: false,
+    })
+
+    expect(matches.get(1)).toMatchObject({
+      id: "turn-a1",
+      native_turn_id: "native-a1",
+    })
+    expect(matches.has(3)).toBe(false)
+  })
+
+  it("uses the last parser sub-turn in a closed assistant run", () => {
+    const localTurns = [
+      user("live-u1"),
+      asst({ id: "live-a1" }),
+      user("live-u2"),
+      asst({ id: "live-a2" }),
+    ]
+    const parsedTurns = [
+      user("turn-u1"),
+      asst({ id: "turn-a1-1" }),
+      asst({ id: "turn-a1-2" }),
+      asst({ id: "turn-a1-3" }),
+      user("turn-u2"),
+    ]
+
+    const matches = matchPersistedAssistantForkPoints({
+      localTurns,
+      parsedTurns,
+      parsedTailSettled: false,
+    })
+
+    expect(matches.get(1)?.id).toBe("turn-a1-3")
+    expect(matches.has(3)).toBe(false)
+  })
+
+  it("names the final reply only after the parser tail settles", () => {
+    const localTurns = [user("live-u1"), asst({ id: "live-a1" })]
+    const parsedTurns = [user("turn-u1"), asst({ id: "turn-a1" })]
+
+    expect(
+      matchPersistedAssistantForkPoints({
+        localTurns,
+        parsedTurns,
+        parsedTailSettled: false,
+      }).size
+    ).toBe(0)
+    expect(
+      matchPersistedAssistantForkPoints({
+        localTurns,
+        parsedTurns,
+        parsedTailSettled: true,
+      }).get(1)?.id
+    ).toBe("turn-a1")
+  })
+
+  it("requires exact assistant identity without a user boundary", () => {
+    const localTurns = [asst({ id: "live-a1" })]
+
+    expect(
+      matchPersistedAssistantForkPoints({
+        localTurns,
+        parsedTurns: [asst({ id: "turn-a1-1" }), asst({ id: "turn-a1-2" })],
+        parsedTailSettled: true,
+      }).size
+    ).toBe(0)
+    expect(
+      matchPersistedAssistantForkPoints({
+        localTurns,
+        parsedTurns: [asst({ id: "turn-a1" })],
+        parsedTailSettled: true,
+      }).get(0)?.id
+    ).toBe("turn-a1")
+  })
+})
 
 describe("computeTurnMetadataPatches", () => {
   it("does not fold historical turns' stats into the first reply after resume", () => {
@@ -662,6 +755,62 @@ describe("computeTurnMetadataPatches", () => {
         model: undefined,
         completed_at: undefined,
         source_turn_id: "turn-3",
+      },
+    ])
+  })
+
+  it("backfills a native Codex turn id onto a local turn", () => {
+    const patches = computeTurnMetadataPatches({
+      localTurns: [live("live")],
+      parsedTurns: [asst({ id: "turn-3", native_turn_id: "codex-turn-3" })],
+      persistedAssistantCount: 0,
+      parseOpensAtBatch: true,
+      parseEndsWithAssistant: true,
+    })
+
+    expect(patches).toEqual([
+      {
+        index: 0,
+        duration_ms: undefined,
+        usage: undefined,
+        model: undefined,
+        completed_at: undefined,
+        native_turn_id: "codex-turn-3",
+        source_turn_id: "turn-3",
+      },
+    ])
+  })
+
+  it("keeps round stats aligned while naming a closed split reply", () => {
+    const localTurns = [user("u1"), live("a1"), user("u2"), live("a2")]
+    const parsedTurns = [
+      user("u1"),
+      asst({ id: "p1", duration_ms: 100 }),
+      asst({ id: "p2", native_turn_id: "native-1", duration_ms: 200 }),
+      user("u2"),
+    ]
+    const patches = computeTurnMetadataPatches({
+      localTurns,
+      parsedTurns,
+      persistedAssistantCount: 0,
+      parseOpensAtBatch: true,
+      parseEndsWithAssistant: false,
+      forkPointsByLocalIndex: matchPersistedAssistantForkPoints({
+        localTurns,
+        parsedTurns,
+        parsedTailSettled: false,
+      }),
+    })
+
+    expect(patches).toEqual([
+      {
+        index: 1,
+        duration_ms: 300,
+        usage: undefined,
+        model: undefined,
+        completed_at: undefined,
+        native_turn_id: "native-1",
+        source_turn_id: "p2",
       },
     ])
   })

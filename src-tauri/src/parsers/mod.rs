@@ -1858,6 +1858,7 @@ mod route_sanitizer_tests {
             model: None,
             completed_at: None,
         agent_message_id: None,
+            native_turn_id: None,
         }
     }
 
@@ -2253,6 +2254,7 @@ mod tests {
             .expect("valid base timestamp");
         MessageTurn {
             id: format!("t-{start_s}"),
+            native_turn_id: None,
             role,
             blocks: Vec::new(),
             timestamp: base + chrono::Duration::seconds(start_s),
@@ -2640,6 +2642,7 @@ mod tests {
         let turns = vec![
             MessageTurn {
                 id: "turn-0".to_string(),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: vec![],
                 timestamp,
@@ -2656,6 +2659,7 @@ mod tests {
             },
             MessageTurn {
                 id: "turn-1".to_string(),
+                native_turn_id: None,
                 role: TurnRole::Assistant,
                 blocks: vec![],
                 timestamp,
