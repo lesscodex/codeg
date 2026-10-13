@@ -1326,6 +1326,23 @@ pub async fn find_live_by_session_ref(
     }
 }
 
+/// Resolve the persisted conversation that owns one agent session. The
+/// database uniqueness constraint is scoped to `(external_id, agent_type)`,
+/// so both values are required here as well.
+pub async fn find_live_id_by_external_id_and_agent(
+    conn: &DatabaseConnection,
+    external_id: &str,
+    agent_type: AgentType,
+) -> Result<Option<i32>, DbError> {
+    let row = conversation::Entity::find()
+        .filter(conversation::Column::ExternalId.eq(external_id))
+        .filter(conversation::Column::AgentType.eq(agent_type.as_wire().into_owned()))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .one(conn)
+        .await?;
+    Ok(row.map(|conversation| conversation.id))
+}
+
 /// Look up a child conversation by its `delegation_call_id` (the broker's
 /// `task_id`). Returns `Ok(None)` when no row matches — used by the broker's
 /// `ChildStatusLookup` DB fallback to recover a delegation task's terminal

@@ -2015,7 +2015,7 @@ async fn record_turn_end(
 /// boolean — see `config_option_already_holds`).
 ///
 /// Used to carry a session's selectors across a fork.
-fn current_config_option_values(
+pub(crate) fn current_config_option_values(
     opts: &[SessionConfigOptionInfo],
 ) -> BTreeMap<String, String> {
     opts.iter()
