@@ -1,13 +1,12 @@
 "use client"
 
 /**
- * Persists selector defaults per agent and actual selector state per persisted
- * conversation, so restarting an agent does not reset that conversation.
+ * Browser fallback for agent defaults and conversations created before selector
+ * preferences were persisted by the Rust backend.
  *
- * Preferences are shipped to the backend at connect time (see
- * `getSavedPrefsForConnect`) and applied before the initial selector events:
- * new sessions receive agent defaults, while existing sessions receive their
- * conversation-specific values.
+ * Values are still shipped at connect time for migration compatibility. For an
+ * existing conversation, the backend's stored target-conversation values take
+ * precedence and confirmed ACP selector events keep that record current.
  */
 
 import type { SessionConfigOptionInfo, SessionModeStateInfo } from "@/lib/types"

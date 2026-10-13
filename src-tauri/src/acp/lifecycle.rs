@@ -18,6 +18,7 @@ use std::time::Duration;
 use sea_orm::DatabaseConnection;
 use tokio::sync::{broadcast, mpsc};
 
+use crate::acp::connection::current_config_option_values;
 use crate::acp::delegation::broker::{DelegationBroker, DelegationMatchKey};
 use crate::acp::delegation::types::{DelegationError, DelegationOutcome, DelegationSuccess};
 use crate::acp::internal_bus::InternalEventBus;
@@ -26,7 +27,9 @@ use crate::acp::session_state::{SessionState, TurnStatusWriter};
 use crate::acp::types::{AcpEvent, ConnectionStatus, EventEnvelope};
 use crate::db::entities::conversation::ConversationStatus;
 use crate::db::error::DbError;
-use crate::db::service::{conversation_service, tool_approval_service};
+use crate::db::service::{
+    conversation_selector_preference_service, conversation_service, tool_approval_service,
+};
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
 use crate::web::event_bridge::{emit_with_state, EventEmitter};
 use tokio::sync::RwLock;
@@ -40,6 +43,9 @@ use tokio::sync::RwLock;
 /// (SessionStarted, TurnComplete, ConversationLinked, NativeSessionTitle,
 /// TranscriptRolledOver, ToolApproval, Disconnected, Error.) `ToolApproval`
 /// is one per answered permission card, so it is paced by a person.
+/// Selector events are included alongside the lifecycle and terminal events;
+/// each arrives at most a handful of times per turn. `ToolApproval` is one per
+/// answered permission card, so it is paced by a person.
 const WORKER_QUEUE_CAPACITY: usize = 64;
 
 /// Whether an event needs to reach the per-connection worker. Mirrors the
@@ -70,6 +76,10 @@ fn is_lifecycle_relevant(event: &AcpEvent) -> bool {
             | AcpEvent::NativeSessionTitle { .. }
             | AcpEvent::TranscriptRolledOver { .. }
             | AcpEvent::ToolApproval { .. }
+            | AcpEvent::SessionModes { .. }
+            | AcpEvent::SessionConfigOptions { .. }
+            | AcpEvent::ModeChanged { .. }
+            | AcpEvent::SelectorsReady
             | AcpEvent::StatusChanged {
                 status: ConnectionStatus::Disconnected
             }
@@ -459,10 +469,54 @@ pub(crate) async fn handle_event(
             };
             tool_approval_service::record(db_conn, cid, approval).await
         }
+        AcpEvent::SessionModes { .. }
+        | AcpEvent::SessionConfigOptions { .. }
+        | AcpEvent::ModeChanged { .. }
+        | AcpEvent::SelectorsReady => {
+            persist_selector_preferences(db_conn, manager, &envelope.connection_id).await
+        }
         // Other events don't need cross-connection DB persistence today; extend
         // this dispatcher with new arms as the lifecycle scope grows.
         _ => Ok(()),
     }
+}
+
+/// Persist selector values after the target agent has confirmed them. ACP
+/// events update `SessionState` before reaching this subscriber, so rejected
+/// selections are stored as the value the agent actually adopted.
+pub(crate) async fn persist_selector_preferences(
+    db_conn: &DatabaseConnection,
+    manager: &ConnectionManager,
+    connection_id: &str,
+) -> Result<(), DbError> {
+    let Some(state) = manager.get_state(connection_id).await else {
+        return Ok(());
+    };
+    let (conversation_id, mode_id, config_values) = {
+        let state = state.read().await;
+        if !state.selectors_ready {
+            return Ok(());
+        }
+        let Some(conversation_id) = state
+            .conversation_id
+            .or(state.selector_preferences_conversation_id)
+        else {
+            return Ok(());
+        };
+        let config_values = state
+            .config_options
+            .as_deref()
+            .map(current_config_option_values)
+            .unwrap_or_default();
+        (conversation_id, state.current_mode.clone(), config_values)
+    };
+    conversation_selector_preference_service::upsert(
+        db_conn,
+        conversation_id,
+        mode_id,
+        &config_values,
+    )
+    .await
 }
 
 /// On TurnComplete for a delegation child, resolve the pending broker call
@@ -3192,6 +3246,13 @@ async fn connection_worker_loop(
                 conversation_id, ..
             } => {
                 try_cache_link(&mut cache, &manager, &connection_id, *conversation_id).await;
+                if let Err(error) =
+                    persist_selector_preferences(&db, &manager, &connection_id).await
+                {
+                    tracing::error!(
+                        "[lifecycle][ERROR] selector preferences for {connection_id}: {error}"
+                    );
+                }
             }
             AcpEvent::StatusChanged {
                 status: ConnectionStatus::Disconnected,
@@ -3265,7 +3326,7 @@ async fn connection_worker_loop(
 /// connections, workers run independently so a slow SQLite write on one
 /// connection doesn't backpressure the others.
 ///
-/// All forwarded events (the 7 types in `is_lifecycle_relevant`) use
+/// All forwarded events selected by `is_lifecycle_relevant` use
 /// blocking `send().await` to guarantee delivery even when the worker
 /// mailbox is full — `SessionStarted` (writes external_id) and
 /// `TurnComplete` (writes terminal status) are correctness-critical and
@@ -4367,6 +4428,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn confirmed_selectors_persist_for_the_target_conversation() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/selector-prefs").await;
+        let conversation =
+            conversation_service::create(&db.conn, folder_id, AgentType::ClaudeCode, None, None)
+                .await
+                .unwrap();
+        let manager = ConnectionManager::new();
+        {
+            let mut connections = manager.connections.lock().await;
+            connections.insert(
+                "selector-target".into(),
+                fake_connection_with_state("selector-target", Some(conversation.id)),
+            );
+        }
+        let state = manager.get_state("selector-target").await.unwrap();
+        {
+            let mut state = state.write().await;
+            state.selectors_ready = true;
+            state.current_mode = Some("plan".into());
+            state.config_options = Some(Vec::new());
+        }
+
+        persist_selector_preferences(&db.conn, &manager, "selector-target")
+            .await
+            .unwrap();
+
+        let stored = conversation_selector_preference_service::get(
+            &db.conn,
+            conversation.id,
+        )
+        .await
+        .unwrap()
+        .expect("selector preferences");
+        assert_eq!(stored.mode_id.as_deref(), Some("plan"));
+        assert!(stored.config_values.is_empty());
+    }
+
     // ── Dispatcher-level regression coverage ─────────────────────────────
     //
     // These exercise the full `lifecycle_subscriber_task` (bus → filter →
@@ -4402,6 +4502,19 @@ mod tests {
         assert!(is_lifecycle_relevant(&AcpEvent::TranscriptRolledOver {
             transcript_id: "new-sess".into(),
         }));
+        assert!(is_lifecycle_relevant(&AcpEvent::SessionModes {
+            modes: crate::acp::types::SessionModeStateInfo {
+                current_mode_id: "default".into(),
+                available_modes: Vec::new(),
+            },
+        }));
+        assert!(is_lifecycle_relevant(&AcpEvent::SessionConfigOptions {
+            config_options: Vec::new(),
+        }));
+        assert!(is_lifecycle_relevant(&AcpEvent::ModeChanged {
+            mode_id: "plan".into(),
+        }));
+        assert!(is_lifecycle_relevant(&AcpEvent::SelectorsReady));
         assert!(is_lifecycle_relevant(&AcpEvent::StatusChanged {
             status: ConnectionStatus::Disconnected,
         }));

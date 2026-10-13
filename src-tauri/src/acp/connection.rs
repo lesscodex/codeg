@@ -2025,7 +2025,7 @@ async fn record_turn_end(
 /// boolean — see `config_option_already_holds`).
 ///
 /// Used to carry a session's selectors across a fork.
-fn current_config_option_values(
+pub(crate) fn current_config_option_values(
     opts: &[SessionConfigOptionInfo],
 ) -> BTreeMap<String, String> {
     opts.iter()
@@ -4688,6 +4688,7 @@ async fn emit_selectors_ready(state: &Arc<RwLock<SessionState>>, emitter: &Event
 /// "model"` is the spec-level signal — but every agent codeg drives spells the
 /// id this way, and the frontend's `isModelConfigOption` accepts either.
 const MODEL_CONFIG_OPTION_ID: &str = "model";
+const REASONING_EFFORT_CONFIG_OPTION_ID: &str = "reasoning_effort";
 
 /// Synthesized config-option id for Grok's model picker (drives the composer's
 /// grouped model selector via the frontend's `isModelConfigOption`).
@@ -4698,7 +4699,7 @@ const GROK_MODEL_OPTION_ID: &str = MODEL_CONFIG_OPTION_ID;
 /// (ids `low`/`medium`/`high`), and applies a live override via the
 /// `session/set_model` request's `_meta.reasoningEffort` — so effort is a live
 /// composer control, not just a global config.toml default.
-const GROK_EFFORT_OPTION_ID: &str = "reasoning_effort";
+const GROK_EFFORT_OPTION_ID: &str = REASONING_EFFORT_CONFIG_OPTION_ID;
 
 /// Stable `AcpEvent::Error` code the frontend localizes when a Grok model switch
 /// is rejected because the conversation is already bound to a different agent
@@ -7699,9 +7700,10 @@ fn build_load_session_request(
     cwd: &Path,
     mcp_servers: Vec<McpServer>,
     claude: &ClaudeSessionOptions,
+    preferred_config_values: &BTreeMap<String, String>,
 ) -> LoadSessionRequest {
     let mut req = LoadSessionRequest::new(session_id, cwd.to_path_buf());
-    if let Some(meta) = claude_raw_sdk_session_meta(agent_type, claude) {
+    if let Some(meta) = restore_session_meta(agent_type, claude, preferred_config_values) {
         req = req.meta(meta);
     }
     if !mcp_servers.is_empty() {
@@ -7710,8 +7712,49 @@ fn build_load_session_request(
     req
 }
 
+fn restore_session_meta(
+    agent_type: AgentType,
+    claude: &ClaudeSessionOptions,
+    preferred_config_values: &BTreeMap<String, String>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if let Some(meta) = claude_raw_sdk_session_meta(agent_type, claude) {
+        return Some(meta);
+    }
+    if agent_type != AgentType::Codex {
+        return None;
+    }
+
+    // Codex compares the resumed model with the last turn before ACP config
+    // options can be replayed, so carry only the selectors it needs up front.
+    let mut resume = serde_json::Map::new();
+    for (config_id, meta_key) in [
+        (MODEL_CONFIG_OPTION_ID, "model"),
+        (REASONING_EFFORT_CONFIG_OPTION_ID, "reasoningEffort"),
+    ] {
+        if let Some(value) = preferred_config_values
+            .get(config_id)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            resume.insert(
+                meta_key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
+    if resume.is_empty() {
+        return None;
+    }
+
+    let mut codeg = serde_json::Map::new();
+    codeg.insert("resume".to_string(), serde_json::Value::Object(resume));
+    let mut meta = serde_json::Map::new();
+    meta.insert("codeg".to_string(), serde_json::Value::Object(codeg));
+    Some(meta)
+}
+
 /// Build a `session/resume` request. Mirrors `build_load_session_request`
-/// (same fields + ClaudeCode raw-SDK meta + non-empty mcp_servers); the only
+/// (same fields + agent-specific meta + non-empty mcp_servers); the only
 /// wire difference is that `ResumeSessionRequest.mcp_servers` is
 /// `skip_serializing_if = Vec::is_empty`, so an empty list is omitted from the
 /// payload rather than emitted as `[]`.
@@ -7721,9 +7764,10 @@ pub(crate) fn build_resume_session_request(
     cwd: &Path,
     mcp_servers: Vec<McpServer>,
     claude: &ClaudeSessionOptions,
+    preferred_config_values: &BTreeMap<String, String>,
 ) -> ResumeSessionRequest {
     let mut req = ResumeSessionRequest::new(session_id, cwd.to_path_buf());
-    if let Some(meta) = claude_raw_sdk_session_meta(agent_type, claude) {
+    if let Some(meta) = restore_session_meta(agent_type, claude, preferred_config_values) {
         req = req.meta(meta);
     }
     if !mcp_servers.is_empty() {
@@ -9500,6 +9544,7 @@ async fn run_connection(
                         &cwd,
                         mcp_servers.clone(),
                         &claude,
+                        &preferred_config_values,
                     );
                     match unless_cancelled(&handshake, send_resume_session(&cx, resume_req)).await? {
                         Ok((resume_resp, models_raw)) => {
@@ -9645,6 +9690,7 @@ async fn run_connection(
                         &cwd,
                         mcp_servers.clone(),
                         &claude,
+                        &preferred_config_values,
                     );
                     if matches!(agent_type, AgentType::Kiro | AgentType::Hermes) {
                         unless_cancelled(
@@ -13652,6 +13698,7 @@ async fn handle_fork_or_exit(
             cwd,
             mcp_servers.to_vec(),
             &claude,
+            &inherited_config_values,
         );
         match send_resume_session(&cx, resume_req).await {
             Ok(pair) => Some(pair),
@@ -33640,6 +33687,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(false),
+            &BTreeMap::new(),
         );
         let resume_req = build_resume_session_request(
             AgentType::ClaudeCode,
@@ -33647,6 +33695,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(false),
+            &BTreeMap::new(),
         );
         assert_eq!(new_req.meta, load_req.meta);
         assert_eq!(new_req.meta, resume_req.meta);
@@ -33677,10 +33726,22 @@ mod tests {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
         let sid = || SessionId::new("abc".to_string());
         let new_req = build_new_session_request(AgentType::ClaudeCode, &cwd, Vec::new(), &claude);
-        let load_req =
-            build_load_session_request(AgentType::ClaudeCode, sid(), &cwd, Vec::new(), &claude);
-        let resume_req =
-            build_resume_session_request(AgentType::ClaudeCode, sid(), &cwd, Vec::new(), &claude);
+        let load_req = build_load_session_request(
+            AgentType::ClaudeCode,
+            sid(),
+            &cwd,
+            Vec::new(),
+            &claude,
+            &BTreeMap::new(),
+        );
+        let resume_req = build_resume_session_request(
+            AgentType::ClaudeCode,
+            sid(),
+            &cwd,
+            Vec::new(),
+            &claude,
+            &BTreeMap::new(),
+        );
         assert_eq!(new_req.meta, load_req.meta);
         assert_eq!(new_req.meta, resume_req.meta);
         // Settings alone, with predictions on.
@@ -37737,6 +37798,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         assert!(req.meta.is_none());
@@ -37778,6 +37840,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
         assert!(
             load_req.mcp_servers.is_empty(),
@@ -37924,6 +37987,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         assert_eq!(
@@ -37937,7 +38001,47 @@ mod tests {
     }
 
     #[test]
-    fn build_resume_session_request_skips_meta_for_non_claude() {
+    fn build_restore_session_requests_set_codex_selector_meta() {
+        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let preferred = BTreeMap::from([
+            ("model".to_string(), "gpt-5.6-sol".to_string()),
+            ("reasoning_effort".to_string(), "xhigh".to_string()),
+            ("mode".to_string(), "agent".to_string()),
+        ]);
+        let load_req = build_load_session_request(
+            AgentType::Codex,
+            SessionId::new("abc".to_string()),
+            &cwd,
+            Vec::new(),
+            &ClaudeSessionOptions::new(true),
+            &preferred,
+        );
+        let resume_req = build_resume_session_request(
+            AgentType::Codex,
+            SessionId::new("abc".to_string()),
+            &cwd,
+            Vec::new(),
+            &ClaudeSessionOptions::new(true),
+            &preferred,
+        );
+
+        let expected = Some(serde_json::json!({
+            "codeg": {
+                "resume": {
+                    "model": "gpt-5.6-sol",
+                    "reasoningEffort": "xhigh",
+                }
+            }
+        }));
+        assert_eq!(
+            load_req.meta.map(serde_json::Value::Object),
+            expected.clone()
+        );
+        assert_eq!(resume_req.meta.map(serde_json::Value::Object), expected);
+    }
+
+    #[test]
+    fn build_resume_session_request_skips_meta_without_restore_values() {
         let cwd = std::path::PathBuf::from("/tmp/codeg");
         let req = build_resume_session_request(
             AgentType::Codex,
@@ -37945,6 +38049,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
 
         assert!(req.meta.is_none());
@@ -37967,6 +38072,7 @@ mod tests {
             &cwd,
             Vec::new(),
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
         assert!(
             req.mcp_servers.is_empty(),
@@ -52792,6 +52898,7 @@ mod wire_mcp_gate_tests {
             &cwd,
             servers,
             &ClaudeSessionOptions::new(true),
+            &BTreeMap::new(),
         );
         assert_eq!(load_req.mcp_servers.len(), 1);
         assert_eq!(

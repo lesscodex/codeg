@@ -92,6 +92,16 @@ pub async fn acp_connect(
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+    let (selector_conversation_id, preferred_mode_id, preferred_config_values) =
+        acp_commands::resolve_connect_selector_preferences(
+            db,
+            params.agent_type,
+            params.session_id.as_deref(),
+            params.preferred_mode_id,
+            params.preferred_config_values.unwrap_or_default(),
+        )
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
 
     // Guard: the session page must never trigger a download or install.
     // If the agent isn't ready, return SdkNotInstalled here so the frontend
@@ -109,11 +119,31 @@ pub async fn acp_connect(
             runtime_env,
             "web".to_string(),
             emitter,
-            params.preferred_mode_id,
-            params.preferred_config_values.unwrap_or_default(),
+            preferred_mode_id,
+            preferred_config_values,
         )
         .await
         .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+
+    if let Some(conversation_id) = selector_conversation_id {
+        manager
+            .set_selector_preferences_target(&connection_id, conversation_id)
+            .await
+            .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+        if let Err(error) = crate::acp::lifecycle::persist_selector_preferences(
+            &db.conn,
+            manager,
+            &connection_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                conversation_id,
+                %error,
+                "[ACP] failed to persist selector preferences after connect"
+            );
+        }
+    }
 
     Ok(Json(connection_id))
 }

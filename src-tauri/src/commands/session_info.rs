@@ -30,7 +30,10 @@ use crate::acp::manager::{ConnectionManager, ConnectionManagerSpawner};
 use crate::acp::types::ConnectionStatus;
 use crate::app_error::AppCommandError;
 use crate::commands::conversations::get_folder_conversation_core;
-use crate::db::service::{app_metadata_service, conversation_service, folder_service};
+use crate::db::service::{
+    app_metadata_service, conversation_selector_preference_service, conversation_service,
+    folder_service,
+};
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
 use crate::models::message::{ContentBlock, MessageTurn, TurnRole};
@@ -420,6 +423,28 @@ impl SessionInfoAccess for DbSessionInfoLookup {
         {
             Ok(Some(target)) => (target.connection_id, None, target.allow_unlinked),
             Ok(None) => {
+                let preferences = match conversation_selector_preference_service::get(
+                    &self.db.conn,
+                    session_id,
+                )
+                .await
+                {
+                    Ok(preferences) => preferences.unwrap_or(
+                        conversation_selector_preference_service::ConversationSelectorPreferences {
+                            mode_id: None,
+                            config_values: std::collections::BTreeMap::new(),
+                        },
+                    ),
+                    Err(error) => {
+                        return SessionMessageOutcome::failed(
+                            session_id,
+                            "resume_failed",
+                            format!(
+                                "Could not load selector preferences for session #{session_id}: {error}"
+                            ),
+                        )
+                    }
+                };
                 let spawner = ConnectionManagerSpawner {
                     manager: manager.clone(),
                     db: self.db.clone(),
@@ -431,8 +456,8 @@ impl SessionInfoAccess for DbSessionInfoLookup {
                         summary.agent_type,
                         Some(folder.path.clone()),
                         &external_id,
-                        None,
-                        std::collections::BTreeMap::new(),
+                        preferences.mode_id,
+                        preferences.config_values,
                     )
                     .await
                 {
@@ -453,6 +478,36 @@ impl SessionInfoAccess for DbSessionInfoLookup {
                 } else {
                     manager.prompt_connection_lease(&resumed.connection_id).await
                 };
+                if let Err(error) = manager
+                    .set_selector_preferences_target(&resumed.connection_id, session_id)
+                    .await
+                {
+                    if let Some(lease) = lease.as_ref() {
+                        let _ = manager
+                            .disconnect_if_unclaimed(&resumed.connection_id, lease)
+                            .await;
+                    }
+                    return SessionMessageOutcome::failed(
+                        session_id,
+                        "identity_mismatch",
+                        format!(
+                            "Could not bind selector preferences to session #{session_id}: {error}"
+                        ),
+                    );
+                }
+                if let Err(error) = crate::acp::lifecycle::persist_selector_preferences(
+                    &self.db.conn,
+                    &manager,
+                    &resumed.connection_id,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        session_id,
+                        %error,
+                        "[session-info] failed to persist selector preferences after resume"
+                    );
+                }
                 let allow_unlinked = match Self::validate_connection(
                     &manager,
                     &resumed.connection_id,
