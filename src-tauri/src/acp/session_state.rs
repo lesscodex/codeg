@@ -259,6 +259,10 @@ pub struct SessionState {
     // 身份
     pub connection_id: String,
     pub conversation_id: Option<i32>,
+    /// Conversation whose confirmed mode/config selectors this connection
+    /// should persist. Set while resuming a known row, before the first prompt
+    /// formally binds `conversation_id`; never used as prompt identity.
+    pub selector_preferences_conversation_id: Option<i32>,
     pub external_id: Option<String>,
     /// Wall-clock instant `external_id` last CHANGED value (SessionStarted
     /// for a new/loaded/forked session). The transcript watcher uses this as
@@ -849,6 +853,7 @@ impl SessionState {
         Self {
             connection_id,
             conversation_id: None,
+            selector_preferences_conversation_id: None,
             external_id: None,
             external_id_changed_at: None,
             agent_type,
@@ -1491,6 +1496,7 @@ impl SessionState {
                 ..
             } => {
                 self.conversation_id = Some(*conversation_id);
+                self.selector_preferences_conversation_id = Some(*conversation_id);
                 self.folder_id = Some(*folder_id);
                 // A title published before this bind was dropped (no row yet).
                 // Forget the skip-cache so a later resend of the same string

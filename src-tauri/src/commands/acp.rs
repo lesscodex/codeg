@@ -26,8 +26,10 @@ use crate::acp::types::{
 use crate::acp::types::{
     AcpForkResult, ConnectionInfo, HistoricalForkResultInfo, PromptInputBlock,
 };
-use crate::db::service::agent_setting_service;
-use crate::db::service::model_provider_service;
+use crate::db::service::{
+    agent_setting_service, conversation_selector_preference_service, conversation_service,
+    model_provider_service,
+};
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
 use crate::web::event_bridge::EventEmitter;
@@ -11413,6 +11415,46 @@ pub(crate) async fn build_session_runtime_env(
     build_runtime_env_for_agent(db, agent_type, session_id, data_dir, false).await
 }
 
+/// Resolve selector preferences for a resumed conversation. Persisted target
+/// state wins; the frontend values remain the migration fallback for rows that
+/// predate backend persistence.
+pub(crate) async fn resolve_connect_selector_preferences(
+    db: &AppDatabase,
+    agent_type: AgentType,
+    session_id: Option<&str>,
+    fallback_mode_id: Option<String>,
+    fallback_config_values: BTreeMap<String, String>,
+) -> Result<(Option<i32>, Option<String>, BTreeMap<String, String>), AcpError> {
+    let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok((None, fallback_mode_id, fallback_config_values));
+    };
+    let conversation_id = conversation_service::find_live_id_by_external_id_and_agent(
+        &db.conn,
+        session_id,
+        agent_type,
+    )
+    .await
+    .map_err(|error| AcpError::protocol(error.to_string()))?;
+    let Some(conversation_id) = conversation_id else {
+        return Ok((None, fallback_mode_id, fallback_config_values));
+    };
+    let preferences = conversation_selector_preference_service::get(&db.conn, conversation_id)
+        .await
+        .map_err(|error| AcpError::protocol(error.to_string()))?;
+    match preferences {
+        Some(preferences) => Ok((
+            Some(conversation_id),
+            preferences.mode_id,
+            preferences.config_values,
+        )),
+        None => Ok((
+            Some(conversation_id),
+            fallback_mode_id,
+            fallback_config_values,
+        )),
+    }
+}
+
 /// Settings may inspect Pi's local model catalog while the agent is disabled.
 /// Reuse the exact launch environment, bypassing only the connection permission
 /// gate; this path starts no ACP session and sends no prompt.
@@ -11664,6 +11706,15 @@ pub async fn acp_connect(
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let runtime_env =
         build_session_runtime_env(&db, agent_type, session_id.as_deref(), &app_data_dir).await?;
+    let (selector_conversation_id, preferred_mode_id, preferred_config_values) =
+        resolve_connect_selector_preferences(
+            &db,
+            agent_type,
+            session_id.as_deref(),
+            preferred_mode_id,
+            preferred_config_values.unwrap_or_default(),
+        )
+        .await?;
 
     // Guard: the session page must never trigger a download or install.
     // If the agent isn't ready, return SdkNotInstalled here so the frontend
@@ -11671,7 +11722,7 @@ pub async fn acp_connect(
     verify_agent_installed(agent_type).await?;
 
     let emitter = EventEmitter::Tauri(app_handle);
-    manager
+    let connection_id = manager
         .spawn_agent(
             agent_type,
             working_dir,
@@ -11680,9 +11731,28 @@ pub async fn acp_connect(
             window.label().to_string(),
             emitter,
             preferred_mode_id,
-            preferred_config_values.unwrap_or_default(),
+            preferred_config_values,
+        )
+        .await?;
+    if let Some(conversation_id) = selector_conversation_id {
+        manager
+            .set_selector_preferences_target(&connection_id, conversation_id)
+            .await?;
+        if let Err(error) = crate::acp::lifecycle::persist_selector_preferences(
+            &db.conn,
+            &manager,
+            &connection_id,
         )
         .await
+        {
+            tracing::warn!(
+                conversation_id,
+                %error,
+                "[ACP] failed to persist selector preferences after connect"
+            );
+        }
+    }
+    Ok(connection_id)
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -15151,6 +15221,55 @@ pub(crate) async fn codex_poll_device_code_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn persisted_conversation_selectors_override_frontend_fallbacks() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let folder_id = crate::db::test_helpers::seed_folder(&db, "/tmp/connect-prefs").await;
+        let conversation = conversation_service::create(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        conversation_service::bind_external_id(
+            &db.conn,
+            conversation.id,
+            "target-session",
+            &[],
+        )
+        .await
+        .unwrap();
+        let stored_config = BTreeMap::from([
+            ("model".into(), "target-model".into()),
+            ("effort".into(), "high".into()),
+        ]);
+        conversation_selector_preference_service::upsert(
+            &db.conn,
+            conversation.id,
+            Some("plan".into()),
+            &stored_config,
+        )
+        .await
+        .unwrap();
+
+        let resolved = resolve_connect_selector_preferences(
+            &db,
+            AgentType::Codex,
+            Some("target-session"),
+            Some("source-mode".into()),
+            BTreeMap::from([("model".into(), "source-model".into())]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.0, Some(conversation.id));
+        assert_eq!(resolved.1.as_deref(), Some("plan"));
+        assert_eq!(resolved.2, stored_config);
+    }
 
     #[test]
     fn extract_version_token_finds_the_version_in_common_banners() {
