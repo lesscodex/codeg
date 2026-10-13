@@ -495,6 +495,7 @@ mod tests {
             std::path::Path::new("/work"),
             servers.clone(),
             &ClaudeSessionOptions::new(true),
+            &std::collections::BTreeMap::new(),
         ))
         .unwrap();
         assert_eq!(fork["cwd"], resume["cwd"]);
@@ -544,6 +545,7 @@ mod tests {
             std::path::Path::new("/work"),
             vec![server("codeg-mcp")],
             &ClaudeSessionOptions::new(false),
+            &std::collections::BTreeMap::new(),
         ))
         .unwrap();
         assert_eq!(fork["_meta"], resume["_meta"]);

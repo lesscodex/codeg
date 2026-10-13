@@ -3926,6 +3926,34 @@ impl ConnectionManager {
         connections.get(conn_id).map(|conn| conn.state.clone())
     }
 
+    /// Associate an already-resumed connection with the conversation that
+    /// owns its selector preferences. This does not bind prompt identity;
+    /// `ConversationLinked` remains the sole writer of `conversation_id`.
+    pub async fn set_selector_preferences_target(
+        &self,
+        conn_id: &str,
+        conversation_id: i32,
+    ) -> Result<(), AcpError> {
+        let state = self
+            .get_state(conn_id)
+            .await
+            .ok_or_else(|| AcpError::ConnectionNotFound(conn_id.to_string()))?;
+        let mut state = state.write().await;
+        if state
+            .conversation_id
+            .is_some_and(|bound| bound != conversation_id)
+            || state
+                .selector_preferences_conversation_id
+                .is_some_and(|target| target != conversation_id)
+        {
+            return Err(AcpError::protocol(format!(
+                "connection {conn_id} belongs to a different conversation"
+            )));
+        }
+        state.selector_preferences_conversation_id = Some(conversation_id);
+        Ok(())
+    }
+
     /// Like `get_state`, but also clones the connection's `EventEmitter`.
     /// Used by the lifecycle subscriber when it needs to both update the
     /// per-session state and re-broadcast a derived event (e.g. emitting
