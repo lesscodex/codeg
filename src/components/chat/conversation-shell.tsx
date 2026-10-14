@@ -24,6 +24,7 @@ import type {
   ClaudeApiRetryState,
 } from "@/contexts/acp-connections-context"
 import type { QueuedMessage } from "@/hooks/use-message-queue"
+import type { ScheduledMessage } from "@/lib/scheduled-messages"
 import { ChatInput } from "@/components/chat/chat-input"
 import { ChatWidthHandles } from "@/components/chat/chat-width-handles"
 import { chatGutterStyle } from "@/lib/chat-content-width"
@@ -66,6 +67,7 @@ interface ConversationShellProps {
   pendingPlanApproval: PendingPlanApprovalState | null
   onFocus: () => void
   onSend: (draft: PromptDraft, modeId?: string | null) => void
+  onSchedule?: (draft: PromptDraft, scheduledAt: number) => boolean
   onCancel: () => void
   onRespondPermission: (requestId: string, optionId: string) => void
   onAnswerQuestion: (answer: string) => void
@@ -117,6 +119,9 @@ interface ConversationShellProps {
    *  active tab only). Threaded straight through to the composer. */
   showActiveFlow?: boolean
   queue?: QueuedMessage[]
+  scheduledMessages?: ScheduledMessage[]
+  onScheduledReschedule?: (id: string, scheduledAt: number) => boolean
+  onScheduledRemove?: (id: string) => void
   onEnqueue?: (draft: PromptDraft, modeId: string | null) => void
   onQueueReorder?: (items: QueuedMessage[]) => void
   onQueueEdit?: (id: string) => void
@@ -176,6 +181,7 @@ export function ConversationShell({
   pendingPlanApproval,
   onFocus,
   onSend,
+  onSchedule,
   onCancel,
   onRespondPermission,
   onAnswerQuestion,
@@ -205,6 +211,9 @@ export function ConversationShell({
   isActive,
   showActiveFlow,
   queue,
+  scheduledMessages,
+  onScheduledReschedule,
+  onScheduledRemove,
   onEnqueue,
   onQueueReorder,
   onQueueEdit,
@@ -313,6 +322,7 @@ export function ConversationShell({
               agentName={agentName}
               onFocus={onFocus}
               onSend={onSend}
+              onSchedule={onSchedule}
               onCancel={onCancel}
               modes={modes}
               configOptions={configOptions}
@@ -332,6 +342,9 @@ export function ConversationShell({
               isActive={isActive}
               showActiveFlow={showActiveFlow}
               queue={queue}
+              scheduledMessages={scheduledMessages}
+              onScheduledReschedule={onScheduledReschedule}
+              onScheduledRemove={onScheduledRemove}
               onEnqueue={onEnqueue}
               onQueueReorder={onQueueReorder}
               onQueueEdit={onQueueEdit}

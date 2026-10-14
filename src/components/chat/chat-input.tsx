@@ -19,7 +19,9 @@ import {
   type ComposerInjectContent,
 } from "@/components/chat/message-input"
 import { MessageQueueDisplay } from "@/components/chat/message-queue-display"
+import { ScheduledMessageDisplay } from "@/components/chat/scheduled-message-display"
 import { cn } from "@/lib/utils"
+import type { ScheduledMessage } from "@/lib/scheduled-messages"
 
 interface ChatInputProps {
   status: ConnectionStatus | null
@@ -28,6 +30,7 @@ interface ChatInputProps {
   agentName?: string
   onFocus?: () => void
   onSend: (draft: PromptDraft, modeId?: string | null) => void
+  onSchedule?: (draft: PromptDraft, scheduledAt: number) => boolean
   onCancel: () => void
   modes?: SessionModeInfo[]
   configOptions?: SessionConfigOptionInfo[]
@@ -52,6 +55,9 @@ interface ChatInputProps {
    *  tab when tiled across multiple sessions; passed through to MessageInput. */
   showActiveFlow?: boolean
   queue?: QueuedMessage[]
+  scheduledMessages?: ScheduledMessage[]
+  onScheduledReschedule?: (id: string, scheduledAt: number) => boolean
+  onScheduledRemove?: (id: string) => void
   onEnqueue?: (draft: PromptDraft, modeId: string | null) => void
   onQueueReorder?: (items: QueuedMessage[]) => void
   onQueueEdit?: (id: string) => void
@@ -109,6 +115,7 @@ export const ChatInput = memo(function ChatInput({
   agentName,
   onFocus,
   onSend,
+  onSchedule,
   onCancel,
   modes,
   configOptions,
@@ -128,6 +135,9 @@ export const ChatInput = memo(function ChatInput({
   isActive,
   showActiveFlow,
   queue,
+  scheduledMessages,
+  onScheduledReschedule,
+  onScheduledRemove,
   onEnqueue,
   onQueueReorder,
   onQueueEdit,
@@ -188,6 +198,16 @@ export const ChatInput = memo(function ChatInput({
         if (event.pointerType !== "mouse") event.stopPropagation()
       }}
     >
+      {scheduledMessages &&
+        scheduledMessages.length > 0 &&
+        onScheduledReschedule &&
+        onScheduledRemove && (
+          <ScheduledMessageDisplay
+            messages={scheduledMessages}
+            onReschedule={onScheduledReschedule}
+            onRemove={onScheduledRemove}
+          />
+        )}
       {queue &&
         queue.length > 0 &&
         onQueueReorder &&
@@ -205,6 +225,7 @@ export const ChatInput = memo(function ChatInput({
         )}
       <MessageInput
         onSend={onSend}
+        onSchedule={onSchedule}
         promptCapabilities={promptCapabilities}
         onFocus={onFocus}
         defaultPath={defaultPath}
