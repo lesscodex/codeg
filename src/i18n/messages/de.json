@@ -3429,6 +3429,7 @@
         "noModels": "Keine Modelle gefunden",
         "cancel": "Abbrechen",
         "send": "Senden",
+        "scheduleSend": "Senden planen",
         "queueMessage": "In Warteschlange stellen",
         "steerIntoTurn": "In laufenden Turn einfügen",
         "steerAsNote": "Notiz für die nächste Prüfung senden",
@@ -3470,6 +3471,20 @@
         "deleteItem": "Entfernen",
         "steerItemNow": "In aktuellen Turn einfügen",
         "steerItemAsNote": "Als Notiz für die nächste Abfrage senden"
+      },
+      "scheduledMessages": {
+        "dialogTitle": "Nachricht planen",
+        "dialogDescription": "Wähle, wann diese Nachricht gesendet werden soll.",
+        "futureTimeRequired": "Wähle einen Zeitpunkt in der Zukunft.",
+        "cancel": "Abbrechen",
+        "confirm": "Planen",
+        "scheduledFor": "Geplant für {time}",
+        "saveFailed": "Geplante Nachricht konnte nicht gespeichert werden",
+        "waiting": "Wartet",
+        "failed": "Fehlgeschlagen",
+        "missed": "Verpasst",
+        "editTime": "Sendezeit ändern",
+        "remove": "Geplante Nachricht abbrechen"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Einstellungen > Agenten",

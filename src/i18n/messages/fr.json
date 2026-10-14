@@ -3429,6 +3429,7 @@
         "noModels": "Aucun modèle trouvé",
         "cancel": "Annuler",
         "send": "Envoyer",
+        "scheduleSend": "Programmer l’envoi",
         "queueMessage": "Mettre en file d'attente",
         "steerIntoTurn": "Insérer dans le tour en cours",
         "steerAsNote": "Envoyer une note pour la prochaine vérification",
@@ -3470,6 +3471,20 @@
         "deleteItem": "Supprimer",
         "steerItemNow": "Insérer dans le tour en cours",
         "steerItemAsNote": "Envoyer comme note pour la prochaine vérification"
+      },
+      "scheduledMessages": {
+        "dialogTitle": "Programmer le message",
+        "dialogDescription": "Choisissez quand ce message doit être envoyé.",
+        "futureTimeRequired": "Choisissez une heure future.",
+        "cancel": "Annuler",
+        "confirm": "Programmer",
+        "scheduledFor": "Programmé pour {time}",
+        "saveFailed": "Impossible d’enregistrer le message programmé",
+        "waiting": "En attente",
+        "failed": "Échec",
+        "missed": "Manqué",
+        "editTime": "Modifier l’heure d’envoi",
+        "remove": "Annuler le message programmé"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Paramètres > Agents",

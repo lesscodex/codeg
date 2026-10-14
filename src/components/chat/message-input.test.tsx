@@ -273,6 +273,42 @@ describe("MessageInput (RichComposer integration)", () => {
     expect(sendButton).toBeDisabled()
   })
 
+  it("schedules the current draft from the send split button", async () => {
+    const user = userEvent.setup()
+    const onSchedule = vi.fn(() => true)
+    renderInput({ onSchedule })
+    await waitFor(() =>
+      expect(composerHandle.current?.getEditor()).toBeTruthy()
+    )
+    const editor = composerHandle.current!.getEditor()!
+    act(() => editor.commands.setContent("send later"))
+
+    await user.click(
+      screen.getByRole("button", {
+        name: enMessages.Folder.chat.messageInput.scheduleSend,
+      })
+    )
+    await user.click(
+      screen.getByRole("menuitem", {
+        name: enMessages.Folder.chat.messageInput.scheduleSend,
+      })
+    )
+    fireEvent.change(document.querySelector('input[type="datetime-local"]')!, {
+      target: { value: "2099-01-01T10:00" },
+    })
+    await user.click(
+      screen.getByRole("button", {
+        name: enMessages.Folder.chat.scheduledMessages.confirm,
+      })
+    )
+
+    expect(onSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({ displayText: "send later" }),
+      new Date("2099-01-01T10:00").getTime()
+    )
+    expect(editor.getText()).toBe("")
+  })
+
   it("claims a mouse press on the input's empty chrome (P8d focus wiring)", async () => {
     const { container } = renderInput({})
     await waitFor(() =>
