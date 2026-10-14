@@ -69,6 +69,7 @@ import { FeedbackDialog } from "@/components/chat/feedback-dialog"
 import { AgentDiagnosticsDialog } from "@/components/settings/agent-diagnostics-dialog"
 import { useFeedbackEnabled } from "@/hooks/use-feedback-enabled"
 import { useSessionFeedback } from "@/hooks/use-session-feedback"
+import { useScheduledMessages } from "@/hooks/use-scheduled-messages"
 import { AgentSelector } from "@/components/chat/agent-selector"
 import { ChatInput } from "@/components/chat/chat-input"
 import { WelcomeHero, WelcomeTip } from "@/components/chat/welcome-hero"
@@ -110,6 +111,7 @@ import { TurnBusyError } from "@/lib/turn-busy"
 import { deliverQueuedSteer } from "@/lib/queued-steer"
 import { toErrorMessage } from "@/lib/app-error"
 import { blockingPrompts } from "@/lib/blocking-prompts"
+import { formatScheduleShort } from "@/lib/task-schedule"
 import { notify } from "@/lib/notify"
 import {
   claimRuntimeSession,
@@ -281,6 +283,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // Composer-namespace copy for the queue row's click-to-insert outcomes
   // (same keys the composer's own mid-turn send reports).
   const tCmp = useTranslations("Folder.chat.messageInput")
+  const tScheduled = useTranslations("Folder.chat.scheduledMessages")
   const tWelcome = useTranslations("Folder.chat.welcomeInputPanel")
   const tDiag = useTranslations("DiagnosticsSettings")
   const sharedT = useTranslations("Folder.chat.shared")
@@ -875,7 +878,12 @@ const ConversationTabView = memo(function ConversationTabView({
     (
       draft: PromptDraft,
       modeId?: string | null,
-      opts?: { fromQueueFlush?: boolean }
+      opts?: {
+        fromQueueFlush?: boolean
+        onScheduledAccepted?: () => void
+        onScheduledBusy?: () => void
+        onScheduledFailed?: () => void
+      }
     ) => void
   >(() => {})
   // Timestamp of the last send that bounced with TurnBusyError. The flush below
@@ -1107,7 +1115,12 @@ const ConversationTabView = memo(function ConversationTabView({
       // input send (no flag) must NOT jump ahead of already-queued items: when
       // a queue exists it tail-enqueues instead of sending, and on a bounce it
       // re-queues at the TAIL.
-      opts?: { fromQueueFlush?: boolean }
+      opts?: {
+        fromQueueFlush?: boolean
+        onScheduledAccepted?: () => void
+        onScheduledBusy?: () => void
+        onScheduledFailed?: () => void
+      }
     ) => {
       // Capture the tab's chat-draft state + eager scratch dir synchronously,
       // before any await. A folderless chat draft is NOT special-cased here:
@@ -1120,20 +1133,28 @@ const ConversationTabView = memo(function ConversationTabView({
 
       if (!hasPersistedConversation && !canAutoConnect) {
         setAgentConnectError(tWelcome("enableAgentFirstPlaceholder"))
+        opts?.onScheduledFailed?.()
         return
       }
       // Connected AND the connection's cwd matches this tab's working dir. Bare
       // `connStatus === "connected"` is not enough: a chat draft mid-reconnect can
       // read a stale "connected" for the old cwd, and an inline send then would
       // deliver to the wrong workspace. Same predicate the flush effect uses.
-      if (!connectionReady) return
+      if (!connectionReady) {
+        opts?.onScheduledBusy?.()
+        return
+      }
 
       const fromQueueFlush = opts?.fromQueueFlush ?? false
       // Preserve FIFO: a direct send issued while the queue is non-empty joins
       // the tail rather than racing ahead of the queued items. Read the
       // queue length synchronously (it reflects a same-tick bounce requeue).
       if (shouldQueueDirectSend(fromQueueFlush, mqGetQueueLength())) {
-        mqEnqueue(draft, selectedModeIdArg ?? null)
+        if (opts?.onScheduledBusy) {
+          opts.onScheduledBusy()
+        } else {
+          mqEnqueue(draft, selectedModeIdArg ?? null)
+        }
         return
       }
 
@@ -1180,6 +1201,8 @@ const ConversationTabView = memo(function ConversationTabView({
         // front; a direct send (queue was empty when it left) → tail.
         if (fromQueueFlush) {
           mqRequeueFront(draft, selectedModeIdArg ?? null)
+        } else if (opts?.onScheduledBusy) {
+          opts.onScheduledBusy()
         } else {
           mqEnqueue(draft, selectedModeIdArg ?? null)
         }
@@ -1194,6 +1217,7 @@ const ConversationTabView = memo(function ConversationTabView({
       // bounce): a deterministic failure would retry — and toast — forever.
       const onSendFailed = () => {
         removeOptimisticTurn(effectiveConversationId, optimisticTurn.id)
+        opts?.onScheduledFailed?.()
       }
 
       // Pin the tab if it was a temporary preview (single-click opened)
@@ -1215,6 +1239,7 @@ const ConversationTabView = memo(function ConversationTabView({
           clientMessageId: optimisticTurn.id,
           onTurnInProgress,
           onSendFailed,
+          onSent: opts?.onScheduledAccepted,
         })
         return
       }
@@ -1316,6 +1341,7 @@ const ConversationTabView = memo(function ConversationTabView({
             clientMessageId: optimisticTurn.id,
             onTurnInProgress,
             onSendFailed,
+            onSent: opts?.onScheduledAccepted,
           })
         } catch (e) {
           console.error("[ConversationTabView] create conversation:", e)
@@ -1378,6 +1404,76 @@ const ConversationTabView = memo(function ConversationTabView({
   useEffect(() => {
     handleSendRef.current = handleSend
   }, [handleSend])
+
+  const deliverScheduledMessage = useCallback(
+    (
+      draft: PromptDraft,
+      callbacks: { accepted: () => void; busy: () => void; failed: () => void }
+    ) =>
+      handleSend(draft, null, {
+        onScheduledAccepted: callbacks.accepted,
+        onScheduledBusy: callbacks.busy,
+        onScheduledFailed: callbacks.failed,
+      }),
+    [handleSend]
+  )
+  const scheduledMessageScopeId =
+    dbConversationId != null
+      ? `conversation:${dbConversationId}`
+      : `draft:${tabId}`
+  const ensureScheduledConnection = useCallback(() => {
+    if (connStatus === "connecting" || dbConvIdRef.current == null) return
+    void conn
+      .connect(
+        selectedAgent,
+        workingDirForConnection,
+        selectedAgent === "cline" ? undefined : externalId,
+        dbConvIdRef.current
+      )
+      .catch((error) =>
+        console.warn("[scheduled-message] reconnect failed", error)
+      )
+  }, [conn, connStatus, externalId, selectedAgent, workingDirForConnection])
+  const scheduledMessages = useScheduledMessages({
+    scopeId: scheduledMessageScopeId,
+    connectionReady,
+    prompting: connStatus === "prompting",
+    deliver: deliverScheduledMessage,
+    ensureReady: ensureScheduledConnection,
+  })
+  const handleScheduleMessage = useCallback(
+    (draft: PromptDraft, scheduledAt: number) => {
+      try {
+        scheduledMessages.schedule(draft, scheduledAt)
+        toast.success(
+          tScheduled("scheduledFor", {
+            time: formatScheduleShort(new Date(scheduledAt).toISOString()),
+          })
+        )
+        return true
+      } catch (error) {
+        toast.error(tScheduled("saveFailed"), {
+          description: toErrorMessage(error),
+        })
+        return false
+      }
+    },
+    [scheduledMessages, tScheduled]
+  )
+  const handleScheduledReschedule = useCallback(
+    (id: string, scheduledAt: number) => {
+      try {
+        scheduledMessages.reschedule(id, scheduledAt)
+        return true
+      } catch (error) {
+        toast.error(tScheduled("saveFailed"), {
+          description: toErrorMessage(error),
+        })
+        return false
+      }
+    },
+    [scheduledMessages, tScheduled]
+  )
 
   // "Fork from here": fork at a rendered assistant turn, sending nothing. The
   // ONLY fork entry point — the composer's fork-and-send was removed once this
@@ -2373,6 +2469,7 @@ const ConversationTabView = memo(function ConversationTabView({
       pendingPlanApproval={conn.pendingPlanApproval}
       onFocus={handleFocus}
       onSend={handleSend}
+      onSchedule={dbConversationId != null ? handleScheduleMessage : undefined}
       onCancel={handleCancel}
       onRespondPermission={handleRespondPermission}
       onAnswerQuestion={handleAnswerQuestion}
@@ -2414,6 +2511,9 @@ const ConversationTabView = memo(function ConversationTabView({
       isActive={isActive}
       showActiveFlow={showActiveFlow}
       queue={msgQueue}
+      scheduledMessages={scheduledMessages.messages}
+      onScheduledReschedule={handleScheduledReschedule}
+      onScheduledRemove={scheduledMessages.remove}
       onEnqueue={mqEnqueue}
       onQueueReorder={mqReorder}
       onQueueEdit={handleQueueEdit}

@@ -3467,6 +3467,7 @@
         "noModels": "لم يتم العثور على نماذج",
         "cancel": "إلغاء",
         "send": "إرسال",
+        "scheduleSend": "جدولة الإرسال",
         "queueMessage": "إضافة إلى قائمة الانتظار",
         "steerIntoTurn": "إدراج في الدور الحالي",
         "steerAsNote": "إرسال ملاحظة للفحص التالي",
@@ -3508,6 +3509,20 @@
         "deleteItem": "حذف",
         "steerItemNow": "إدراج في الدور الحالي",
         "steerItemAsNote": "إرسال كملاحظة للفحص التالي"
+      },
+      "scheduledMessages": {
+        "dialogTitle": "جدولة الرسالة",
+        "dialogDescription": "اختر وقت إرسال هذه الرسالة.",
+        "futureTimeRequired": "اختر وقتًا في المستقبل.",
+        "cancel": "إلغاء",
+        "confirm": "جدولة",
+        "scheduledFor": "مجدولة في {time}",
+        "saveFailed": "تعذّر حفظ الرسالة المجدولة",
+        "waiting": "في الانتظار",
+        "failed": "فشل",
+        "missed": "فات الموعد",
+        "editTime": "تغيير وقت الإرسال",
+        "remove": "إلغاء الرسالة المجدولة"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "الإعدادات > الوكلاء",

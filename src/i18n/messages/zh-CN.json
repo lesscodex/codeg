@@ -3469,6 +3469,7 @@
         "noModels": "未找到模型",
         "cancel": "取消",
         "send": "发送",
+        "scheduleSend": "定时发送",
         "queueMessage": "加入队列",
         "steerIntoTurn": "插入当前回合",
         "steerAsNote": "发送留言，供下次检查时读取",
@@ -3508,6 +3509,20 @@
         "deleteItem": "删除",
         "steerItemNow": "插入当前回合",
         "steerItemAsNote": "作为留言，供下次检查时读取"
+      },
+      "scheduledMessages": {
+        "dialogTitle": "定时发送消息",
+        "dialogDescription": "选择这条消息的发送时间。",
+        "futureTimeRequired": "请选择未来的时间。",
+        "cancel": "取消",
+        "confirm": "设为定时发送",
+        "scheduledFor": "将在 {time} 发送",
+        "saveFailed": "无法保存定时消息",
+        "waiting": "等待发送",
+        "failed": "发送失败",
+        "missed": "已错过",
+        "editTime": "修改发送时间",
+        "remove": "取消定时消息"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "设置 > Agents",

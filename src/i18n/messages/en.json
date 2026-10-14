@@ -3469,6 +3469,7 @@
         "noModels": "No models found",
         "cancel": "Cancel",
         "send": "Send",
+        "scheduleSend": "Schedule send",
         "queueMessage": "Queue message",
         "steerIntoTurn": "Insert into current turn",
         "steerAsNote": "Send note for next check",
@@ -3508,6 +3509,20 @@
         "deleteItem": "Remove",
         "steerItemNow": "Insert into current turn",
         "steerItemAsNote": "Send as note for next check"
+      },
+      "scheduledMessages": {
+        "dialogTitle": "Schedule message",
+        "dialogDescription": "Choose when this message should be sent.",
+        "futureTimeRequired": "Choose a time in the future.",
+        "cancel": "Cancel",
+        "confirm": "Schedule",
+        "scheduledFor": "Scheduled for {time}",
+        "saveFailed": "Couldn't save the scheduled message",
+        "waiting": "Waiting",
+        "failed": "Failed",
+        "missed": "Missed",
+        "editTime": "Change send time",
+        "remove": "Cancel scheduled message"
       },
       "welcomeInputPanel": {
         "agentsSettingsPath": "Settings > Agents",

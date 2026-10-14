@@ -6,6 +6,7 @@ import { isImeCompositionKey } from "@/lib/ime-composition"
 import { Button } from "@/components/ui/button"
 import {
   BookOpenText,
+  CalendarClock,
   Check,
   ChevronUp,
   ClipboardPaste,
@@ -139,6 +140,7 @@ import { ComposerAddMenu } from "@/components/chat/composer/composer-add-menu"
 import { ComposerImageThumbnails } from "@/components/chat/composer/composer-image-thumbnails"
 import { useComposerAttachments } from "@/components/chat/composer/use-composer-attachments"
 import { useComposerShortcuts } from "@/components/chat/composer/use-composer-shortcuts"
+import { ScheduledMessageDialog } from "@/components/chat/scheduled-message-dialog"
 
 /**
  * Payload pushed into the composer from outside (e.g. a welcome-page quick
@@ -175,6 +177,7 @@ export type ComposerInjectContent =
 
 interface MessageInputProps {
   onSend: (draft: PromptDraft, modeId?: string | null) => void
+  onSchedule?: (draft: PromptDraft, scheduledAt: number) => boolean
   placeholder?: string
   defaultPath?: string
   disabled?: boolean
@@ -331,6 +334,7 @@ function SelectorLoadingChip({ label }: { label: string }) {
 
 export function MessageInput({
   onSend,
+  onSchedule,
   placeholder,
   defaultPath,
   disabled = false,
@@ -1685,6 +1689,34 @@ export function MessageInput({
     resetComposer,
   ])
 
+  const [scheduleDraft, setScheduleDraft] = useState<PromptDraft | null>(null)
+  const [scheduleOpen, setScheduleOpen] = useState(false)
+  const handleScheduleStart = useCallback(() => {
+    if (!onSchedule) return
+    if (hasUploadingImage) {
+      toast.error(tAttach("attachUploadInProgress"))
+      return
+    }
+    const draft = buildDraft()
+    if (!draft) return
+    setScheduleDraft(draft)
+    setScheduleOpen(true)
+  }, [buildDraft, hasUploadingImage, onSchedule, tAttach])
+
+  const handleScheduleConfirm = useCallback(
+    (scheduledAt: number) => {
+      if (!onSchedule || !scheduleDraft) return false
+      if (!onSchedule(scheduleDraft, scheduledAt)) return false
+      if (effectiveDraftStorageKey) {
+        clearMessageInputDraftV2(effectiveDraftStorageKey)
+      }
+      resetComposer()
+      setScheduleDraft(null)
+      return true
+    },
+    [effectiveDraftStorageKey, onSchedule, resetComposer, scheduleDraft]
+  )
+
   // Mid-turn send over the session's live-feedback channel: a native push
   // inserts into the running turn; a pull-tool session records a waiting note
   // the agent reads on its next check (the copy is keyed on `steerChannel` so
@@ -1960,21 +1992,70 @@ export function MessageInput({
                 )}
                 {t(steerChannel === "pull" ? "steerAsNote" : "steerIntoTurn")}
               </DropdownMenuItem>
+              {onSchedule && (
+                <DropdownMenuItem onSelect={handleScheduleStart}>
+                  <CalendarClock className="h-4 w-4" />
+                  {t("scheduleSend")}
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </div>
     ) : (
-      <Button
-        onClick={onCancel}
-        variant="destructive"
-        size="icon"
-        className="h-8 w-8"
-        title={t("cancel")}
-      >
-        <Square className="size-4" />
-      </Button>
+      <div className="flex items-center gap-1">
+        <Button
+          onClick={onCancel}
+          variant="destructive"
+          size="icon"
+          className="h-8 w-8"
+          title={t("cancel")}
+        >
+          <Square className="size-4" />
+        </Button>
+        {onSchedule && hasSendableContent && (
+          <Button
+            onClick={handleScheduleStart}
+            variant="outline"
+            size="icon"
+            className="h-8 w-8"
+            title={t("scheduleSend")}
+          >
+            <CalendarClock className="size-4" />
+          </Button>
+        )}
+      </div>
     )
+  ) : onSchedule ? (
+    <div className="flex items-center">
+      <Button
+        onClick={handleSend}
+        disabled={disabled || !hasSendableContent}
+        size="icon"
+        className="h-8 w-8 rounded-r-none"
+        title={t("send")}
+      >
+        <Send className="size-4" />
+      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            disabled={disabled || !hasSendableContent}
+            size="icon"
+            className="h-8 w-5 rounded-l-none border-l border-primary-foreground/20"
+            aria-label={t("scheduleSend")}
+          >
+            <ChevronUp className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" side="top">
+          <DropdownMenuItem onSelect={handleScheduleStart}>
+            <CalendarClock className="h-4 w-4" />
+            {t("scheduleSend")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   ) : (
     <Button
       onClick={handleSend}
@@ -2336,6 +2417,15 @@ export function MessageInput({
           initialPath={defaultPath ?? undefined}
         />
       )}
+      <ScheduledMessageDialog
+        open={scheduleOpen}
+        onOpenChange={(open) => {
+          setScheduleOpen(open)
+          if (!open) setScheduleDraft(null)
+        }}
+        preview={scheduleDraft?.displayText}
+        onConfirm={handleScheduleConfirm}
+      />
     </div>
   )
 }
