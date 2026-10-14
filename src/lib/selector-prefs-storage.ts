@@ -100,7 +100,7 @@ function readPrefs(
     : all[scoped.entryKey]
 }
 
-function configValuesFromOptions(
+export function configValuesFromOptions(
   options: SessionConfigOptionInfo[] | null
 ): Record<string, string> | undefined {
   if (options == null) return undefined

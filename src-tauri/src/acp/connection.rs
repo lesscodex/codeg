@@ -2918,6 +2918,7 @@ pub async fn spawn_agent_connection(
     delegation_injection: Option<DelegationInjection>,
     terminal_shell_config: TerminalShellRuntimeConfig,
     cli_root: Option<crate::cli_run::RootSeed>,
+    require_exact_resume: bool,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
     // Use the same cwd for launch settings, the subprocess and session/new.
     let launch_cwd = resolve_working_dir(working_dir.as_deref());
@@ -3163,6 +3164,7 @@ pub async fn spawn_agent_connection(
             agent_type,
             working_dir,
             session_id,
+            require_exact_resume,
             cmd_rx,
             handshake,
             emitter_clone.clone(),
@@ -8788,6 +8790,7 @@ async fn run_connection(
     agent_type: AgentType,
     working_dir: Option<String>,
     session_id: Option<String>,
+    require_exact_resume: bool,
     mut cmd_rx: mpsc::Receiver<ConnectionCommand>,
     // `AgentConnection::handshake`: once cancelled, every wait on the agent
     // that establishes the session gives up.
@@ -10203,6 +10206,9 @@ async fn run_connection(
                             )
                             .await;
                             return Ok(());
+                        }
+                        if require_exact_resume {
+                            return Err(e);
                         }
                         if attempted_load {
                             tracing::warn!(
@@ -37642,6 +37648,8 @@ mod tests {
         /// Advertise `loadSession` and answer session/load with this ACP error
         /// body, as the agent's JSON-RPC answer would carry it.
         load_error: Option<serde_json::Value>,
+        /// Advertise and accept a load for this exact ID.
+        expected_load_id: Option<&'static str>,
         /// Advertise `session/resume` and answer it with this ACP error body.
         resume_error: Option<serde_json::Value>,
     }
@@ -37667,9 +37675,10 @@ mod tests {
                 terminal,
                 fail_session_new,
                 load_error,
+                expected_load_id,
                 resume_error,
             } = script;
-            let advertises_load = load_error.is_some();
+            let advertises_load = load_error.is_some() || expected_load_id.is_some();
             let advertises_resume = resume_error.is_some();
             let (seen_tx, seen) = mpsc::unbounded_channel();
             let (init_seen, new_seen, load_seen, resume_seen, prompt_seen) = (
@@ -37716,9 +37725,12 @@ mod tests {
                         on_receive_request!(),
                     )
                     .on_receive_request(
-                        async move |_req: LoadSessionRequest,
+                        async move |req: LoadSessionRequest,
                                     responder: Responder<LoadSessionResponse>,
                                     _cx: ConnectionTo<Client>| {
+                            if let Some(expected) = expected_load_id {
+                                assert_eq!(req.session_id.0.as_ref(), expected);
+                            }
                             let _ = load_seen.send("session/load".to_string());
                             match load_error.clone() {
                                 Some(body) => responder.respond_with_error(
@@ -37853,6 +37865,14 @@ mod tests {
             client_end: agent_client_protocol::Channel,
             session_id: Option<&str>,
         ) -> Self {
+            Self::start_with_resume_policy(client_end, session_id, false).await
+        }
+
+        async fn start_with_resume_policy(
+            client_end: agent_client_protocol::Channel,
+            session_id: Option<&str>,
+            require_exact_resume: bool,
+        ) -> Self {
             let session_id = session_id.map(str::to_string);
             let dir = tempfile::tempdir().expect("tempdir");
             let cwd = dir.path().to_path_buf();
@@ -37882,6 +37902,7 @@ mod tests {
                         agent_type,
                         Some(cwd.to_string_lossy().into_owned()),
                         session_id,
+                        require_exact_resume,
                         cmd_rx,
                         run_handshake,
                         EventEmitter::Noop,
@@ -38269,6 +38290,53 @@ mod tests {
             )),
             "{emitted:#?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_messages_resume_the_requested_session_on_cold_start() {
+        let (client_end, agent_end) = agent_client_protocol::Channel::duplex();
+        let mut agent = HandshakeAgent::start(
+            agent_end,
+            HandshakeScript {
+                expected_load_id: Some("s-old"),
+                ..Default::default()
+            },
+        );
+        let mut run = HandshakeRun::start_with_resume_policy(client_end, Some("s-old"), true).await;
+        assert_eq!(agent.next_request().await, "initialize");
+        assert_eq!(agent.next_request().await, "session/load");
+        run.prompt("scheduled follow-up").await;
+        assert_eq!(
+            agent.next_request().await,
+            "session/prompt: scheduled follow-up"
+        );
+        run.turn_completed().await;
+        assert_eq!(run.state.read().await.external_id.as_deref(), Some("s-old"));
+        run.cmd_tx.send(ConnectionCommand::Disconnect).await.unwrap();
+        assert!(run.ended().await.0.is_ok());
+        agent.closed().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_messages_never_fall_back_to_session_new() {
+        let (client_end, agent_end) = agent_client_protocol::Channel::duplex();
+        let mut agent = HandshakeAgent::start(
+            agent_end,
+            HandshakeScript {
+                load_error: Some(serde_json::json!({"code": -32603, "message": "load failed"})),
+                ..Default::default()
+            },
+        );
+        let run = HandshakeRun::start_with_resume_policy(client_end, Some("s-old"), true).await;
+        assert_eq!(agent.next_request().await, "initialize");
+        assert_eq!(agent.next_request().await, "session/load");
+        let (outcome, events) = run.ended().await;
+        assert!(outcome.is_err());
+        assert!(agent.seen.try_recv().is_err());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::SessionStarted { .. })));
+        agent.closed().await;
     }
 
     /// A [`HandshakeAgent`] that starts a terminal while opening the session,

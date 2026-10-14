@@ -87,6 +87,8 @@ export interface UseConnectionLifecycleReturn {
        * deterministic failure would otherwise retry forever.
        */
       onSendFailed?: (error: unknown) => void
+      /** Called only after the backend accepts the prompt. */
+      onSent?: () => void
     }
   ) => void
   handleSetConfigOption: (configId: string, valueId: string) => void
@@ -519,11 +521,13 @@ export function useConnectionLifecycle({
         clientMessageId?: string | null
         onTurnInProgress?: () => void
         onSendFailed?: (error: unknown) => void
+        onSent?: () => void
       }
     ) => {
       touchActivity(contextKey)
       const onTurnInProgress = opts?.onTurnInProgress
       const onSendFailed = opts?.onSendFailed
+      const onSent = opts?.onSent
       void (async () => {
         const currentModeId = modeIdRef.current
         if (modeId && modeId !== currentModeId) {
@@ -533,6 +537,11 @@ export function useConnectionLifecycle({
           modeIdRef.current = modeId
         }
         await sendPrompt(draft.blocks, opts)
+        try {
+          onSent?.()
+        } catch (error) {
+          console.error("[ConnLifecycle] onSent:", error)
+        }
       })().catch((e: unknown) => {
         if (e instanceof TurnBusyError) {
           // A turn was already in flight on the connection (another

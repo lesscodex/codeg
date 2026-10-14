@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{EntityTrait, Set};
+use sea_orm::{ConnectionTrait, EntityTrait, Set};
+use serde::Deserialize;
 
 use crate::db::entities::conversation_selector_preference;
 use crate::db::error::DbError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationSelectorPreferences {
     pub mode_id: Option<String>,
     pub config_values: BTreeMap<String, String>,
@@ -35,7 +37,7 @@ pub async fn get(
 }
 
 pub async fn upsert(
-    conn: &sea_orm::DatabaseConnection,
+    conn: &impl ConnectionTrait,
     conversation_id: i32,
     mode_id: Option<String>,
     config_values: &BTreeMap<String, String>,

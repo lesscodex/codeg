@@ -33,3 +33,4 @@ pub mod work_task_event;
 pub mod work_task_settings;
 pub mod work_task_source_key;
 pub mod work_task_template;
+pub mod scheduled_message;

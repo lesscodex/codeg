@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, DatabaseConnection, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 use crate::db::entities::conversation::ConversationKind;
@@ -13,7 +13,7 @@ use crate::db::service::conversation_tag_service;
 use crate::models::{AgentType, AssistantRunSnapshot, DbConversationSummary};
 
 pub async fn create(
-    conn: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     folder_id: i32,
     agent_type: AgentType,
     title: Option<String>,
@@ -36,7 +36,7 @@ pub async fn create(
 /// section. Callers must pair it with the hidden chat folder created in the
 /// same flow (`create_chat_conversation_core`).
 pub async fn create_chat(
-    conn: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     folder_id: i32,
     agent_type: AgentType,
     title: Option<String>,
@@ -80,7 +80,7 @@ pub async fn create_with_delegation(
 }
 
 async fn create_inner(
-    conn: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     folder_id: i32,
     agent_type: AgentType,
     title: Option<String>,
@@ -140,7 +140,7 @@ async fn create_inner(
 }
 
 pub async fn update_status(
-    conn: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     conversation_id: i32,
     status: conversation::ConversationStatus,
 ) -> Result<(), DbError> {
@@ -664,6 +664,27 @@ pub async fn bind_external_id(
     external_id: &str,
     continues: &[String],
 ) -> Result<Option<i32>, DbError> {
+    bind_external_id_inner(conn, conversation_id, external_id, continues, None).await
+}
+
+/// Bind on behalf of a scheduled send only if the row still names the
+/// session it resolved (or is still unbound for an authorized first send).
+pub(crate) async fn bind_scheduled_external_id(
+    conn: &DatabaseConnection,
+    conversation_id: i32,
+    external_id: &str,
+    expected_external_id: Option<String>,
+) -> Result<Option<i32>, DbError> {
+    bind_external_id_inner(conn, conversation_id, external_id, &[], Some(expected_external_id)).await
+}
+
+async fn bind_external_id_inner(
+    conn: &DatabaseConnection,
+    conversation_id: i32,
+    external_id: &str,
+    continues: &[String],
+    expected_external_id: Option<Option<String>>,
+) -> Result<Option<i32>, DbError> {
     use sea_orm::sea_query::Expr;
     use sea_orm::TransactionTrait;
 
@@ -688,6 +709,9 @@ pub async fn bind_external_id(
                     .exec(txn)
                     .await?;
                 if claimed.rows_affected == 0 {
+                    if expected_external_id.is_some() {
+                        return Ok(BindTxOutcome::TargetChanged);
+                    }
                     // Gone or soft-deleted. Every caller treats "no live row" as
                     // nothing to do, so this stays Ok — same contract the old
                     // `update_external_id` had.
@@ -703,6 +727,13 @@ pub async fn bind_external_id(
                         sea_orm::DbErr::Custom(format!("conversation {conversation_id} not found"))
                     })?;
 
+                if let Some(expected) = expected_external_id {
+                    if current.external_id != expected
+                        || current.external_id.as_ref().is_some_and(|id| id != &external_id)
+                    {
+                        return Ok(BindTxOutcome::TargetChanged);
+                    }
+                }
                 let previous = current.external_id.clone();
                 let repoints_away = matches!(
                     previous.as_deref(),
@@ -884,6 +915,9 @@ pub async fn bind_external_id(
         })?;
     match outcome {
         BindTxOutcome::Bound(preserved) => Ok(preserved),
+        BindTxOutcome::TargetChanged => Err(DbError::Conflict(format!(
+            "scheduled conversation {conversation_id} no longer holds its expected session"
+        ))),
         // Raised AFTER the transaction commits rather than by rolling it back:
         // the only statement it ran is the self-assigning claim, which changes
         // no value, so commit and rollback are indistinguishable on disk and
@@ -917,6 +951,7 @@ enum BindTxOutcome {
     Bound(Option<i32>),
     /// Another row already holds `(external_id, agent_type)`. Nothing written.
     Refused { holder_row_id: i32 },
+    TargetChanged,
 }
 
 /// The fields a preserving row inherits from the row it is splitting off from.

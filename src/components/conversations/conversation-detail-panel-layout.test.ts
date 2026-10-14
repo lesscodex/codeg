@@ -437,22 +437,28 @@ describe("ConversationDetailPanel chat-mode send path", () => {
     expect(source).not.toContain("createChatPendingRef")
   })
 
-  it("creates the chat row inline in the shared new-tab path and sends via lifecycleSend", () => {
-    // Chat send is selected synchronously, then the SAME async block that
-    // handles normal new conversations creates the row and delivers inline.
-    expect(source).toContain("const chatSend = sendOwnTab?.isChat === true")
+  it("creates the chat row through the shared binding helper and sends via lifecycleSend", () => {
+    // Chat send is selected synchronously by the shared create/bind helper;
+    // normal and folderless first sends both call it before lifecycleSend.
+    expect(source).toContain("const chatSend = ownTab?.isChat === true")
     expect(source).toContain("createChatConversation(")
 
-    const sendStart = source.indexOf("const chatSend = sendOwnTab?.isChat")
-    const sendEnd = source.indexOf(
-      "createConversationPendingRef.current = false"
+    const helperStart = source.indexOf("const createAndBindConversation")
+    const helperEnd = source.indexOf("const handleSend =", helperStart)
+    expect(helperStart).toBeGreaterThan(-1)
+    expect(helperEnd).toBeGreaterThan(helperStart)
+    expect(source.slice(helperStart, helperEnd)).toContain(
+      "createChatConversation("
+    )
+
+    const sendStart = source.indexOf(
+      "const bound = await createAndBindConversation(draft)"
     )
     expect(sendStart).toBeGreaterThan(-1)
-    expect(sendEnd).toBeGreaterThan(sendStart)
-    const block = source.slice(sendStart, sendEnd)
+    const sendBlock = source.slice(sendStart, source.indexOf("})()", sendStart))
     // Inline delivery (the fix) — not an mqEnqueue that defers to the queue.
-    expect(block).toContain("lifecycleSend(draft, selectedModeIdArg, {")
-    expect(block).not.toContain("mqEnqueue")
+    expect(sendBlock).toContain("lifecycleSend(draft, selectedModeIdArg, {")
+    expect(sendBlock).not.toContain("mqEnqueue")
   })
 
   it("gates the chat-draft composer on a live connection (no offline compose)", () => {
@@ -472,6 +478,26 @@ describe("ConversationDetailPanel chat-mode send path", () => {
 })
 
 describe("ConversationDetailPanel send-path hardening", () => {
+  it("exposes scheduling on both the shell and welcome composers", () => {
+    expect(source).toContain("onSchedule={handleScheduleMessage}")
+    expect(source).not.toContain(
+      "onSchedule={dbConversationId != null ? handleScheduleMessage : undefined}"
+    )
+    expect(source).toContain(
+      "await createAndBindConversation(draft, scheduledAt)"
+    )
+    expect(source).toContain('target: { kind: "existing", conversationId }')
+  })
+
+  it("passes the draft's current mode and config selections when scheduling its first message", () => {
+    const start = source.indexOf("await scheduleMessage({")
+    const end = source.indexOf("await createChatConversation(", start)
+    const request = source.slice(start, end)
+    expect(request).toContain("selectorPreferences: {")
+    expect(request).toContain("modeId: selectedModeId")
+    expect(request).toContain("configValuesFromOptions(effectiveConfigOptions)")
+  })
+
   // Guards for the production-readiness fixes from the Codex review of the
   // chat-mode work. The behavioral cores (readiness predicate, duplicate-create
   // rejection) are unit-tested in src/lib/queue-flush.test.ts; these assert they

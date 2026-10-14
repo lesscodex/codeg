@@ -27,6 +27,7 @@ mod app_menu;
 pub mod app_state;
 pub mod appimage_env;
 pub mod automation;
+pub mod scheduled_messages;
 pub mod backgrounds;
 /// Built-in browser. Only its wire types and its grant rules compile in server
 /// mode — see `browser/mod.rs` for why those two, and only those two.
@@ -1467,6 +1468,15 @@ mod tauri_app {
                     ));
                 }
 
+                tauri::async_runtime::spawn(crate::scheduled_messages::run(
+                    crate::db::AppDatabase {
+                        conn: app.state::<crate::db::AppDatabase>().conn.clone(),
+                    },
+                    app.state::<ConnectionManager>().clone_ref(),
+                    crate::web::event_bridge::EventEmitter::from_app(app.handle()),
+                    effective_data_dir.clone(),
+                ));
+
                 // Automation engine: drives manual + scheduled fires, settles
                 // runs off the event bus, reconciles, and recovers on boot. One
                 // per process; mirrored in `bin/codeg_server.rs`.
@@ -2305,6 +2315,11 @@ mod tauri_app {
                 quick_messages_commands::quick_messages_update,
                 quick_messages_commands::quick_messages_delete,
                 quick_messages_commands::quick_messages_reorder,
+                crate::commands::scheduled_messages::schedule_message,
+                crate::commands::scheduled_messages::import_legacy_scheduled_message,
+                crate::commands::scheduled_messages::list_scheduled_messages,
+                crate::commands::scheduled_messages::reschedule_message,
+                crate::commands::scheduled_messages::cancel_scheduled_message,
                 automation_commands::automation_list,
                 automation_commands::automation_get,
                 automation_commands::automation_runs,

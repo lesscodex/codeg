@@ -138,6 +138,8 @@ import type {
   CanvasNodeMovePayload,
   CanvasSnapshot,
   CreateChatConversationResult,
+  PromptDraft,
+  ScheduledMessage,
   CreateChatDirResult,
   WorktreeResolution,
   GitWorktreeRemoval,
@@ -3808,6 +3810,73 @@ export async function createHyperframesProject(params: {
     },
     { timeoutMs: 600_000 }
   )
+}
+
+export const SCHEDULED_MESSAGE_CHANGED_EVENT = "scheduled-message://changed"
+
+export function scheduleMessage(request: {
+  target:
+    | { kind: "existing"; conversationId: number }
+    | { kind: "project"; folderId: number; agentType: AgentType; title: string }
+    | {
+        kind: "chat"
+        agentType: AgentType
+        title: string
+        existingDir?: string
+      }
+  draft: PromptDraft
+  scheduledAt: number
+  initialConnectionId?: string | null
+  selectorPreferences?: {
+    modeId: string | null
+    configValues: Record<string, string>
+  }
+}): Promise<{ conversationId: number; folder: FolderDetail | null }> {
+  return getTransport().call("schedule_message", {
+    request: {
+      ...request,
+      draft: {
+        ...request.draft,
+        blocks: stripUploadedImagePayloads(
+          request.draft.blocks,
+          !isDesktop() || getActiveRemoteConnectionId() !== null
+        ),
+      },
+    },
+  })
+}
+
+export interface LegacyScheduledMessage {
+  id: string
+  scopeId: string
+  draft: unknown
+  scheduledAt: number
+  status: string
+}
+
+export function importLegacyScheduledMessage(
+  message: LegacyScheduledMessage
+): Promise<boolean> {
+  return getShellTransport().call("import_legacy_scheduled_message", {
+    message,
+  })
+}
+
+export function listScheduledMessages(
+  conversationId: number
+): Promise<ScheduledMessage[]> {
+  return getTransport().call("list_scheduled_messages", { conversationId })
+}
+
+export function rescheduleMessage(
+  id: string,
+  scheduledAt: number
+): Promise<void> {
+  return getTransport().call("reschedule_message", { id, scheduledAt })
+}
+
+export function cancelScheduledMessage(id: string): Promise<void> {
+  return getTransport().call("cancel_scheduled_message", { id })
 }
 
 // Conversation CRUD commands

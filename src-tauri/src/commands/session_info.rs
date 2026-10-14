@@ -723,6 +723,7 @@ impl SessionInfoAccess for DbSessionInfoLookup {
                     working_dir: PathBuf::from(&folder.path),
                     conversation_id: session_id,
                     allow_unlinked,
+                    expected_persisted_external_id: None,
                 },
             )
             .await;

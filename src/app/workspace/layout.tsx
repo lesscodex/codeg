@@ -98,6 +98,7 @@ import {
 import { HarnessLinkBootstrap } from "@/components/workspace/harness-link-bootstrap"
 import { WorkspaceOpenFolderListener } from "@/components/workspace/workspace-open-folder-listener"
 import { WorkspaceRestoreNotices } from "@/components/workspace/workspace-restore-notices"
+import { ScheduledMessageMigration } from "@/components/workspace/scheduled-message-migration"
 import { HeavyPluginsWarmup } from "@/components/ai-elements/heavy-plugins-warmup"
 import {
   ResizableHandle,
@@ -1622,6 +1623,7 @@ export default function WorkspaceLayout({
   return (
     <Suspense>
       <RemoteConnectionGate>
+        <ScheduledMessageMigration />
         <UpdateProvider>
           <WorkspaceLayoutInner>{children}</WorkspaceLayoutInner>
         </UpdateProvider>
