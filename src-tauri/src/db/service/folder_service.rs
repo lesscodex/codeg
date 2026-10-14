@@ -30,7 +30,7 @@ pub const DEFAULT_FOLDER_COLOR: &str = "inherit";
 /// The folder side is deliberately unfiltered — worktree children and hidden
 /// chat folders count too — so the result only ever moves forward. That is the
 /// pre-groups behavior, kept as-is.
-async fn next_sort_order(conn: &DatabaseConnection) -> Result<i32, DbError> {
+async fn next_sort_order(conn: &impl ConnectionTrait) -> Result<i32, DbError> {
     let max_folder = folder::Entity::find()
         .order_by_desc(folder::Column::SortOrder)
         .one(conn)
@@ -79,7 +79,7 @@ fn to_detail(m: folder::Model) -> FolderDetail {
 }
 
 pub async fn get_folder_by_id(
-    conn: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     folder_id: i32,
 ) -> Result<Option<FolderDetail>, DbError> {
     let row = folder::Entity::find_by_id(folder_id)
@@ -312,7 +312,7 @@ async fn ensure_folder_inner(
 /// never collides on the `UNIQUE(path)` constraint. Returns the full
 /// [`FolderDetail`] so the caller can hand it straight to the frontend.
 pub async fn add_chat_folder(
-    conn: &DatabaseConnection,
+    conn: &impl ConnectionTrait,
     path: &str,
 ) -> Result<FolderDetail, DbError> {
     let now = Utc::now();
@@ -588,7 +588,7 @@ pub async fn list_folders(conn: &DatabaseConnection) -> Result<Vec<FolderHistory
     Ok(rows.into_iter().map(to_entry).collect())
 }
 
-pub async fn remove_folder(conn: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub async fn remove_folder(conn: &impl ConnectionTrait, path: &str) -> Result<(), DbError> {
     let now = Utc::now();
     let row = folder::Entity::find()
         .filter(folder::Column::Path.eq(path))

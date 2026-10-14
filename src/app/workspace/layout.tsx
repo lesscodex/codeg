@@ -102,6 +102,7 @@ import { WorkspaceOpenFolderListener } from "@/components/workspace/workspace-op
 import { WorkbenchRouteConversationSync } from "@/components/workspace/workbench-route-conversation-sync"
 import { PersonalAgentOpenBridge } from "@/components/personal-agent/open-bridge"
 import { WorkspaceRestoreNotices } from "@/components/workspace/workspace-restore-notices"
+import { ScheduledMessageMigration } from "@/components/workspace/scheduled-message-migration"
 import { HeavyPluginsWarmup } from "@/components/ai-elements/heavy-plugins-warmup"
 import {
   ResizableHandle,
@@ -1617,6 +1618,7 @@ export default function WorkspaceLayout({
   return (
     <Suspense>
       <RemoteConnectionGate>
+        <ScheduledMessageMigration />
         <UpdateProvider>
           <WorkspaceLayoutInner>{children}</WorkspaceLayoutInner>
         </UpdateProvider>

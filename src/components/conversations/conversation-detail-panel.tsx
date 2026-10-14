@@ -73,6 +73,7 @@ import { FeedbackDialog } from "@/components/chat/feedback-dialog"
 import { AgentDiagnosticsDialog } from "@/components/settings/agent-diagnostics-dialog"
 import { useFeedbackEnabled } from "@/hooks/use-feedback-enabled"
 import { useSessionFeedback } from "@/hooks/use-session-feedback"
+import { useScheduledMessages } from "@/hooks/use-scheduled-messages"
 import { AgentSelector } from "@/components/chat/agent-selector"
 import { ChatInput } from "@/components/chat/chat-input"
 import { WelcomeHero, WelcomeTip } from "@/components/chat/welcome-hero"
@@ -104,6 +105,9 @@ import {
   getFolderConversation,
   openSettingsWindow,
   type PromptRewindTarget,
+  scheduleMessage,
+  rescheduleMessage,
+  cancelScheduledMessage,
 } from "@/lib/api"
 import { isWindowedDetail } from "@/lib/turn-window"
 import {
@@ -116,6 +120,7 @@ import { TurnBusyError } from "@/lib/turn-busy"
 import { deliverQueuedSteer } from "@/lib/queued-steer"
 import { toErrorMessage } from "@/lib/app-error"
 import { blockingPrompts } from "@/lib/blocking-prompts"
+import { formatScheduleShort } from "@/lib/task-schedule"
 import { notify } from "@/lib/notify"
 import { subscribe } from "@/lib/platform"
 import {
@@ -162,6 +167,7 @@ import { userPromptHistory } from "@/lib/composer-history"
 import { contentBlocksFromUserMessage } from "@/lib/user-message-blocks"
 import { getAgentLabel } from "@/lib/custom-agents"
 import {
+  configValuesFromOptions,
   getSavedModeId,
   saveModePreference,
 } from "@/lib/selector-prefs-storage"
@@ -225,6 +231,11 @@ interface ConversationTabViewProps {
    *  (one per split group, or every member of a tiled one) instead of all N.
    *  Only that first load waits: see the fetch gate in the view. */
   isVisible: boolean
+}
+
+interface BoundConversation {
+  conversationId: number
+  folderId: number
 }
 
 function buildOptimisticUserTurnFromDraft(
@@ -297,6 +308,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // Composer-namespace copy for the queue row's click-to-insert outcomes
   // (same keys the composer's own mid-turn send reports).
   const tCmp = useTranslations("Folder.chat.messageInput")
+  const tScheduled = useTranslations("Folder.chat.scheduledMessages")
   const tWelcome = useTranslations("Folder.chat.welcomeInputPanel")
   const tDiag = useTranslations("DiagnosticsSettings")
   const sharedT = useTranslations("Folder.chat.shared")
@@ -687,6 +699,7 @@ const ConversationTabView = memo(function ConversationTabView({
   const canAutoConnect =
     (hasPersistedConversation || (agentsLoaded && usableAgentCount > 0)) &&
     !awaitingHistoricalSessionId &&
+    (!hasPersistedConversation || selectedAgent === "cline" || !!externalId) &&
     // Skip the doomed auto-connect for a not-installed agent ONLY in the draft
     // surfaces, where the persistent install banner explains it instead. A
     // persisted conversation keeps its existing connect-and-surface-the-error
@@ -996,7 +1009,9 @@ const ConversationTabView = memo(function ConversationTabView({
     (
       draft: PromptDraft,
       modeId?: string | null,
-      opts?: { fromQueueFlush?: boolean }
+      opts?: {
+        fromQueueFlush?: boolean
+      }
     ) => void
   >(() => {})
   // Timestamp of the last send that bounced with TurnBusyError. The flush below
@@ -1227,6 +1242,108 @@ const ConversationTabView = memo(function ConversationTabView({
     }
   }, [effectiveConversationId, groupId, setPendingCleanup, tabId])
 
+  const createAndBindConversation = useCallback(
+    async (
+      draft: PromptDraft,
+      scheduledAt?: number
+    ): Promise<BoundConversation | null> => {
+      const persistedId = dbConvIdRef.current
+      if (persistedId != null) {
+        return { conversationId: persistedId, folderId }
+      }
+      if (createConversationPendingRef.current) return null
+
+      createConversationPendingRef.current = true
+      const title = promptDraftTitleSeed(draft, sharedT("attachedResources"))
+      const chatSend = ownTab?.isChat === true
+      const chatExistingDir = ownTab?.workingDir
+
+      try {
+        const result =
+          scheduledAt != null
+            ? await scheduleMessage({
+                target: chatSend
+                  ? {
+                      kind: "chat",
+                      agentType: selectedAgent,
+                      title,
+                      existingDir: chatExistingDir,
+                    }
+                  : {
+                      kind: "project",
+                      folderId,
+                      agentType: selectedAgent,
+                      title,
+                    },
+                draft,
+                scheduledAt,
+                initialConnectionId: conn.connectionId,
+                selectorPreferences: {
+                  modeId: selectedModeId,
+                  configValues:
+                    configValuesFromOptions(effectiveConfigOptions) ?? {},
+                },
+              })
+            : chatSend
+              ? await createChatConversation(
+                  selectedAgent,
+                  title,
+                  chatExistingDir
+                )
+              : {
+                  conversationId: await createConversation(
+                    folderId,
+                    selectedAgent,
+                    title
+                  ),
+                  folder: null,
+                }
+        const { conversationId, folder: chatFolder } = result
+        const conversationFolderId = chatFolder?.id ?? folderId
+        dbConvIdRef.current = conversationId
+        setExternalId(effectiveConversationId, sessionIdRef.current ?? null)
+        setDbConversationId(effectiveConversationId, conversationId)
+        if (!mountedRef.current) {
+          setPendingCleanup(effectiveConversationId, true)
+          refreshConversations()
+          return null
+        }
+        if (chatFolder) upsertFolder(chatFolder)
+        setCreatedConversationId(conversationId)
+        bindConversationTab(
+          tabId,
+          conversationId,
+          selectedAgent,
+          title,
+          effectiveConversationId,
+          chatFolder?.id,
+          chatFolder?.path
+        )
+        refreshConversations()
+        return { conversationId, folderId: conversationFolderId }
+      } finally {
+        createConversationPendingRef.current = false
+      }
+    },
+    [
+      bindConversationTab,
+      conn.connectionId,
+      effectiveConfigOptions,
+      effectiveConversationId,
+      folderId,
+      ownTab,
+      refreshConversations,
+      selectedAgent,
+      selectedModeId,
+      setDbConversationId,
+      setExternalId,
+      setPendingCleanup,
+      sharedT,
+      tabId,
+      upsertFolder,
+    ]
+  )
+
   const handleSend = useCallback(
     (
       draft: PromptDraft,
@@ -1264,15 +1381,9 @@ const ConversationTabView = memo(function ConversationTabView({
         noScroll?: boolean
       }
     ): Promise<unknown> | void => {
-      // Capture the tab's chat-draft state + eager scratch dir synchronously,
-      // before any await. A folderless chat draft is NOT special-cased here:
-      // its first send takes the exact same gated, inline path as a normal new
-      // conversation (the new-tab branch below just creates the row via
-      // createChatConversation, reusing this eager dir). The composer is gated
-      // on `connected` for chat drafts too, so by the time we get here the agent
-      // is live and the prompt is delivered inline — never parked in the queue.
-      const sendOwnTab = ownTab
-
+      // A folderless chat draft takes the same gated, inline path as a normal
+      // new conversation. The shared create/bind helper captures its eager
+      // scratch dir before awaiting and returns the row used by lifecycleSend.
       if (!hasPersistedConversation && !canAutoConnect) {
         setAgentConnectError(tWelcome("enableAgentFirstPlaceholder"))
         return
@@ -1406,20 +1517,9 @@ const ConversationTabView = memo(function ConversationTabView({
       // Only a persisted conversation has a message to edit.
       if (opts?.rewind) return
 
-      // New-tab path: create the DB row first, then send with the new id
-      // pinned. This prevents the backend's send_prompt_linked from racing
-      // us to create its own conversation row. A folderless chat draft creates
-      // via createChatConversation (reusing the eager scratch dir) and binds to
-      // its hidden chat folder; every other step — the optimistic turn
-      // appended above, the inline lifecycleSend, the rollback — is identical to
-      // a normal new conversation. This is the whole point of the fix: after the
-      // scratch dir exists, chat mode shares the normal send path and never
-      // depends on the flush-on-connect queue to deliver its first prompt.
+      // New-tab path: create and bind the DB row first, then send with the new
+      // id pinned so send_prompt_linked cannot race us to create another row.
       if (createConversationPendingRef.current) return
-      createConversationPendingRef.current = true
-      const title = promptDraftTitleSeed(draft, sharedT("attachedResources"))
-      const chatSend = sendOwnTab?.isChat === true
-      const chatExistingDir = sendOwnTab?.workingDir
       // Lock the selectors for the whole first-send attempt (codeg#1179):
       // the prompt runs with — and the new row records — exactly the
       // selection showing at submit. One `finally` releases it on every exit.
@@ -1453,85 +1553,17 @@ const ConversationTabView = memo(function ConversationTabView({
 
       void (async () => {
         try {
-          let newConversationId: number
-          // The send's folderId defaults to the active folder; a chat send
-          // overrides it with the backend-created hidden chat folder.
-          let sendFolderId = folderId
-          if (chatSend) {
-            const res = await createChatConversation(
-              selectedAgent,
-              title,
-              chatExistingDir
-            )
-            newConversationId = res.conversationId
-            sendFolderId = res.folderId
-            dbConvIdRef.current = newConversationId
-            handOverDraftMode()
-            setExternalId(effectiveConversationId, sessionIdRef.current ?? null)
-            // Bind the DB id BEFORE the prompt goes out. The mirror effect
-            // below also binds, but only after a re-render — this closes that
-            // window and covers the unmounted-early return just under it.
-            setDbConversationId(effectiveConversationId, newConversationId)
-            if (!mountedRef.current) {
-              setPendingCleanup(effectiveConversationId, true)
-              refreshConversations()
-              return
-            }
-            // Seed allFolders with the hidden chat folder so the tab's new
-            // folderId resolves (cwd / active-folder) on the next render. bind
-            // reuses the eager scratch dir as workingDir, so the connection's
-            // cwd does not move and no reconnect is triggered.
-            upsertFolder(res.folder)
-            setCreatedConversationId(newConversationId)
-            bindConversationTab(
-              tabId,
-              newConversationId,
-              selectedAgent,
-              title,
-              effectiveConversationId,
-              res.folderId,
-              res.folder.path
-            )
-          } else {
-            newConversationId = await createConversation(
-              folderId,
-              selectedAgent,
-              title
-            )
-            dbConvIdRef.current = newConversationId
-            handOverDraftMode()
-            // Set external ID on the stable virtual session (no migration needed —
-            // effectiveConversationId never changes, so the session stays in place).
-            // DB persistence of external_id is now backend-driven from
-            // send_prompt_linked once the row is linked, so no explicit DB write here.
-            setExternalId(effectiveConversationId, sessionIdRef.current ?? null)
-            // Bind the DB id BEFORE the prompt goes out (see the chat branch).
-            setDbConversationId(effectiveConversationId, newConversationId)
-            if (!mountedRef.current) {
-              // Component unmounted while creating — mark for deferred cleanup
-              // so the background turn_complete handler can clean up later.
-              setPendingCleanup(effectiveConversationId, true)
-              refreshConversations()
-              return
-            }
-            setCreatedConversationId(newConversationId)
-            bindConversationTab(
-              tabId,
-              newConversationId,
-              selectedAgent,
-              title,
-              effectiveConversationId
-            )
-          }
+          const bound = await createAndBindConversation(draft)
+          if (!bound) return
+          handOverDraftMode()
           clearMessageInputDraft(buildNewConversationDraftStorageKey(tabId))
-          refreshConversations()
 
           // Now that the row exists, kick off the actual prompt with the
           // conversation_id pinned so the backend adopts our row instead of
           // creating a duplicate one.
           await lifecycleSend(draft, selectedModeIdArg, {
-            folderId: sendFolderId,
-            conversationId: newConversationId,
+            folderId: bound.folderId,
+            conversationId: bound.conversationId,
             clientMessageId: optimisticTurn.id,
             onNotSent,
             onTurnInProgress,
@@ -1562,7 +1594,6 @@ const ConversationTabView = memo(function ConversationTabView({
             setAgentConnectError(tWelcome("createConversationFailed"))
           }
         } finally {
-          createConversationPendingRef.current = false
           if (handOver) await handOver
           connRef.current.releaseFirstSend(firstSendLock)
         }
@@ -1576,25 +1607,20 @@ const ConversationTabView = memo(function ConversationTabView({
       mqEnqueue,
       mqRequeueFront,
       mqGetQueueLength,
-      bindConversationTab,
       canAutoConnect,
       connectionReady,
+      createAndBindConversation,
       effectiveConversationId,
       folderId,
       hasPersistedConversation,
       lifecycleSend,
       pinTab,
       refreshConversations,
-      selectedAgent,
-      setDbConversationId,
-      setExternalId,
-      setPendingCleanup,
+      ownTab,
       setSyncState,
       sharedT,
-      ownTab,
       tWelcome,
       tabId,
-      upsertFolder,
     ]
   )
 
@@ -1602,6 +1628,78 @@ const ConversationTabView = memo(function ConversationTabView({
   useEffect(() => {
     handleSendRef.current = handleSend
   }, [handleSend])
+
+  const scheduledMessages = useScheduledMessages(dbConversationId)
+  const handleScheduleMessage = useCallback(
+    async (draft: PromptDraft, scheduledAt: number) => {
+      const conversationId = dbConvIdRef.current
+      if (conversationId == null && !canAutoConnect) {
+        setAgentConnectError(tWelcome("enableAgentFirstPlaceholder"))
+        return false
+      }
+      if (conversationId == null && !connectionReady) return false
+      try {
+        if (conversationId == null) {
+          if (!(await createAndBindConversation(draft, scheduledAt)))
+            return false
+          if (ownTab && !ownTab.isPinned) pinTab(tabId)
+        } else {
+          await scheduleMessage({
+            target: { kind: "existing", conversationId },
+            draft,
+            scheduledAt,
+          })
+        }
+        toast.success(
+          tScheduled("scheduledFor", {
+            time: formatScheduleShort(new Date(scheduledAt).toISOString()),
+          })
+        )
+        return true
+      } catch (error) {
+        toast.error(tScheduled("saveFailed"), {
+          description: toErrorMessage(error),
+        })
+        return false
+      }
+    },
+    [
+      canAutoConnect,
+      connectionReady,
+      createAndBindConversation,
+      ownTab,
+      pinTab,
+      tScheduled,
+      tWelcome,
+      tabId,
+    ]
+  )
+  const handleScheduledReschedule = useCallback(
+    async (id: string, scheduledAt: number) => {
+      try {
+        await rescheduleMessage(id, scheduledAt)
+        return true
+      } catch (error) {
+        toast.error(tScheduled("saveFailed"), {
+          description: toErrorMessage(error),
+        })
+        return false
+      }
+    },
+    [tScheduled]
+  )
+  const handleScheduledRemove = useCallback(
+    async (id: string) => {
+      try {
+        await cancelScheduledMessage(id)
+      } catch (error) {
+        toast.error(tScheduled("saveFailed"), {
+          description: toErrorMessage(error),
+        })
+      }
+    },
+    [tScheduled]
+  )
 
   // "Fork from here": fork at a rendered assistant turn, sending nothing. The
   // ONLY fork entry point — the composer's fork-and-send was removed once this
@@ -2817,6 +2915,7 @@ const ConversationTabView = memo(function ConversationTabView({
       pendingPlanApproval={conn.pendingPlanApproval}
       onFocus={handleFocus}
       onSend={handleSend}
+      onSchedule={handleScheduleMessage}
       onCancel={handleCancel}
       onRespondPermission={handleRespondPermission}
       onAnswerQuestion={handleAnswerQuestion}
@@ -2858,6 +2957,9 @@ const ConversationTabView = memo(function ConversationTabView({
       isActive={isActive}
       showActiveFlow={showActiveFlow}
       queue={msgQueue}
+      scheduledMessages={scheduledMessages}
+      onScheduledReschedule={handleScheduledReschedule}
+      onScheduledRemove={handleScheduledRemove}
       onEnqueue={handleComposerEnqueue}
       onQueueReorder={mqReorder}
       onQueueEdit={handleQueueEdit}
@@ -2962,6 +3064,7 @@ const ConversationTabView = memo(function ConversationTabView({
                 agentName={getAgentLabel(selectedAgent)}
                 onFocus={handleFocus}
                 onSend={handleSend}
+                onSchedule={handleScheduleMessage}
                 onCancel={handleCancel}
                 modes={connectionModes}
                 configOptions={connectionConfigOptions}

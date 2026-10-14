@@ -2965,6 +2965,7 @@ pub struct SpawnSeed {
     pub cli_root: Option<crate::cli_run::RootSeed>,
     /// The personal agent's own connection.
     pub personal_agent: bool,
+    pub require_exact_resume: bool,
 }
 
 /// Spawn an ACP agent process and run the connection loop in a background task.
@@ -3245,6 +3246,7 @@ pub async fn spawn_agent_connection(
             agent_type,
             working_dir,
             session_id,
+            seed.require_exact_resume,
             cmd_rx,
             handshake,
             emitter_clone.clone(),
@@ -9020,6 +9022,7 @@ async fn run_connection(
     agent_type: AgentType,
     working_dir: Option<String>,
     session_id: Option<String>,
+    require_exact_resume: bool,
     mut cmd_rx: mpsc::Receiver<ConnectionCommand>,
     // `AgentConnection::handshake`: once cancelled, every wait on the agent
     // that establishes the session gives up.
@@ -10474,6 +10477,9 @@ async fn run_connection(
                             )
                             .await;
                             return Ok(());
+                        }
+                        if require_exact_resume {
+                            return Err(e);
                         }
                         if attempted_load {
                             tracing::warn!(
@@ -39615,10 +39621,19 @@ mod tests {
             client_end: agent_client_protocol::Channel,
             session_id: Option<&str>,
         ) -> Self {
+            Self::start_with_resume_policy(client_end, session_id, false).await
+        }
+
+        async fn start_with_resume_policy(
+            client_end: agent_client_protocol::Channel,
+            session_id: Option<&str>,
+            require_exact_resume: bool,
+        ) -> Self {
             // OpenClaw reads no MCP config from the machine running the test.
             Self::start_with_selection(
                 client_end,
                 session_id,
+                require_exact_resume,
                 AgentType::OpenClaw,
                 BTreeMap::new(),
             )
@@ -39628,6 +39643,7 @@ mod tests {
         async fn start_with_selection(
             client_end: agent_client_protocol::Channel,
             session_id: Option<&str>,
+            require_exact_resume: bool,
             agent_type: AgentType,
             preferred_config_values: BTreeMap<String, String>,
         ) -> Self {
@@ -39659,6 +39675,7 @@ mod tests {
                         agent_type,
                         Some(cwd.to_string_lossy().into_owned()),
                         session_id,
+                        require_exact_resume,
                         cmd_rx,
                         run_handshake,
                         EventEmitter::Noop,
@@ -39794,6 +39811,7 @@ mod tests {
             let run = HandshakeRun::start_with_selection(
                 client_end,
                 Some("s-old"),
+                false,
                 AgentType::Codex,
                 BTreeMap::from([
                     ("model".into(), "gpt-5.6-sol".into()),
@@ -40230,6 +40248,53 @@ mod tests {
             )),
             "{emitted:#?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_messages_resume_the_requested_session_on_cold_start() {
+        let (client_end, agent_end) = agent_client_protocol::Channel::duplex();
+        let mut agent = HandshakeAgent::start(
+            agent_end,
+            HandshakeScript {
+                expected_load_id: Some("s-old"),
+                ..Default::default()
+            },
+        );
+        let mut run = HandshakeRun::start_with_resume_policy(client_end, Some("s-old"), true).await;
+        assert_eq!(agent.next_request().await, "initialize");
+        assert_eq!(agent.next_request().await, "session/load");
+        run.prompt("scheduled follow-up").await;
+        assert_eq!(
+            agent.next_request().await,
+            "session/prompt: scheduled follow-up"
+        );
+        run.turn_completed().await;
+        assert_eq!(run.state.read().await.external_id.as_deref(), Some("s-old"));
+        run.cmd_tx.send(ConnectionCommand::Disconnect).await.unwrap();
+        assert!(run.ended().await.0.is_ok());
+        agent.closed().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_messages_never_fall_back_to_session_new() {
+        let (client_end, agent_end) = agent_client_protocol::Channel::duplex();
+        let mut agent = HandshakeAgent::start(
+            agent_end,
+            HandshakeScript {
+                load_error: Some(serde_json::json!({"code": -32603, "message": "load failed"})),
+                ..Default::default()
+            },
+        );
+        let run = HandshakeRun::start_with_resume_policy(client_end, Some("s-old"), true).await;
+        assert_eq!(agent.next_request().await, "initialize");
+        assert_eq!(agent.next_request().await, "session/load");
+        let (outcome, events) = run.ended().await;
+        assert!(outcome.is_err());
+        assert!(agent.seen.try_recv().is_err());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::SessionStarted { .. })));
+        agent.closed().await;
     }
 
     /// A [`HandshakeAgent`] that starts a terminal while opening the session,

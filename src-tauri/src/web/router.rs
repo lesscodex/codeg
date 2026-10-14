@@ -2122,6 +2122,28 @@ pub fn build_router_with_srn(
         )
         // ─── Automations ───
         .route(
+            "/schedule_message",
+            post(handlers::scheduled_messages::schedule_message),
+        )
+        .route(
+            "/import_legacy_scheduled_message",
+            // The old browser record can contain inline image data.
+            post(handlers::scheduled_messages::import_legacy_scheduled_message)
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/list_scheduled_messages",
+            post(handlers::scheduled_messages::list_scheduled_messages),
+        )
+        .route(
+            "/reschedule_message",
+            post(handlers::scheduled_messages::reschedule_message),
+        )
+        .route(
+            "/cancel_scheduled_message",
+            post(handlers::scheduled_messages::cancel_scheduled_message),
+        )
+        .route(
             "/automation_list",
             post(handlers::automation::automation_list),
         )

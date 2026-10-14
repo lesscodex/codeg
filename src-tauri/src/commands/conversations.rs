@@ -2479,7 +2479,7 @@ pub(crate) async fn cleanup_tabs_for_deleted_conversation(
 /// Core logic for creating a conversation with git branch detection.
 /// Shared by both the Tauri command and the web handler.
 pub async fn create_conversation_core(
-    conn: &sea_orm::DatabaseConnection,
+    conn: &impl sea_orm::ConnectionTrait,
     folder_id: i32,
     agent_type: AgentType,
     title: Option<String>,
@@ -2897,7 +2897,7 @@ pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
 /// create. `None` mints a fresh dir (the send-before-dir-ready fallback).
 /// `create_dir_all` is idempotent, so re-ensuring an existing dir is harmless.
 pub async fn create_chat_conversation_core(
-    conn: &sea_orm::DatabaseConnection,
+    conn: &impl sea_orm::ConnectionTrait,
     data_dir: &std::path::Path,
     agent_type: AgentType,
     title: Option<String>,
@@ -2929,7 +2929,7 @@ pub async fn create_chat_check_conversation_core(
 }
 
 async fn create_chat_conversation_inner(
-    conn: &sea_orm::DatabaseConnection,
+    conn: &impl sea_orm::ConnectionTrait,
     data_dir: &std::path::Path,
     agent_type: AgentType,
     title: Option<String>,

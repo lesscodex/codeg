@@ -185,15 +185,17 @@ describe("useConnectionLifecycle send-failure surfacing", () => {
   })
 
   it("does not toast on a successful send", async () => {
-    sendPrompt.mockResolvedValue(undefined)
+    sendPrompt.mockResolvedValue(true)
+    const onSent = vi.fn()
 
     const { result } = renderLifecycle()
     await act(async () => {
-      result.current.handleSend(draft())
+      result.current.handleSend(draft(), null, { onSent })
       await flush()
     })
 
     expect(sendPrompt).toHaveBeenCalledTimes(1)
+    expect(onSent).toHaveBeenCalledTimes(1)
     expect(toastError).not.toHaveBeenCalled()
   })
 })

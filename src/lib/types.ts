@@ -1594,6 +1594,15 @@ export interface PromptDraft {
   displayText: string
 }
 
+export interface ScheduledMessage {
+  id: string
+  conversationId: number
+  draft: PromptDraft
+  scheduledAt: number
+  status: "scheduled" | "waiting" | "dispatching" | "missed" | "failed"
+  error: string | null
+}
+
 // Permission option info from agent
 export interface PermissionOptionInfo {
   option_id: string

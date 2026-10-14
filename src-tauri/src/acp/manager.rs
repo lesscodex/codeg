@@ -35,6 +35,7 @@ use crate::acp::types::{
     PromptInputBlock,
 };
 use crate::db::entities::conversation::{self, ConversationKind, ConversationStatus};
+use crate::db::error::DbError;
 use crate::db::service::conversation_service;
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
@@ -306,6 +307,9 @@ pub struct PromptSessionIdentity {
     /// persisted conversation row. `true` permits only `conversation_id == None`;
     /// a different already-bound conversation is always rejected.
     pub allow_unlinked: bool,
+    /// Scheduled sends guard the persisted binding as well as the live state.
+    /// An explicitly absent ID authorizes only the first bind of a new row.
+    pub expected_persisted_external_id: Option<Option<String>>,
 }
 
 /// Snapshot used by a caller that created a resumed connection. A connection
@@ -1030,6 +1034,34 @@ impl ConnectionManager {
             preferred_mode_id,
             preferred_config_values,
             crate::acp::connection::SpawnSeed::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_for_scheduled_message(
+        &self,
+        agent_type: AgentType,
+        working_dir: String,
+        session_id: Option<String>,
+        runtime_env: BTreeMap<String, String>,
+        emitter: EventEmitter,
+        preferred_mode_id: Option<String>,
+        preferred_config_values: BTreeMap<String, String>,
+    ) -> Result<SpawnOutcome, AcpError> {
+        self.spawn_agent_seeded(
+            agent_type,
+            Some(working_dir),
+            session_id,
+            runtime_env,
+            "scheduled-message".into(),
+            emitter,
+            preferred_mode_id,
+            preferred_config_values,
+            crate::acp::connection::SpawnSeed {
+                require_exact_resume: true,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -2412,6 +2444,24 @@ impl ConnectionManager {
             validate_prompt_session_identity(&state, expected)?;
         }
 
+        // Keep Some(None) as a guard: the first scheduled prompt may only
+        // bind a row that still has no external ID.
+        let expected_persisted_external_id = match &expected_identity {
+            Some(identity) => identity.expected_persisted_external_id.clone(),
+            None => None,
+        };
+        if let Some(expected) = expected_persisted_external_id.as_ref() {
+            let target = conversation_service::get_by_id(
+                &db.conn,
+                conversation_id.ok_or(AcpError::SessionIdentityMismatch)?,
+            )
+            .await
+            .map_err(|error| AcpError::protocol(error.to_string()))?;
+            if &target.external_id != expected || Some(target.folder_id) != folder_id {
+                return Err(AcpError::SessionIdentityMismatch);
+            }
+        }
+
         // Reject a concurrent prompt while a turn is already in flight, BEFORE
         // any side effects (row creation, InProgress emit, user-message
         // broadcast). `send_prompt_inner` re-checks and sets the flag
@@ -2655,15 +2705,27 @@ impl ConnectionManager {
                         // nothing to do with the row's history.
                         // `bind_external_id` splits that history onto its own row
                         // instead of overwriting it.
-                        let continues = crate::acp::continued_session_ids(agent_type, &eid);
-                        match conversation_service::bind_external_id(
-                            &db_conn,
-                            linked_conversation_id,
-                            &eid,
-                            &continues,
-                        )
-                        .await
-                        {
+                        let guarded_binding = expected_persisted_external_id.is_some();
+                        let binding = match expected_persisted_external_id {
+                            Some(expected) => conversation_service::bind_scheduled_external_id(
+                                &db_conn,
+                                linked_conversation_id,
+                                &eid,
+                                expected,
+                            )
+                            .await,
+                            None => {
+                                let continues = crate::acp::continued_session_ids(agent_type, &eid);
+                                conversation_service::bind_external_id(
+                                    &db_conn,
+                                    linked_conversation_id,
+                                    &eid,
+                                    &continues,
+                                )
+                                .await
+                            }
+                        };
+                        match binding {
                             Ok(preserved) => preserved,
                             Err(e) => {
                                 // Refused, or a genuine DB failure. Either way
@@ -2693,7 +2755,12 @@ impl ConnectionManager {
                                         );
                                     }
                                 }
-                                return Err(AcpError::protocol(e.to_string()));
+                                return Err(match e {
+                                    DbError::Conflict(_) if guarded_binding => {
+                                        AcpError::SessionIdentityMismatch
+                                    }
+                                    other => AcpError::protocol(other.to_string()),
+                                });
                             }
                         }
                     } else {
@@ -10698,6 +10765,7 @@ mod tests {
                     working_dir: PathBuf::from("/tmp/strict-session"),
                     conversation_id: target.id,
                     allow_unlinked: false,
+                    expected_persisted_external_id: None,
                 },
             )
             .await

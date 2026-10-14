@@ -25,7 +25,7 @@
  * overwrite locally" path.
  */
 
-import type { SessionModeStateInfo } from "@/lib/types"
+import type { SessionConfigOptionInfo, SessionModeStateInfo } from "@/lib/types"
 
 const STORAGE_KEY = "codeg:selector-prefs"
 
@@ -250,4 +250,18 @@ export function saveConfigPreference(
     ...prefs,
     configValues: { ...prefs.configValues, [configId]: valueId },
   }))
+}
+
+export function configValuesFromOptions(
+  options: SessionConfigOptionInfo[] | null
+): Record<string, string> | undefined {
+  if (options == null) return undefined
+  return Object.fromEntries(
+    options.map((option) => [
+      option.id,
+      option.kind.type === "boolean"
+        ? String(option.kind.current_value)
+        : option.kind.current_value,
+    ])
+  )
 }

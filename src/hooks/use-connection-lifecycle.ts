@@ -101,6 +101,8 @@ export interface UseConnectionLifecycleReturn {
        * deterministic failure would otherwise retry forever.
        */
       onSendFailed?: (error: unknown) => void
+      /** Called only after the backend accepts the prompt. */
+      onSent?: () => void
     }
   ) => Promise<void>
   /** `saveAsDefault`: the pick also becomes the new-conversation default —
@@ -542,11 +544,13 @@ export function useConnectionLifecycle({
         onNotSent?: () => void
         onTurnInProgress?: () => void
         onSendFailed?: (error: unknown) => void
+        onSent?: () => void
       }
     ) => {
       touchActivity(contextKey)
       const onTurnInProgress = opts?.onTurnInProgress
       const onSendFailed = opts?.onSendFailed
+      const onSent = opts?.onSent
       // Returned (handled: it never rejects) so a draft's first send can hold
       // its selector lock until the prompt was acknowledged or failed.
       return (async () => {
@@ -557,7 +561,15 @@ export function useConnectionLifecycle({
           // calls before CurrentModeUpdate arrives from the agent.
           modeIdRef.current = modeId
         }
-        if (!(await sendPrompt(draft.blocks, opts))) opts?.onNotSent?.()
+        if (await sendPrompt(draft.blocks, opts)) {
+          try {
+            onSent?.()
+          } catch (error) {
+            console.error("[ConnLifecycle] onSent:", error)
+          }
+        } else {
+          opts?.onNotSent?.()
+        }
       })().catch((e: unknown) => {
         if (e instanceof RewindRefusedError && opts?.onRewindRefused) {
           opts.onRewindRefused(e.reason)
