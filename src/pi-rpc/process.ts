@@ -1,7 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import crossSpawn from 'cross-spawn'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { McpServer } from '@agentclientprotocol/sdk'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { createMcpBridge, MCP_CONFIG_ENV, McpBridgeError } from '../mcp/mcp-bridge.js'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -12,6 +17,17 @@ export class PiRpcSpawnError extends Error {
     this.name = 'PiRpcSpawnError'
     this.code = opts?.code
     ;(this as any).cause = opts?.cause
+  }
+}
+
+export class PiRpcMcpError extends Error {
+  readonly code: 'invalid' | 'unsupported'
+
+  constructor(error: McpBridgeError) {
+    super(error.message)
+    this.name = 'PiRpcMcpError'
+    this.code = error.code
+    ;(this as any).cause = error
   }
 }
 
@@ -103,6 +119,22 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** ACP-supplied MCP servers, scoped to this pi subprocess. */
+  mcpServers?: McpServer[]
+}
+
+function findMcpExtension(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    join(moduleDir, 'pi-mcp-extension.js'),
+    join(moduleDir, '../mcp/pi-mcp-extension.js'),
+    join(moduleDir, '../mcp/pi-mcp-extension.ts')
+  ]
+  const extension = candidates.find(candidate => existsSync(candidate))
+  if (!extension) {
+    throw new Error('pi-acp MCP bridge extension is missing from the adapter build')
+  }
+  return extension
 }
 
 export class PiRpcProcess {
@@ -110,9 +142,11 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  private readonly cleanupMcpBridge: () => void
 
-  private constructor(child: ChildProcessWithoutNullStreams) {
+  private constructor(child: ChildProcessWithoutNullStreams, cleanupMcpBridge: () => void = () => {}) {
     this.child = child
+    this.cleanupMcpBridge = cleanupMcpBridge
 
     const rl = readline.createInterface({ input: child.stdout })
     rl.on('line', line => {
@@ -140,12 +174,14 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
+      this.cleanupMcpBridge()
       const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
 
     child.on('error', err => {
+      this.cleanupMcpBridge()
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
     })
@@ -155,20 +191,48 @@ export class PiRpcProcess {
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
 
+    let mcpBridge: ReturnType<typeof createMcpBridge> = null
+    try {
+      mcpBridge = createMcpBridge(params.mcpServers ?? [], params.cwd)
+    } catch (error) {
+      if (error instanceof McpBridgeError) throw new PiRpcMcpError(error)
+      throw error
+    }
+
     // Speed/robustness for ACP:
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
+    if (mcpBridge) {
+      try {
+        args.push('--extension', findMcpExtension())
+      } catch (error) {
+        mcpBridge.cleanup()
+        throw error
+      }
+    }
+
+    const childEnv: NodeJS.ProcessEnv = { ...process.env }
+    delete childEnv[MCP_CONFIG_ENV]
+    if (mcpBridge) childEnv[MCP_CONFIG_ENV] = mcpBridge.configPath
 
     // Windows cmd launchers need shell escaping; direct executables use native argv.
     const start = shouldUseShellForPiCommand(cmd) ? crossSpawn : spawn
-    const child = start(cmd, args, {
-      cwd: params.cwd,
-      stdio: 'pipe',
-      env: process.env
-    }) as ChildProcessWithoutNullStreams
+    let child: ChildProcessWithoutNullStreams
+    try {
+      child = start(cmd, args, {
+        cwd: params.cwd,
+        stdio: 'pipe',
+        env: childEnv
+      }) as ChildProcessWithoutNullStreams
+      child.once('exit', () => mcpBridge?.cleanup())
+      child.once('error', () => mcpBridge?.cleanup())
+    } catch (error) {
+      mcpBridge?.cleanup()
+      throw error
+    }
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
     // deterministic error instead of later EPIPE/internal-error noise.
@@ -191,6 +255,7 @@ export class PiRpcProcess {
         child.once('error', onError)
       })
     } catch (e: any) {
+      mcpBridge?.cleanup()
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
@@ -210,7 +275,7 @@ export class PiRpcProcess {
       // leave stderr untouched; ACP clients may capture it.
     })
 
-    const proc = new PiRpcProcess(child)
+    const proc = new PiRpcProcess(child, mcpBridge?.cleanup)
 
     // Best-effort handshake.
     // Important: pi may emit a get_state response pointing at a sessionFile in a directory
@@ -239,6 +304,7 @@ export class PiRpcProcess {
   }
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    this.cleanupMcpBridge()
     if (this.child.killed) return
     try {
       this.child.kill(signal as any)

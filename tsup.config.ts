@@ -1,10 +1,14 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: {
+    index: 'src/index.ts',
+    'pi-mcp-extension': 'src/mcp/pi-mcp-extension.ts'
+  },
   format: ['esm'],
   platform: 'node',
   target: 'node22',
+  external: ['@earendil-works/pi-coding-agent'],
   sourcemap: true,
   clean: true,
   dts: false,
