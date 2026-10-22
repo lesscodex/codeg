@@ -11,6 +11,7 @@ pub mod claude_model_picker;
 pub(crate) mod codex_backend;
 pub mod codex_catalog_commit;
 pub mod codex_catalog_refresh;
+pub(crate) mod pi_backend;
 pub mod codex_catalog_source;
 pub mod codex_context;
 pub mod codex_endpoint_catalog;

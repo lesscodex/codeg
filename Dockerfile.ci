@@ -31,6 +31,7 @@ COPY dist/${TARGETARCH}/codeg-mcp /usr/local/bin/codeg-mcp
 # its discovery file under CODEG_DATA_DIR (/data/cli).
 COPY dist/${TARGETARCH}/codeg-cli /usr/local/bin/codeg-cli
 COPY dist/${TARGETARCH}/codex-acp /opt/codeg/codex-acp
+COPY dist/${TARGETARCH}/pi-acp /opt/codeg/pi-acp
 COPY dist/web /app/web
 
 ENV CODEG_STATIC_DIR=/app/web

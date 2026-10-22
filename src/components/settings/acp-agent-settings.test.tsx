@@ -792,6 +792,24 @@ describe("buildAcpAdapterCheck", () => {
     expect(check?.fixes[0].kind).toBe("open_url")
     expect(check?.fixes[0].payload).toContain("#acp-adapters")
   })
+
+  it("keeps the packaged Pi adapter and Pi CLI prerequisites distinct", () => {
+    const check = buildAcpAdapterCheck(
+      makeAdapter({
+        adapter_package: "pi-acp@0.0.34",
+        adapter_cmd: "pi-acp",
+        native_cmd: "pi",
+        native_label: "Pi coding agent",
+        native_path: null,
+        native_required: true,
+        shared_config_dir: "~/.pi",
+        adapter_installed: true,
+      })
+    )
+    expect(check?.status).toBe("warn")
+    expect(check?.message).toContain("Pi CLI is still required")
+    expect(check?.message).not.toContain("not required")
+  })
 })
 
 describe("getAgentChecks adapter ordering", () => {

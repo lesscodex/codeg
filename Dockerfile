@@ -22,7 +22,20 @@ COPY src-tauri/vendor/codex-acp/src/ src-tauri/vendor/codex-acp/src/
 RUN node src-tauri/scripts/stage-codex-acp.mjs \
     --source-gitlink=50e8569c40ab5b3055704145fcdece4a4a7f1b6a
 
-# Stage 3: Build Rust server binary + codeg-mcp companion + codeg-cli
+# Stage 3: Build the maintained pi-acp adapter from the pinned source branch
+FROM node:24-bookworm-slim AS pi-acp
+WORKDIR /app
+COPY src-tauri/scripts/stage-pi-acp.mjs src-tauri/scripts/
+COPY src-tauri/vendor/pi-acp/package.json \
+     src-tauri/vendor/pi-acp/package-lock.json \
+     src-tauri/vendor/pi-acp/tsconfig.json \
+     src-tauri/vendor/pi-acp/tsup.config.ts \
+     src-tauri/vendor/pi-acp/
+COPY src-tauri/vendor/pi-acp/src/ src-tauri/vendor/pi-acp/src/
+RUN node src-tauri/scripts/stage-pi-acp.mjs \
+    --source-gitlink=3b8c047a7105e3f6deeadfe0e129d236afcbc987
+
+# Stage 4: Build Rust server binary + codeg-mcp companion + codeg-cli
 FROM rust:slim-bookworm AS backend
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/src-tauri
@@ -60,6 +73,7 @@ COPY --from=backend /app/src-tauri/target/release/codeg-mcp /usr/local/bin/codeg
 # its discovery file under CODEG_DATA_DIR (/data/cli).
 COPY --from=backend /app/src-tauri/target/release/codeg-cli /usr/local/bin/codeg-cli
 COPY --from=codex-acp /app/src-tauri/build/staging/codex-acp /opt/codeg/codex-acp
+COPY --from=pi-acp /app/src-tauri/build/staging/pi-acp /opt/codeg/pi-acp
 COPY --from=frontend /app/out /app/web
 
 ENV CODEG_STATIC_DIR=/app/web

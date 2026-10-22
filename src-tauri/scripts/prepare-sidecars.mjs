@@ -23,9 +23,9 @@
 // compile time (`CODEG_COMPUTER_PEER_REQUIREMENT`): the release workflow sets
 // it for the macOS builds, and a local build without it is a development
 // helper that says so. Nothing here sets or defaults it.
-//   5. Stages the pinned codex-acp runtime at
-//      `src-tauri/build/staging/codex-acp` for desktop resources and server
-//      bundles.
+//   5. Stages the pinned codex-acp and maintained pi-acp runtimes at
+//      `src-tauri/build/staging/{codex-acp,pi-acp}` for desktop resources and
+//      server bundles.
 //
 // Why a separate script (not inline in beforeBuildCommand / GitHub Actions):
 //   - Cross-compile in release.yml passes `--target <triple>` so we honour
@@ -55,6 +55,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import process from "node:process"
 import { stageCodexAcp } from "./stage-codex-acp.mjs"
+import { stagePiAcp } from "./stage-pi-acp.mjs"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const SRC_TAURI = resolve(SCRIPT_DIR, "..")
@@ -198,6 +199,7 @@ function main() {
     }
   }
   stageCodexAcp()
+  stagePiAcp()
 }
 
 main()
