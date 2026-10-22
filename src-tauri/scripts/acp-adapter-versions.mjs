@@ -52,6 +52,12 @@ export function acpVersion(key, { fsApi = fs, repoRoot = REPO_ROOT } = {}) {
       return distributionVersion(source, "Codex", "Npx")
     case "codex-runtime":
       return rustStringConstant(source, "CODEX_NESTED_VERSION_FALLBACK")
+    case "pi-adapter":
+      return rustStringConstant(source, "PI_ACP_ADAPTER_VERSION")
+    case "pi-upstream":
+      return distributionVersion(source, "Pi", "Npx")
+    case "pi-runtime":
+      return rustStringConstant(source, "PI_MIN_RUNTIME_VERSION")
     default:
       fail(`unknown ACP version key: ${key}`)
   }

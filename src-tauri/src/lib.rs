@@ -801,7 +801,8 @@ mod tauri_app {
                 web::event_bridge::install_tauri_app_handle(app.handle());
 
                 if let Ok(resource_dir) = app.path().resource_dir() {
-                    crate::acp::codex_backend::set_desktop_resource_dir(resource_dir);
+                    crate::acp::codex_backend::set_desktop_resource_dir(resource_dir.clone());
+                    crate::acp::pi_backend::set_desktop_resource_dir(resource_dir);
                 }
                 let app_data_dir = app.path().app_data_dir()?;
 

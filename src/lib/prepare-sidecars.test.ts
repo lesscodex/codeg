@@ -44,6 +44,10 @@ function prepare({
     join(dirname(entry), "stage-codex-acp.mjs"),
     "export function stageCodexAcp() {}\n"
   )
+  writeFileSync(
+    join(dirname(entry), "stage-pi-acp.mjs"),
+    "export function stagePiAcp() {}\n"
+  )
   const output = shared
     ? join(root, "shared Cargo cache")
     : join(crate, "target")
