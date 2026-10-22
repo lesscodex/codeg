@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import {
   PiRpcProcess,
+  PiRpcMcpError,
   PiRpcSpawnError,
   SESSION_STATS_TIMEOUT_MS,
   type PiRpcEvent,
@@ -212,40 +213,49 @@ export class SessionManager {
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...(params.mcpServers.length > 0 ? { mcpServers: params.mcpServers } : {})
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
         throw RequestError.internalError({ code: e.code }, e.message)
       }
+      if (e instanceof PiRpcMcpError) {
+        throw RequestError.invalidParams(e.message)
+      }
       throw e
     }
 
-    let state: any = null
     try {
-      state = (await proc.getState()) as any
-    } catch {
-      state = null
+      let state: any = null
+      try {
+        state = (await proc.getState()) as any
+      } catch {
+        state = null
+      }
+
+      const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
+      const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
+
+      if (sessionFile) {
+        this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
+      }
+
+      const session = new PiAcpSession({
+        sessionId,
+        cwd: params.cwd,
+        mcpServers: params.mcpServers,
+        proc,
+        conn: params.conn,
+        fileCommands: params.fileCommands ?? []
+      })
+
+      this.sessions.set(sessionId, session)
+      return session
+    } catch (error) {
+      proc.dispose()
+      throw error
     }
-
-    const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
-    const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
-
-    if (sessionFile) {
-      this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
-    }
-
-    const session = new PiAcpSession({
-      sessionId,
-      cwd: params.cwd,
-      mcpServers: params.mcpServers,
-      proc,
-      conn: params.conn,
-      fileCommands: params.fileCommands ?? []
-    })
-
-    this.sessions.set(sessionId, session)
-    return session
   }
 
   get(sessionId: string): PiAcpSession {

@@ -41,9 +41,20 @@ Make sure pi is installed
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-- Node.js 22+
-- `pi` v0.81.0+ installed and available on your `PATH` (the adapter runs the `pi` executable)
+- Node.js 22.19.0+ for the tested Pi runtime
+- `pi` v1.4.0+ installed and available on your `PATH` (the adapter runs the `pi` executable)
 - Configure `pi` separately for your model providers/API keys
+
+The maintained build is tested with Node.js 24.14.0 and Pi 1.4.0. `npm run build`
+must ship both `dist/index.js` (the ACP entrypoint) and `dist/pi-mcp-extension.js`
+(the per-session MCP bridge loaded by Pi). The package publishes the complete `dist/`
+directory; no user or project `mcp.json` is written.
+
+ACP stdio servers are mapped to Pi's native `command`/`args`/`env` configuration and
+streamable HTTP servers to `url`/`headers`. Legacy SSE and ACP transports are rejected
+with an ACP invalid-parameters error. Pi's own user/project configuration keeps its
+documented precedence for same-name, disabled, or replaced servers; the adapter does
+not claim tools that Pi does not expose.
 
 ## Install
 

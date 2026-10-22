@@ -26,7 +26,7 @@ import {
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
-import { PiRpcProcess } from '../pi-rpc/process.js'
+import { PiRpcMcpError, PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -200,28 +200,37 @@ export class PiAcpAgent implements ACPAgent {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...(opts?.mcpServers && opts.mcpServers.length > 0 ? { mcpServers: opts.mcpServers } : {})
         })
       } catch (e: any) {
         if (e?.name === 'PiRpcSpawnError') {
           throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
         }
+        if (e instanceof PiRpcMcpError) {
+          throw RequestError.invalidParams(e.message)
+        }
         throw e
       }
 
-      const fileCommands = loadSlashCommands(cwd)
-      const session = this.sessions.getOrCreate(sessionId, {
-        cwd,
-        mcpServers: opts?.mcpServers ?? [],
-        conn: this.conn,
-        proc,
-        fileCommands
-      })
+      try {
+        const fileCommands = loadSlashCommands(cwd)
+        const session = this.sessions.getOrCreate(sessionId, {
+          cwd,
+          mcpServers: opts?.mcpServers ?? [],
+          conn: this.conn,
+          proc,
+          fileCommands
+        })
 
-      this.lastSessionCwd = cwd
-      this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
+        this.lastSessionCwd = cwd
+        this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
 
-      return session
+        return session
+      } catch (error) {
+        proc.dispose()
+        throw error
+      }
     })()
 
     this.restoringSessions.set(sessionId, restorePromise)
@@ -252,7 +261,7 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        mcpCapabilities: { http: false, sse: false },
+        mcpCapabilities: { http: true, sse: false },
         promptCapabilities: {
           image: true,
           audio: false,
@@ -278,7 +287,6 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Pi doesn't support mcpServers, but we accept and store.
     const session = await this.sessions.create({
       cwd: params.cwd,
       mcpServers: params.mcpServers,

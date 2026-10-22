@@ -23,7 +23,7 @@
     "adapter"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "type": "module",
   "main": "dist/index.js",
@@ -51,15 +51,25 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@eslint/js": "^9.17.0",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.0.0",
     "eslint": "^9.17.0",
     "globals": "^15.14.0",
+    "pi-mcp-adapter": "7.0.0",
     "prettier": "^3.8.3",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.18.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }
