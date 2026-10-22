@@ -36,6 +36,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null
 }
 
+function setRecordValue<T>(record: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(record, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true
+  })
+}
+
+function escapeConfigValue(value: string): string {
+  return value.replaceAll('$', () => '$$').replaceAll('!', () => '$!')
+}
+
 function requireName(server: Record<string, unknown>): string {
   const name = server.name
   if (typeof name !== 'string' || !name) {
@@ -65,7 +78,7 @@ function mapEnvironment(serverName: string, value: unknown): Record<string, stri
       throw new McpBridgeError(`MCP server "${serverName}" has duplicate environment variable "${entry.name}"`)
     }
     seen.add(key)
-    env[entry.name] = entry.value
+    setRecordValue(env, entry.name, escapeConfigValue(entry.value))
   }
   return env
 }
@@ -88,7 +101,7 @@ function mapHeaders(serverName: string, value: unknown): Record<string, string> 
       throw new McpBridgeError(`MCP server "${serverName}" has duplicate HTTP header "${entry.name}"`)
     }
     seen.add(key)
-    headers[entry.name] = entry.value
+    setRecordValue(headers, entry.name, escapeConfigValue(entry.value))
   }
   return headers
 }
@@ -183,20 +196,20 @@ export function mapMcpServers(mcpServers: readonly McpServer[], cwd: string): Re
 
     if (type === 'stdio') {
       if (!hasCommand) throw new McpBridgeError(`MCP server "${name}" stdio transport needs a command`)
-      mapped[name] = mapStdioServer(name, server, cwd)
+      setRecordValue(mapped, name, mapStdioServer(name, server, cwd))
       continue
     }
     if (type === 'http' || type === 'streamable-http') {
       if (!hasUrl) throw new McpBridgeError(`MCP server "${name}" HTTP transport needs a url`)
-      mapped[name] = mapHttpServer(name, server)
+      setRecordValue(mapped, name, mapHttpServer(name, server))
       continue
     }
     if (hasUrl) {
-      mapped[name] = mapHttpServer(name, server)
+      setRecordValue(mapped, name, mapHttpServer(name, server))
       continue
     }
     if (hasCommand) {
-      mapped[name] = mapStdioServer(name, server, cwd)
+      setRecordValue(mapped, name, mapStdioServer(name, server, cwd))
       continue
     }
     throw new McpBridgeError(`MCP server "${name}" needs a command or streamable HTTP url`)

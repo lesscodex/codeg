@@ -31,13 +31,14 @@ function writeMcpServer(root: string): string {
       "const { appendFileSync } = require('node:fs')",
       "const readline = require('node:readline')",
       'const marker = process.env.PI_TEST_MCP_MARKER',
+      'const literal = process.env.PI_TEST_LITERAL',
       "const tools = [{ name: 'echo', description: 'deterministic echo', inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }]",
       "function reply(id, result) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n') }",
       "readline.createInterface({ input: process.stdin }).on('line', line => {",
       '  const request = JSON.parse(line)',
       "  if (request.method === 'initialize') reply(request.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1.0.0' } })",
       "  else if (request.method === 'tools/list') reply(request.id, { tools })",
-      "  else if (request.method === 'tools/call') { appendFileSync(marker, JSON.stringify(request.params) + '\\n'); reply(request.id, { content: [{ type: 'text', text: String(request.params.arguments?.value ?? '') }], isError: false }) }",
+      "  else if (request.method === 'tools/call') { appendFileSync(marker, JSON.stringify({ params: request.params, literal }) + '\\n'); reply(request.id, { content: [{ type: 'text', text: String(request.params.arguments?.value ?? '') }], isError: false }) }",
       '})',
       'process.stdin.resume()'
     ].join('\n'),
@@ -137,7 +138,10 @@ test(
             name: 'tools',
             command: process.execPath,
             args: [server],
-            env: [{ name: 'PI_TEST_MCP_MARKER', value: marker }]
+            env: [
+              { name: 'PI_TEST_MCP_MARKER', value: marker },
+              { name: 'PI_TEST_LITERAL', value: '${PI_ACP_LITERAL_DO_NOT_RESOLVE} !not-a-command' }
+            ]
           }
         ] as any
       })
@@ -161,8 +165,9 @@ test(
         .filter(Boolean)
         .map(line => JSON.parse(line))
       assert.equal(calls.length, 1)
-      assert.equal(calls[0].name, 'echo')
-      assert.deepEqual(calls[0].arguments, { value: 'deterministic' })
+      assert.equal(calls[0].params.name, 'echo')
+      assert.deepEqual(calls[0].params.arguments, { value: 'deterministic' })
+      assert.equal(calls[0].literal, '${PI_ACP_LITERAL_DO_NOT_RESOLVE} !not-a-command')
     } finally {
       proc?.dispose()
       await new Promise(resolve => setTimeout(resolve, 100))

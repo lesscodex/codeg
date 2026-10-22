@@ -12,13 +12,19 @@ test('MCP bridge maps ACP stdio and streamable HTTP transports', () => {
         name: 'local-tools',
         command: 'node',
         args: ['server.js', '--flag with spaces'],
-        env: [{ name: 'TOKEN', value: 'secret' }]
+        env: [
+          { name: 'TOKEN', value: 'secret' },
+          { name: 'LITERAL', value: '${NOT_SET} !not-a-command $HOME' }
+        ]
       },
       {
         type: 'http',
         name: 'remote_tools',
         url: 'https://example.test/mcp',
-        headers: [{ name: 'Authorization', value: 'Bearer test' }]
+        headers: [
+          { name: 'Authorization', value: 'Bearer test' },
+          { name: 'X-Literal', value: '!not-a-command ${NOT_SET}' }
+        ]
       } as any
     ] as any,
     cwd
@@ -29,15 +35,43 @@ test('MCP bridge maps ACP stdio and streamable HTTP transports', () => {
       exposure: 'direct',
       command: 'node',
       args: ['server.js', '--flag with spaces'],
-      env: { TOKEN: 'secret' },
+      env: {
+        TOKEN: 'secret',
+        LITERAL: '$${NOT_SET} $!not-a-command $$HOME'
+      },
       cwd
     },
     remote_tools: {
       exposure: 'direct',
       url: 'https://example.test/mcp',
-      headers: { Authorization: 'Bearer test' }
+      headers: {
+        Authorization: 'Bearer test',
+        'X-Literal': '$!not-a-command $${NOT_SET}'
+      }
     }
   })
+})
+
+test('MCP bridge preserves the legal __proto__ server name', () => {
+  const mapped = mapMcpServers([{ name: '__proto__', command: 'server', args: [], env: [] }] as any, cwd)
+
+  assert.equal(Object.prototype.hasOwnProperty.call(mapped, '__proto__'), true)
+  assert.deepEqual(mapped['__proto__'], {
+    exposure: 'direct',
+    command: 'server',
+    args: [],
+    env: {},
+    cwd
+  })
+
+  const bridge = createMcpBridge([{ name: '__proto__', command: 'server', args: [], env: [] }] as any, cwd)
+  assert.ok(bridge)
+  try {
+    const config = JSON.parse(readFileSync(bridge.configPath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(config.mcpServers, '__proto__'), true)
+  } finally {
+    bridge.cleanup()
+  }
 })
 
 test('MCP bridge rejects unsupported transports and Pi name collisions', () => {
