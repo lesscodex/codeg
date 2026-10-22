@@ -3048,7 +3048,7 @@ fn remove_deepseek_server_at(path: &Path, id: &str) -> Result<bool, AppCommandEr
 // Claude Code's (`command`/`args`/`env` | `url`/`headers`), which is codeg's
 // canonical shape, so no translation layer is needed (issue #653).
 //
-// SCAN-ONLY, in both directions:
+// SETTINGS POLICY:
 //
 //   - Not an assignable target. `APP_OPTIONS` in `mcp-settings.tsx` omits pi, so
 //     no checkbox can add a server here; the settings page carries an existing
@@ -3058,10 +3058,6 @@ fn remove_deepseek_server_at(path: &Path, id: &str) -> Result<bool, AppCommandEr
 //   - Still fully round-trippable. `Pi` IS in `ALL_MCP_APPS`, so editing an
 //     entry rewrites it in place and "uninstall" clears it — without that, a
 //     removed server would reappear at the next scan.
-//   - Nothing reaches pi over the wire. `read_servers_for_agent_type` returns an
-//     empty map for `AgentType::Pi` on purpose (pi-acp drops `session/new`'s
-//     `mcpServers`); do NOT wire it to `read_pi_servers` to "fix" the asymmetry.
-//
 // Registered LAST in `local_mcp_readers`, so on an id shared with an assignable
 // agent that agent's spec wins the merge — and a later save writes THAT spec
 // into this file. Any extension-specific key on the losing pi entry is lost
@@ -3712,9 +3708,8 @@ fn upsert_server_for_app(app: McpAppType, id: &str, spec: &Value) -> Result<(), 
 /// A thin door onto the MCP engine's reader
 /// (`mcp_engine::session::servers_for_session`), which a launch calls with
 /// the agent's own environment instead. What it leaves out — an entry the
-/// agent's flag turns off, pi's and a custom agent's (nothing reaches them
-/// over the wire), an entry named like the built-in companion — is told
-/// there.
+/// agent's flag turns off, a custom agent's, or an entry named like the
+/// built-in companion — is told there.
 pub fn read_servers_for_agent_type(
     agent_type: crate::models::agent::AgentType,
 ) -> Result<BTreeMap<String, Value>, AppCommandError> {
@@ -7694,12 +7689,11 @@ mod tests {
                 .unwrap();
             assert_eq!(remote.spec["type"], "http");
             assert_eq!(remote.spec["headers"]["X-Test"], "fixture");
-            // Discovery must neither rewrite the extension's file nor change ACP forwarding.
+            // Discovery must not rewrite the extension's file.
             assert_eq!(fs::read_to_string(&path).unwrap(), raw);
-            assert!(
-                read_servers_for_agent_type(crate::models::agent::AgentType::Pi)
-                    .unwrap()
-                    .is_empty()
+            assert_eq!(
+                read_servers_for_agent_type(crate::models::agent::AgentType::Pi).unwrap(),
+                read_pi_servers().unwrap()
             );
         });
     }

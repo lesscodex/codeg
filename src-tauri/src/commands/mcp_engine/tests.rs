@@ -2821,19 +2821,22 @@ args = ["no command"]
     }
 
     #[test]
-    fn pi_and_custom_agents_are_sent_nothing_and_a_broken_file_is_an_error() {
+    fn pi_servers_are_sent_custom_agents_are_not_and_a_broken_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let pi = dir.path().join("pi");
         write(
             &pi.join("mcp.json"),
             r#"{"mcpServers": {"p": {"command": "p"}}}"#,
         );
-        assert!(servers_for_session(
+        let sent = servers_for_session(
             AgentType::Pi,
-            &env(&[("PI_CODING_AGENT_DIR", pi.to_str().unwrap())])
+            &env(&[("PI_CODING_AGENT_DIR", pi.to_str().unwrap())]),
         )
-        .unwrap()
-        .is_empty());
+        .unwrap();
+        assert_eq!(
+            Value::Object(sent.into_iter().collect()),
+            json!({"p": {"type": "stdio", "command": "p"}})
+        );
         assert!(
             servers_for_session(AgentType::Custom("some-agent"), &AgentEnv::inherited())
                 .unwrap()

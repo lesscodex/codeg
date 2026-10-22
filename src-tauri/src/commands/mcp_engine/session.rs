@@ -23,7 +23,6 @@ use super::fsio;
 use super::inventory::to_entry;
 use super::model::McpSessionCapabilities;
 use super::store::{decode, read_view};
-use crate::commands::mcp::McpAppType;
 
 /// The servers to send `agent_type`, launched with `env`, at session start:
 /// name → `{type, command/args/env | url/headers}`.
@@ -32,9 +31,9 @@ pub(crate) fn servers_for_session(
     env: &AgentEnv,
 ) -> Result<BTreeMap<String, Value>, AppCommandError> {
     let mut out = BTreeMap::new();
-    // A custom agent has no config file codeg knows; pi-acp drops what it is
-    // sent, and scanning the pi extension's file must not change that.
-    let Some(app) = app_of(agent_type).filter(|app| *app != McpAppType::Pi) else {
+    // A custom agent has no config file codeg knows. Pi remains included: the
+    // maintained adapter bridges these entries over the ACP wire.
+    let Some(app) = app_of(agent_type) else {
         return Ok(out);
     };
     let spec = spec(app);
