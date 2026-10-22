@@ -2,3 +2,7 @@
 	path = src-tauri/vendor/codex-acp
 	url = ../codeg.git
 	branch = codex-acp
+[submodule "src-tauri/vendor/pi-acp"]
+	path = src-tauri/vendor/pi-acp
+	url = ../codeg.git
+	branch = pi-acp

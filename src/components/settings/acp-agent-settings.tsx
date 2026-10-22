@@ -4236,7 +4236,7 @@ export function latestReleaseOffer(
 
 /**
  * The explainer card for agents whose codeg entry is a third-party ACP
- * *adapter* rather than the vendor's own CLI — Claude Code and Codex.
+ * *adapter* rather than the vendor's own CLI — Claude Code, Codex and Pi.
  *
  * Ten of the twelve built-ins install the vendor CLI itself, so a user's
  * existing global install is simply detected. These two are the exception:
@@ -4273,6 +4273,28 @@ export function buildAcpAdapterCheck(
   // The English fallbacks mirror the four i18n messages one-for-one (they are
   // what renders if no translator is mounted), so each state keeps the detail
   // that state is about — above all, the path we found the vendor CLI at.
+  if (adapter.native_cmd === "pi") {
+    const message = installed
+      ? sawNative
+        ? `Adapter ${adapter.adapter_cmd} is packaged and launches the Pi CLI at ${adapter.native_path}; both use ${adapter.shared_config_dir}.`
+        : `Adapter ${adapter.adapter_cmd} is packaged, but the Pi CLI is still required on PATH (or via PI_ACP_PI_COMMAND).`
+      : sawNative
+        ? `The packaged ${adapter.adapter_cmd} is unavailable. Pi CLI was found at ${adapter.native_path}; Codeg also requires the repository-packaged adapter.`
+        : `The packaged ${adapter.adapter_cmd} is unavailable. Codeg requires the repository-packaged adapter and a Pi CLI on PATH (or via PI_ACP_PI_COMMAND).`
+    return {
+      check_id: "acp_adapter",
+      label: acpText("adapter.label", "ACP adapter"),
+      status: installed && sawNative ? "pass" : "warn",
+      message,
+      fixes: [
+        {
+          label: acpText("adapter.learnMore", "Learn more"),
+          kind: "open_url",
+          payload: adapter.docs_url,
+        },
+      ],
+    }
+  }
   if (adapter.native_required) {
     return {
       check_id: "acp_adapter",

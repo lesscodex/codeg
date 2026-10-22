@@ -498,8 +498,40 @@ fn grok_native_install(home: &Path, cmd: &str) -> Option<PathBuf> {
                 .get("installer")?
                 .as_str()
                 .map(str::to_string)
-        });
+    });
     (installer.as_deref() != Some("npm")).then_some(cand)
+}
+
+/// Resolve the Pi executable exactly as a launch will use it. Explicit Pi
+/// commands or PATH overrides stay confined to that launch environment;
+/// default `pi` uses the same PATH/`~/.local/bin`/npm-prefix fallback as the
+/// other managed npm agents.
+pub(crate) async fn resolve_pi_command_for_launch(
+    runtime_env: &BTreeMap<String, String>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    resolve_pi_command_for_launch_with(runtime_env, cwd, || resolve_npx_command("pi"))
+        .await
+        .map(|path| crate::paths::simplify_verbatim_path(&path))
+}
+
+async fn resolve_pi_command_for_launch_with<F, Fut>(
+    runtime_env: &BTreeMap<String, String>,
+    cwd: &Path,
+    default_resolver: F,
+) -> Option<PathBuf>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<PathBuf>>,
+{
+    let command = pi_command_for_env(runtime_env);
+    let explicit_environment = runtime_env
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("PATH"));
+    if command != "pi" || explicit_environment {
+        return resolve_pi_command_in(&command, runtime_env, cwd);
+    }
+    default_resolver().await
 }
 
 #[derive(Default)]
@@ -673,6 +705,19 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
         }
         return Ok(());
     }
+    if agent_type == AgentType::Pi {
+        if crate::acp::pi_backend::packaged_adapter_entry().is_none() {
+            return Err(AcpError::SdkNotInstalled(
+                "The repository-packaged Pi ACP adapter is not available".to_string(),
+            ));
+        }
+        if which::which("node").is_err() {
+            return Err(AcpError::SdkNotInstalled(
+                "Node.js is required to launch the packaged Pi ACP adapter".to_string(),
+            ));
+        }
+        return Ok(());
+    }
     match meta.distribution {
         registry::AgentDistribution::Npx { cmd, .. } => {
             if !is_cmd_available(agent_type, cmd).await {
@@ -802,9 +847,13 @@ async fn npm_list_version(
 
 async fn detect_local_version(agent_type: AgentType) -> Option<String> {
     let meta = registry::get_agent_meta(agent_type);
-    if agent_type == AgentType::Codex {
-        return crate::acp::codex_backend::packaged_adapter_entry()
-            .and_then(|_| meta.registry_version().map(str::to_string));
+    if matches!(agent_type, AgentType::Codex | AgentType::Pi) {
+        let _packaged_entry = if agent_type == AgentType::Codex {
+            crate::acp::codex_backend::packaged_adapter_entry()
+        } else {
+            crate::acp::pi_backend::packaged_adapter_entry()
+        }?;
+        return meta.registry_version().map(str::to_string);
     }
     match meta.distribution {
         registry::AgentDistribution::Npx { cmd, package, .. } => {
@@ -1143,13 +1192,17 @@ async fn collect_agent_diag(
             ..
         } => {
             diag.cmd = cmd.to_string();
-            let packaged_codex = agent_type == AgentType::Codex;
-            diag.distribution = if packaged_codex { "packaged" } else { "npx" };
+            let packaged_adapter = matches!(agent_type, AgentType::Codex | AgentType::Pi);
+            diag.distribution = if packaged_adapter { "packaged" } else { "npx" };
             diag.package = Some(package.to_string());
             diag.node_required = node_required.map(str::to_string);
 
-            if packaged_codex {
-                let packaged = crate::acp::codex_backend::packaged_adapter_entry()
+            if packaged_adapter {
+                let packaged = if agent_type == AgentType::Codex {
+                    crate::acp::codex_backend::packaged_adapter_entry()
+                } else {
+                    crate::acp::pi_backend::packaged_adapter_entry()
+                }
                     .map(|p| p.to_string_lossy().to_string());
                 diag.launchable = packaged.clone();
                 diag.resolve_npx = packaged;
@@ -11653,7 +11706,7 @@ pub async fn acp_preflight_core(
     if force_refresh.unwrap_or(false) {
         preflight::clear_npm_env_cache();
     }
-    let runtime_env = if agent_type == AgentType::ZCode {
+    let runtime_env = if matches!(agent_type, AgentType::ZCode | AgentType::Pi) {
         agent_setting_service::get_by_agent_type(&db.conn, agent_type)
             .await
             .map_err(|error| AcpError::protocol(error.to_string()))?
@@ -12362,8 +12415,12 @@ pub(crate) async fn acp_get_agent_status_core(
 
     let (available, installed_version) = match &meta.distribution {
         registry::AgentDistribution::Npx { cmd, package, .. } => {
-            if agent_type == AgentType::Codex {
-                let available = crate::acp::codex_backend::packaged_adapter_entry().is_some();
+            if matches!(agent_type, AgentType::Codex | AgentType::Pi) {
+                let available = if agent_type == AgentType::Codex {
+                    crate::acp::codex_backend::packaged_adapter_entry().is_some()
+                } else {
+                    crate::acp::pi_backend::packaged_adapter_entry().is_some()
+                };
                 let version = if available {
                     setting
                         .as_ref()
@@ -12484,8 +12541,12 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         let meta = registry::get_agent_meta(agent_type);
         let (available, dist_type, local_installed_version) = match &meta.distribution {
             registry::AgentDistribution::Npx { cmd, package, .. } => {
-                if agent_type == AgentType::Codex {
-                    let available = crate::acp::codex_backend::packaged_adapter_entry().is_some();
+                if matches!(agent_type, AgentType::Codex | AgentType::Pi) {
+                    let available = if agent_type == AgentType::Codex {
+                        crate::acp::codex_backend::packaged_adapter_entry().is_some()
+                    } else {
+                        crate::acp::pi_backend::packaged_adapter_entry().is_some()
+                    };
                     let version = if available {
                         setting
                             .and_then(|m| m.installed_version.clone())
@@ -14316,6 +14377,66 @@ pub(crate) async fn acp_prepare_npx_agent_core(
         return result;
     }
 
+    if agent_type == AgentType::Pi {
+        let result = if crate::acp::pi_backend::packaged_adapter_entry().is_none() {
+            Err(AcpError::SdkNotInstalled(
+                "The repository-packaged Pi ACP adapter is not available".to_string(),
+            ))
+        } else if which::which("node").is_err() {
+            Err(AcpError::SdkNotInstalled(
+                "Node.js is required to launch the packaged Pi ACP adapter".to_string(),
+            ))
+        } else {
+            let version = meta
+                .registry_version()
+                .map(str::to_string)
+                .or(registry_version)
+                .ok_or_else(|| {
+                    AcpError::protocol(
+                        "packaged Pi ACP adapter has no registry version metadata",
+                    )
+                });
+            match version {
+                Ok(version) => {
+                    match agent_setting_service::set_installed_version(
+                        &db.conn,
+                        agent_type,
+                        Some(version.clone()),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            emit_acp_agents_updated(
+                                emitter,
+                                "packaged_pi_ready",
+                                Some(agent_type),
+                            );
+                            Ok(version)
+                        }
+                        Err(error) => Err(AcpError::protocol(error.to_string())),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        };
+
+        match &result {
+            Ok(version) => emit_agent_install_event(
+                emitter,
+                &task_id,
+                AgentInstallEventKind::Completed,
+                format!("{} v{version} is already packaged", meta.name),
+            ),
+            Err(error) => emit_agent_install_event(
+                emitter,
+                &task_id,
+                AgentInstallEventKind::Failed,
+                error.to_string(),
+            ),
+        }
+        return result;
+    }
+
     let result = match meta.distribution {
         registry::AgentDistribution::Npx { package, cmd, .. } => {
             // `version_override` of None/empty keeps the registry-pinned spec;
@@ -14556,9 +14677,16 @@ pub(crate) async fn acp_uninstall_agent_core(
     emit_agent_install_event(emitter, &task_id, AgentInstallEventKind::Started, "");
 
     let meta = registry::get_agent_meta(agent_type);
-    if agent_type == AgentType::Codex {
+    if matches!(agent_type, AgentType::Codex | AgentType::Pi) {
+        let adapter_name = if agent_type == AgentType::Codex {
+            "Codex"
+        } else {
+            "Pi"
+        };
         let error = AcpError::protocol(
-            "Codex ACP is repository-packaged and cannot be uninstalled with npm",
+            format!(
+                "{adapter_name} ACP is repository-packaged and cannot be uninstalled with npm"
+            ),
         );
         emit_agent_install_event(
             emitter,
@@ -20471,6 +20599,31 @@ wire_api = "chat"
             Some(prefix_bin.join(with_npm).as_path()),
             "the npm copy still wins"
         );
+    }
+
+    #[tokio::test]
+    async fn pi_launch_resolution_uses_default_npx_fallback_outside_launch_path() {
+        let prefix = tempfile::tempdir().expect("Pi npm prefix");
+        let pi_path = npm_prefix_bin_dir(prefix.path()).join("pi");
+        std::fs::create_dir_all(pi_path.parent().expect("Pi bin directory"))
+            .expect("create Pi bin directory");
+        std::fs::write(&pi_path, "").expect("write Pi shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&pi_path, std::fs::Permissions::from_mode(0o755))
+                .expect("mark Pi shim executable");
+        }
+
+        let runtime_env = BTreeMap::new();
+        let cwd = tempfile::tempdir().expect("Pi workspace");
+        let resolved = resolve_pi_command_for_launch_with(&runtime_env, cwd.path(), || async {
+            resolve_npx_command_from_npm_prefix("pi", prefix.path())
+        })
+        .await;
+
+        assert_eq!(resolved.as_deref(), Some(pi_path.as_path()));
     }
 
     fn write_skill_md(name: &str, body: &str) -> (PathBuf, PathBuf) {
