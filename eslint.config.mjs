@@ -38,6 +38,7 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
     "src-tauri/target/**",
+    "src-tauri/build/staging/**",
     "src-tauri/experts/**",
     "public/vs/**",
     // PDF.js's worker and wasm-decoder fallbacks, copied out of
@@ -55,6 +56,8 @@ const eslintConfig = defineConfig([
     // Pinned codex-acp submodule. It keeps its upstream lint and formatting
     // contract; the root Codeg rules apply only to our packaging integration.
     "src-tauri/vendor/codex-acp/**",
+    // Maintained pi-acp keeps its own upstream lint and formatting contract.
+    "src-tauri/vendor/pi-acp/**",
     // esbuild's output, committed so a cargo build needs no node.
     "src-tauri/src/browser/js/**",
   ]),

@@ -3977,7 +3977,7 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
     const handlers = latestAttachHandlers()
     h.toastError.mockClear()
     const instructions =
-      "Pi is too old for this version of Codeg: opening a session needs Pi 0.81.0 or newer."
+      "Pi is too old for this version of Codeg: opening a session needs Pi 1.4.0 or newer."
     emitAcpEvent(handlers, {
       seq: 1,
       connection_id: "spawned-conn",

@@ -185,6 +185,26 @@ pub(crate) fn merge_agent_env(
     merge_agent_env_with_color(force_command_color_enabled(), env, runtime_env, scratch)
 }
 
+fn pin_pi_command_env(runtime_env: &mut BTreeMap<String, String>, pi_path: &Path) {
+    pin_pi_command_env_with_case_mode(runtime_env, pi_path, cfg!(windows));
+}
+
+fn pin_pi_command_env_with_case_mode(
+    runtime_env: &mut BTreeMap<String, String>,
+    pi_path: &Path,
+    windows_case_insensitive: bool,
+) {
+    if windows_case_insensitive {
+        runtime_env.retain(|key, _| !key.eq_ignore_ascii_case("PI_ACP_PI_COMMAND"));
+    } else {
+        runtime_env.remove("PI_ACP_PI_COMMAND");
+    }
+    runtime_env.insert(
+        "PI_ACP_PI_COMMAND".to_string(),
+        pi_path.to_string_lossy().into_owned(),
+    );
+}
+
 /// [`merge_agent_env`] with the color decision handed in.
 ///
 /// Split out for the same reason as [`antigravity_acp_dir_with_inherited`]: the
@@ -1541,46 +1561,46 @@ impl AgentConnection {
 
 /// Pi runs through pi-acp, which spawns the actual `pi` binary at runtime. If
 /// `pi` (or the BYO-pi `PI_ACP_PI_COMMAND` override) isn't resolvable, pi-acp
-/// dies mid-connection with a raw ENOENT. This preflight resolves the command
-/// the way that spawn will — a bare name on the launch env's `PATH` (which may
-/// carry the OfficeCLI prepend), a path against `cwd`, the session workspace pi
-/// is started in — and returns a clear message when it can't be found; `None`
-/// means launch may proceed.
+/// dies mid-connection with a raw ENOENT. This preflight uses the same shared
+/// resolver as Settings: explicit launch PATH/commands are honored, while the
+/// default `pi` also searches Codeg's local/npm-prefix install locations. The
+/// resolved absolute path is then pinned into the adapter environment.
 ///
-/// Deliberately NOT a version check. The pinned pi-acp needs pi
-/// [`registry::PI_MIN_RUNTIME_VERSION`], but asking `pi --version` would cost a
-/// process spawn on every connect, and a version string only guesses at the
-/// capability (a custom build may report anything, `0.0.0` included). Opening
-/// the session reports the real incompatibility instead — see
+/// Deliberately NOT a version check on every connection. Settings preflight
+/// reports the maintained release floor, while opening the session remains the
+/// authoritative capability check for custom builds — see
 /// [`pi_runtime_is_outdated`].
 ///
 /// The message contains the literal substring "is not installed", which the
 /// frontend matches to show the localized SDK-missing prompt with an "Open Agent
 /// Settings" action (see `src/contexts/acp-connections-context.tsx`). Do not
 /// change that substring.
-fn pi_launch_preflight(launch_env: &BTreeMap<String, String>, cwd: &Path) -> Option<String> {
-    let command = crate::commands::acp::pi_command_for_env(launch_env);
-    if crate::commands::acp::resolve_pi_command_in(&command, launch_env, cwd).is_some() {
-        return None;
-    }
-    Some(if command == "pi" {
-        "Pi is not installed. Install it with: \
-         npm install -g @earendil-works/pi-coding-agent \
-         (or set a custom pi command in Agent Settings → Pi → Runtime)."
-            .to_string()
-    } else {
-        format!(
-            "Pi is not installed: the custom pi command \"{command}\" was not found. \
-             Update it in Agent Settings → Pi → Runtime."
-        )
-    })
+async fn pi_launch_preflight(
+    runtime_env: &BTreeMap<String, String>,
+    cwd: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let command = crate::commands::acp::pi_command_for_env(runtime_env);
+    crate::commands::acp::resolve_pi_command_for_launch(runtime_env, cwd)
+        .await
+        .ok_or_else(|| {
+            if command == "pi" {
+                "Pi is not installed. Install it with: \
+                 npm install -g @earendil-works/pi-coding-agent \
+                 (or set a custom pi command in Agent Settings → Pi → Runtime)."
+                    .to_string()
+            } else {
+                format!(
+                    "Pi is not installed: the custom pi command \"{command}\" was not found. \
+                     Update it in Agent Settings → Pi → Runtime."
+                )
+            }
+        })
 }
 
 /// Whether a failed session open is pi-acp finding a pi too old for it.
 ///
-/// pi-acp 0.0.34 asks pi for the current model's thinking levels
-/// (`get_available_thinking_levels`, added in pi 0.81.0) while opening every
-/// session, and fails the open when that fails. An older pi answers with
+/// pi-acp 0.0.34 asks pi for the current model's thinking levels while opening
+/// every session, and fails the open when that fails. An older pi answers with
 /// `Unknown command: get_available_thinking_levels` (its wording for any unknown
 /// RPC), which pi-acp relays as `pi get_available_thinking_levels failed: …` —
 /// in the error message on `session/new`, and in `data.details` on
@@ -1984,6 +2004,37 @@ async fn build_agent(
         });
     }
 
+    if agent_type == AgentType::Pi {
+        let pi_path = match pi_launch_preflight(runtime_env, cwd).await {
+            Ok(path) => path,
+            Err(message) => return Err(AcpError::SdkNotInstalled(message)),
+        };
+        // Keep Pi's explicit project trust decision ahead of adapter startup:
+        // pi-acp launches `pi --mode rpc`, where extensions execute at startup.
+        if let Some(message) =
+            crate::commands::acp::pi_project_trust_launch_block(cwd, runtime_env)
+        {
+            return Err(AcpError::PiProjectTrustRequired(message));
+        }
+        // The npm-prefix/.local fallback may not be on the child PATH. Pin the
+        // exact resolved executable into the adapter's environment so its
+        // inner `pi --mode rpc` spawn uses the same file preflight verified.
+        let mut effective_runtime_env = runtime_env.clone();
+        pin_pi_command_env(&mut effective_runtime_env, &pi_path);
+        let agent = crate::acp::pi_backend::build_agent(
+            meta,
+            &effective_runtime_env,
+            stderr_tail,
+            scratch,
+        )
+        .await?;
+        return Ok(if cwd.is_dir() {
+            agent.with_current_dir(cwd)
+        } else {
+            agent
+        });
+    }
+
     let agent = match meta.distribution {
         AgentDistribution::Npx { cmd, args, env, .. } => {
             let mut merged_env = merge_agent_env(env, runtime_env, scratch);
@@ -1994,39 +2045,6 @@ async fn build_agent(
                     .map_err(|error| AcpError::protocol(error.to_string()))?;
                 runtime.apply(&mut merged_env);
                 zcode_runtime = Some(runtime);
-            }
-            // pi-acp spawns the real `pi` binary; fail fast with a clear,
-            // install-prompt-routable error if it (or a BYO-pi override) isn't
-            // resolvable, rather than letting pi-acp die mid-connection on a raw
-            // ENOENT that surfaces as an opaque protocol error.
-            if agent_type == AgentType::Pi {
-                let launch_env: BTreeMap<String, String> = merged_env.iter().cloned().collect();
-                if let Some(message) = pi_launch_preflight(&launch_env, cwd) {
-                    return Err(AcpError::SdkNotInstalled(message));
-                }
-                // NOTE: codeg deliberately does NOT touch pi's `trust.json` here.
-                // It used to mark this workspace trusted on every launch, which
-                // made pi load the repo's own `.pi/*` — including `.pi/extensions`,
-                // JS/TS modules whose top level executes at pi startup with the
-                // user's permissions, before any prompt is sent. Because pi-acp
-                // spawns `pi --mode rpc` (no UI), pi's own default is to skip those
-                // resources, so the seeding was the sole reason they ran. Trust is
-                // now an explicit per-workspace decision surfaced in the UI
-                // (`acp_pi_set_project_trust`).
-                //
-                // Dropping the seeding does NOT retract the grants it already
-                // wrote: they persist in pi's user-level store and are inherited
-                // by every subdirectory, so a repo cloned into a folder some
-                // earlier session trusted is trusted before it is ever opened.
-                // Since pi resolves trust at startup and runs extensions
-                // immediately, an unconfirmed grant has to stop the launch here —
-                // a notice shown once the connection is up comes after the code it
-                // warns about has already run.
-                if let Some(message) =
-                    crate::commands::acp::pi_project_trust_launch_block(cwd, runtime_env)
-                {
-                    return Err(AcpError::PiProjectTrustRequired(message));
-                }
             }
             let mut parts: Vec<String> = Vec::new();
             for (k, v) in &merged_env {
@@ -6740,14 +6758,8 @@ async fn send_new_session_capturing_models(
 }
 
 /// Whether MCP servers forwarded over the ACP wire (`session/new.mcpServers`)
-/// actually reach the agent's model. Almost all adapters deliver them; pi-acp
-/// (0.0.31) accepts the `mcpServers` field but DROPS it — it never forwards MCP
-/// to the inner `pi --mode rpc` process, and pi has no native MCP. So forwarding
-/// either user servers or the built-in codeg-mcp companion to pi is futile, and
-/// injecting codeg-mcp would falsely mark delegation/feedback/ask as available
-/// (`feedback_tool_available`, a registered delegation token pi can never use).
-/// `supports_mcp` stays `true` for pi (session/new tolerates the field), so this
-/// is a separate, narrower gate. Gate codeg-mcp injection on it.
+/// actually reach the agent's model. Maintained pi-acp bridges these entries
+/// into Pi's per-session extension, so it follows the normal wire path.
 ///
 /// Cline drops them the same way. Its ACP agent (`apps/cli/src/acp/acpAgent.ts`)
 /// keeps the `mcpServers` of `session/new` and `session/load` in its session
@@ -6760,7 +6772,7 @@ async fn send_new_session_capturing_models(
 /// through that file (see [`agent_reads_own_mcp_config`]); the codeg-mcp
 /// companion, which only travels over the wire, cannot.
 fn agent_delivers_wire_mcp(agent_type: AgentType) -> bool {
-    !matches!(agent_type, AgentType::Pi | AgentType::Cline)
+    agent_type != AgentType::Cline
 }
 
 /// Agents that load the MCP servers codeg's MCP settings manage from their OWN
@@ -26798,24 +26810,25 @@ mod tests {
         assert!(serialize_tool_call_content(&content, false).is_none());
     }
 
-    #[test]
-    fn pi_preflight_flags_missing_custom_command() {
+    #[tokio::test]
+    async fn pi_preflight_flags_missing_custom_command() {
         let mut env = BTreeMap::new();
         env.insert(
             "PI_ACP_PI_COMMAND".to_string(),
             "/nonexistent/definitely-not-pi-xyz".to_string(),
         );
         let msg = pi_launch_preflight(&env, &std::env::temp_dir())
-            .expect("an unresolvable custom pi command must be flagged");
+            .await
+            .expect_err("an unresolvable custom pi command must be flagged");
         // Frontend invariant: routes to the localized SDK-missing install prompt.
         assert!(msg.contains("is not installed"), "got: {msg}");
         assert!(msg.contains("definitely-not-pi-xyz"), "got: {msg}");
     }
 
-    #[test]
-    fn pi_preflight_accepts_resolvable_custom_command() {
+    #[tokio::test]
+    async fn pi_preflight_accepts_resolvable_custom_command() {
         // A binary we know exists and is executable on this platform — proves the
-        // preflight clears (returns None) for a resolvable PI_ACP_PI_COMMAND.
+        // preflight returns its resolved path for a resolvable PI_ACP_PI_COMMAND.
         let existing = if cfg!(windows) {
             "C:\\Windows\\System32\\cmd.exe"
         } else {
@@ -26823,14 +26836,16 @@ mod tests {
         };
         let mut env = BTreeMap::new();
         env.insert("PI_ACP_PI_COMMAND".to_string(), existing.to_string());
-        assert!(pi_launch_preflight(&env, &std::env::temp_dir()).is_none());
+        assert!(pi_launch_preflight(&env, &std::env::temp_dir())
+            .await
+            .is_ok());
     }
 
     /// A bare `pi` is looked up on the PATH the launch hands the child, which
     /// can differ from codeg's own (a per-agent override, the OfficeCLI prepend).
     #[cfg(unix)]
-    #[test]
-    fn pi_preflight_searches_the_launch_path() {
+    #[tokio::test]
+    async fn pi_preflight_searches_the_launch_path() {
         use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
         let pi = bin.path().join("pi");
@@ -26842,22 +26857,24 @@ mod tests {
             "PATH".to_string(),
             bin.path().to_string_lossy().into_owned(),
         );
-        assert!(pi_launch_preflight(&env, cwd.path()).is_none());
+        assert!(pi_launch_preflight(&env, cwd.path()).await.is_ok());
 
         let empty = tempfile::tempdir().unwrap();
         env.insert(
             "PATH".to_string(),
             empty.path().to_string_lossy().into_owned(),
         );
-        let msg = pi_launch_preflight(&env, cwd.path()).expect("no pi on the launch PATH");
+        let msg = pi_launch_preflight(&env, cwd.path())
+            .await
+            .expect_err("no pi on the launch PATH");
         assert!(msg.contains("is not installed"), "got: {msg}");
     }
 
     /// A relative `PATH` entry is searched inside the workspace, where pi-acp's
     /// spawn runs — never in codeg's own cwd.
     #[cfg(unix)]
-    #[test]
-    fn pi_preflight_anchors_a_relative_path_entry_in_the_workspace() {
+    #[tokio::test]
+    async fn pi_preflight_anchors_a_relative_path_entry_in_the_workspace() {
         use std::os::unix::fs::PermissionsExt;
         let workspace = tempfile::tempdir().unwrap();
         std::fs::create_dir(workspace.path().join("tools")).unwrap();
@@ -26865,14 +26882,14 @@ mod tests {
         std::fs::write(&pi, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
         let env = BTreeMap::from([("PATH".to_string(), "tools".to_string())]);
-        assert!(pi_launch_preflight(&env, workspace.path()).is_none());
+        assert!(pi_launch_preflight(&env, workspace.path()).await.is_ok());
     }
 
     /// pi-acp spawns a relative command with the session's workspace as cwd, so
     /// that is where it must exist — not in codeg's own cwd.
     #[cfg(unix)]
-    #[test]
-    fn pi_preflight_resolves_a_relative_command_in_the_workspace() {
+    #[tokio::test]
+    async fn pi_preflight_resolves_a_relative_command_in_the_workspace() {
         use std::os::unix::fs::PermissionsExt;
         let workspace = tempfile::tempdir().unwrap();
         let script = workspace.path().join("pi-test.sh");
@@ -26880,10 +26897,10 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut env = BTreeMap::new();
         env.insert("PI_ACP_PI_COMMAND".to_string(), "./pi-test.sh".to_string());
-        assert!(pi_launch_preflight(&env, workspace.path()).is_none());
+        assert!(pi_launch_preflight(&env, workspace.path()).await.is_ok());
 
         let elsewhere = tempfile::tempdir().unwrap();
-        assert!(pi_launch_preflight(&env, elsewhere.path()).is_some());
+        assert!(pi_launch_preflight(&env, elsewhere.path()).await.is_err());
     }
 
     /// The two answers pi-acp 0.0.34 gives when pi predates
@@ -35722,6 +35739,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pi_absolute_path_pin_removes_case_variant_on_windows() {
+        let mut runtime_env = BTreeMap::from([
+            ("pi_acp_pi_command".to_string(), "pi".to_string()),
+            ("PI_ACP_PI_COMMAND".to_string(), "old-pi".to_string()),
+        ]);
+        pin_pi_command_env_with_case_mode(
+            &mut runtime_env,
+            Path::new("C:\\npm-prefix\\pi.cmd"),
+            true,
+        );
+
+        let matches: Vec<_> = runtime_env
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("PI_ACP_PI_COMMAND"))
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, "PI_ACP_PI_COMMAND");
+        assert_eq!(matches[0].1, "C:\\npm-prefix\\pi.cmd");
+    }
+
     /// All three names, every time. Setting only `TMPDIR` would leave `TMP`
     /// inherited from codeg's own environment, and `GetTempPathW` reads `TMP`
     /// first.
@@ -36969,6 +37007,32 @@ mod tests {
             .position(|a| a == "--features")
             .map(|i| server.args[i + 1].clone());
         assert_eq!(features.as_deref(), Some("result"));
+        assert!(injection.tokens.lookup(&injected.token).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn pi_wire_path_can_receive_the_standard_codeg_mcp_companion() {
+        assert!(agent_delivers_wire_mcp(AgentType::Pi));
+        let injection = test_delegation_injection(
+            Arc::new(TestAllAgentsAvailable) as Arc<dyn AgentAvailabilityLookup>
+        );
+        let mut servers = Vec::new();
+        let injected = inject_codeg_mcp_with_binary_locator(
+            &mut servers,
+            &injection,
+            "pi-parent",
+            std::path::Path::new("/tmp"),
+            LaunchGroups {
+                tasks: false,
+                result: true,
+            },
+            HostToolsPolicy::Agent,
+            || Some(PathBuf::from("/opt/codeg/codeg-mcp")),
+        )
+        .await
+        .expect("Pi should use the standard companion injection path");
+
+        assert_eq!(servers.len(), 1);
         assert!(injection.tokens.lookup(&injected.token).await.is_some());
     }
 
@@ -42322,8 +42386,8 @@ mod wire_mcp_gate_tests {
     }
 
     #[test]
-    fn pi_stays_off_the_wire_and_the_rest_stay_on_it() {
-        assert!(!agent_delivers_wire_mcp(AgentType::Pi));
+    fn pi_and_the_other_wire_agents_stay_on_it_but_cline_does_not() {
+        assert!(agent_delivers_wire_mcp(AgentType::Pi));
         for agent_type in [
             AgentType::ClaudeCode,
             AgentType::Codex,
@@ -42340,6 +42404,38 @@ mod wire_mcp_gate_tests {
         }
         // DeepSeek reads no MCP file at all: the wire is its only channel.
         assert!(!agent_reads_own_mcp_config(AgentType::DeepSeek));
+    }
+
+    #[test]
+    fn pi_session_new_and_load_forward_user_mcp_servers() {
+        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let servers = vec![McpServer::Stdio(McpServerStdio::new(
+            "user-server",
+            std::path::PathBuf::from("/usr/local/bin/node"),
+        ))];
+        let new_req = build_new_session_request(AgentType::Pi, &cwd, servers.clone(), true);
+        assert_eq!(new_req.mcp_servers.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&new_req.mcp_servers[0])
+                .unwrap()
+                .get("name"),
+            Some(&serde_json::json!("user-server"))
+        );
+
+        let load_req = build_load_session_request(
+            AgentType::Pi,
+            SessionId::new("pi-session".to_string()),
+            &cwd,
+            servers,
+            true,
+        );
+        assert_eq!(load_req.mcp_servers.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&load_req.mcp_servers[0])
+                .unwrap()
+                .get("name"),
+            Some(&serde_json::json!("user-server"))
+        );
     }
 
     // TRAE CLI starts both the servers in its `traecli.toml` and the ones on

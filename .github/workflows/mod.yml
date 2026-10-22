@@ -325,8 +325,10 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Stage codex-acp adapter
-        run: pnpm tauri:stage-codex-acp
+      - name: Stage ACP adapters
+        run: |
+          pnpm tauri:stage-codex-acp
+          pnpm tauri:stage-pi-acp
 
       - name: Build server + codeg-mcp companion + codeg-cli
         working-directory: src-tauri
@@ -352,6 +354,7 @@ jobs:
           cp src-tauri/target/${{ matrix.target }}/release/codeg-mcp dist/${{ matrix.artifact }}/
           cp src-tauri/target/${{ matrix.target }}/release/codeg-cli dist/${{ matrix.artifact }}/
           cp -r src-tauri/build/staging/codex-acp dist/${{ matrix.artifact }}/codex-acp
+          cp -r src-tauri/build/staging/pi-acp dist/${{ matrix.artifact }}/pi-acp
           chmod +x dist/${{ matrix.artifact }}/codeg-server dist/${{ matrix.artifact }}/codeg-mcp dist/${{ matrix.artifact }}/codeg-cli
           cp -r out dist/${{ matrix.artifact }}/web
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
@@ -365,6 +368,7 @@ jobs:
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-mcp.exe dist/${{ matrix.artifact }}/
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-cli.exe dist/${{ matrix.artifact }}/
           Copy-Item -Recurse src-tauri/build/staging/codex-acp dist/${{ matrix.artifact }}/codex-acp
+          Copy-Item -Recurse src-tauri/build/staging/pi-acp dist/${{ matrix.artifact }}/pi-acp
           Copy-Item -Recurse out dist/${{ matrix.artifact }}/web
           Compress-Archive -Path dist/${{ matrix.artifact }} -DestinationPath dist/${{ matrix.artifact }}.zip
 
@@ -379,6 +383,11 @@ jobs:
           test -f "dist/${{ matrix.artifact }}/codex-acp/package.json"
           test -f "dist/${{ matrix.artifact }}/codex-acp/runtime-prerequisites.json"
           test -f "dist/${{ matrix.artifact }}/codex-acp/node_modules/@openai/codex/bin/codex.js"
+          test -f "dist/${{ matrix.artifact }}/pi-acp/dist/index.js"
+          test -f "dist/${{ matrix.artifact }}/pi-acp/dist/pi-mcp-extension.js"
+          test -f "dist/${{ matrix.artifact }}/pi-acp/package.json"
+          test -f "dist/${{ matrix.artifact }}/pi-acp/runtime-prerequisites.json"
+          test -f "dist/${{ matrix.artifact }}/pi-acp/node_modules/@agentclientprotocol/sdk/package.json"
 
       - name: Verify packaged artifact (Windows)
         if: runner.os == 'Windows'
@@ -404,6 +413,21 @@ jobs:
           }
           if (-not (Test-Path "dist/${{ matrix.artifact }}/codex-acp/node_modules/@openai/codex/bin/codex.js")) {
             throw "bundled Codex runtime missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/pi-acp/dist/index.js")) {
+            throw "pi-acp build output missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/pi-acp/dist/pi-mcp-extension.js")) {
+            throw "pi-acp MCP extension missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/pi-acp/package.json")) {
+            throw "pi-acp package.json missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/pi-acp/runtime-prerequisites.json")) {
+            throw "pi-acp runtime prerequisites missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/pi-acp/node_modules/@agentclientprotocol/sdk/package.json")) {
+            throw "bundled pi-acp production dependencies missing from packaged artifact"
           }
 
       - name: Upload artifact for Docker build (Linux only)
@@ -466,6 +490,7 @@ jobs:
           cp artifacts/linux-x64/codeg-mcp dist/amd64/codeg-mcp
           cp artifacts/linux-x64/codeg-cli dist/amd64/codeg-cli
           cp -r artifacts/linux-x64/codex-acp dist/amd64/codex-acp
+          cp -r artifacts/linux-x64/pi-acp dist/amd64/pi-acp
           # cp artifacts/linux-arm64/codeg-server dist/arm64/codeg-server
           # cp artifacts/linux-arm64/codeg-mcp dist/arm64/codeg-mcp
           # cp artifacts/linux-arm64/codeg-cli dist/arm64/codeg-cli
@@ -483,6 +508,11 @@ jobs:
           test -f dist/amd64/codex-acp/package.json
           test -f dist/amd64/codex-acp/runtime-prerequisites.json
           test -f dist/amd64/codex-acp/node_modules/@openai/codex/bin/codex.js
+          test -f dist/amd64/pi-acp/dist/index.js
+          test -f dist/amd64/pi-acp/dist/pi-mcp-extension.js
+          test -f dist/amd64/pi-acp/package.json
+          test -f dist/amd64/pi-acp/runtime-prerequisites.json
+          test -f dist/amd64/pi-acp/node_modules/@agentclientprotocol/sdk/package.json
 
       # - name: Set up QEMU
       #   uses: docker/setup-qemu-action@v3

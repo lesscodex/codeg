@@ -359,13 +359,13 @@ pub fn from_registry_id(id: &str) -> Option<AgentType> {
 /// The vendor CLI wrapped by a codeg entry that is really a THIRD-PARTY ACP
 /// *adapter*.
 ///
-/// All but three of the built-ins distribute the vendor's own CLI (or, for
+/// All but four of the built-ins distribute the vendor's own CLI (or, for
 /// Antigravity, the vendor's own ACP server), so a user's existing global
 /// install is found by the launch gate as-is. Claude Code and
-/// Codex wrap their CLIs through ACP adapters: neither `claude` nor `codex` speaks ACP, so codeg
-/// installs a separate adapter package (`claude-agent-acp` / `codex-acp`,
-/// maintained by the Agent Client Protocol org) whose command name has nothing
-/// to do with the vendor CLI's. That mismatch is the single most reported
+/// Codex and Pi wrap their CLIs through ACP adapters: neither `claude`, `codex`
+/// nor `pi` speaks ACP, so codeg installs a separate adapter package
+/// (`claude-agent-acp` / `codex-acp` / maintained `pi-acp`) whose command name
+/// has nothing to do with the vendor CLI's. That mismatch is the single most reported
 /// confusion ("I have claude installed, why does codeg say it isn't?"), so
 /// preflight and diagnostics probe the vendor CLI too and explain the split.
 /// ZCode uses a community adapter which requires the official ZCode runtime.
@@ -408,6 +408,13 @@ pub fn acp_adapter_relation(agent_type: AgentType) -> Option<AcpAdapterRelation>
             extra_dirs: &[".local/bin"],
             docs_url: ACP_ADAPTER_DOCS_URL,
         }),
+        AgentType::Pi => Some(AcpAdapterRelation {
+            native_cmd: "pi",
+            native_label: "Pi coding agent",
+            shared_config_dir: "~/.pi",
+            extra_dirs: &[".local/bin"],
+            docs_url: ACP_ADAPTER_DOCS_URL,
+        }),
         AgentType::ZCode => Some(AcpAdapterRelation {
             native_cmd: "zcode",
             native_label: "ZCode CLI",
@@ -445,13 +452,11 @@ pub fn binary_system_dirs(agent_type: AgentType) -> &'static [&'static str] {
 /// the same explicit `{#acp-adapters}` anchor.
 const ACP_ADAPTER_DOCS_URL: &str = "https://docs.codeg.app/guide/supported-agents#acp-adapters";
 
-/// The oldest pi the pinned pi-acp can open a session with. pi-acp 0.0.34 asks
-/// pi for the current model's thinking levels (`get_available_thinking_levels`,
-/// new in pi 0.81.0) on every `session/new` and `session/load`, and fails the
-/// open without it. Move it with the pin (see `AgentType::Pi` below); the
-/// settings panel warns with the same value (`PI_MIN_RUNTIME_VERSION` in
-/// `src/lib/pi-config.ts`, held equal by a test).
-pub const PI_MIN_RUNTIME_VERSION: &str = "0.81.0";
+/// The oldest Pi runtime supported by the maintained pi-acp branch. Move it
+/// with that source pin (see `AgentType::Pi` below); the settings panel warns
+/// with the same value (`PI_MIN_RUNTIME_VERSION` in `src/lib/pi-config.ts`,
+/// held equal by a test).
+pub const PI_MIN_RUNTIME_VERSION: &str = "1.4.0";
 
 /// The npm package the built-in Claude Code entry runs — and the name the
 /// adapter reports as `agentInfo.name` at `initialize`, which is its
@@ -4497,12 +4502,9 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
         },
         AgentType::Pi => AcpAgentMeta {
             agent_type,
-            // pi-acp accepts ACP-wire `mcpServers` but drops them (does not
-            // forward to pi), and pi has no native MCP. supports_mcp stays
-            // `true` only to satisfy the `only_openclaw_opts_out_of_mcp`
-            // invariant — actual wire forwarding is short-circuited in
-            // `connection.rs` (see the skip-list), so neither user servers nor
-            // the codeg-mcp companion are futilely forwarded.
+            // The maintained pi-acp branch bridges ACP-wire `mcpServers` into
+            // Pi's per-session extension. The Pi CLI remains a separate
+            // runtime prerequisite and is not bundled with this adapter.
             supports_mcp: true,
             name: "Pi",
             description: "Self-extensible coding agent (ACP via pi-acp)",
@@ -4510,17 +4512,15 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // `@earendil-works/pi-coding-agent`, at least
             // `PI_MIN_RUNTIME_VERSION`) must be resolvable on PATH — or
             // pointed at a custom build via the `PI_ACP_PI_COMMAND` env (see
-            // BYO-pi). Args are empty: the ACP server is the default mode
-            // (`npx -y pi-acp`, no subcommand). `node_required` follows pi's
-            // 22+ requirement (pi-acp's own engines say >=20). The embedded
-            // context env lets pi-acp advertise `promptCapabilities.embeddedContext`.
+            // BYO-pi). Args are empty: the ACP server is the default mode.
+            // Node follows the maintained adapter's engine requirement.
             distribution: AgentDistribution::Npx {
                 version: "0.0.34",
                 package: "pi-acp@0.0.34",
                 cmd: "pi-acp",
                 args: &[],
                 env: &[("PI_ACP_ENABLE_EMBEDDED_CONTEXT", "true")],
-                node_required: Some("22.0.0"),
+                node_required: Some("22.19.0"),
             },
         },
         AgentType::Grok => AcpAgentMeta {
@@ -6093,7 +6093,7 @@ mod tests {
             "@agentclientprotocol/codex-acp@2.2.2",
             Some("20.3.0"),
         );
-        assert_npx_version(AgentType::Pi, "0.0.34", "pi-acp@0.0.34", Some("22.0.0"));
+        assert_npx_version(AgentType::Pi, "0.0.34", "pi-acp@0.0.34", Some("22.19.0"));
         assert_npx_version(
             AgentType::Grok,
             "1.0.62",
@@ -6198,7 +6198,7 @@ mod tests {
         assert!(!launch_spec_uses_cursor_acp("cursor-agent", &["stdio"]));
     }
 
-    // Only Claude Code and Codex ship as a third-party ACP adapter wrapping a
+    // Claude Code, Codex and Pi ship as maintained ACP adapters wrapping a
     // vendor CLI of a different name. Every other agent's registry `cmd` IS the
     // vendor CLI, so claiming an adapter relation for one would make preflight
     // explain a split that doesn't exist.
@@ -6208,7 +6208,7 @@ mod tests {
             let relation = acp_adapter_relation(agent_type);
             let expected = matches!(
                 agent_type,
-                AgentType::ClaudeCode | AgentType::Codex | AgentType::ZCode
+                AgentType::ClaudeCode | AgentType::Codex | AgentType::Pi | AgentType::ZCode
             );
             assert_eq!(
                 relation.is_some(),

@@ -98,6 +98,15 @@ pub async fn run_preflight_with_env(
             _ => None,
         })
         .await
+    } else if agent_type == AgentType::Pi {
+        check_packaged_pi_environment(
+            match &meta.distribution {
+                AgentDistribution::Npx { node_required, .. } => *node_required,
+                _ => None,
+            },
+            runtime_env,
+        )
+        .await
     } else {
         match &meta.distribution {
             AgentDistribution::Npx { node_required, .. } => {
@@ -124,7 +133,7 @@ pub async fn run_preflight_with_env(
         }
     };
 
-    let mut adapter = probe_adapter(&meta).await;
+    let mut adapter = probe_adapter(&meta, runtime_env).await;
     if agent_type == AgentType::ZCode {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let runtime = crate::acp::zcode::resolve_runtime(runtime_env, &cwd).await;
@@ -240,28 +249,40 @@ fn zcode_checks(
 /// sequence would pay `NPM_PREFIX_TIMEOUT` twice per adapter agent; overlapping
 /// them costs the same two spawns but bounds the added Settings latency to one
 /// timeout.
-/// Codex instead checks its packaged entry and resolves only its native CLI for
-/// the explainer.
-async fn probe_adapter(meta: &AcpAgentMeta) -> Option<AdapterInfo> {
+/// Packaged adapters check their staged entry and resolve only their native CLI
+/// for the explainer.
+async fn probe_adapter(
+    meta: &AcpAgentMeta,
+    runtime_env: &std::collections::BTreeMap<String, String>,
+) -> Option<AdapterInfo> {
     let relation = registry::acp_adapter_relation(meta.agent_type)?;
     let adapter_cmd = match &meta.distribution {
         AgentDistribution::Npx { cmd, .. } => *cmd,
-        // Both adapters are npx-distributed; a future non-npx one would need a
+        // These adapters are npx-distributed; a future non-npx one would need a
         // launchability probe of its own rather than a silently wrong answer.
         _ => return None,
     };
-    let (adapter_installed, native_path) = if meta.agent_type == AgentType::Codex {
-        (
-            crate::acp::codex_backend::packaged_adapter_entry().is_some(),
-            crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs)
-                .await,
-        )
-    } else {
-        tokio::join!(
-            crate::commands::acp::is_cmd_available(meta.agent_type, adapter_cmd),
-            crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs),
-        )
-    };
+    let (adapter_installed, native_path) =
+        if matches!(meta.agent_type, AgentType::Codex | AgentType::Pi) {
+            let packaged = if meta.agent_type == AgentType::Codex {
+                crate::acp::codex_backend::packaged_adapter_entry().is_some()
+            } else {
+                crate::acp::pi_backend::packaged_adapter_entry().is_some()
+            };
+            let native_path = if meta.agent_type == AgentType::Pi {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                crate::commands::acp::resolve_pi_command_for_launch(runtime_env, &cwd).await
+            } else {
+                crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs)
+                    .await
+            };
+            (packaged, native_path)
+        } else {
+            tokio::join!(
+                crate::commands::acp::is_cmd_available(meta.agent_type, adapter_cmd),
+                crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs),
+            )
+        };
 
     Some(build_adapter_info(
         meta,
@@ -287,7 +308,7 @@ fn build_adapter_info(
         adapter_package,
         adapter_cmd,
         adapter_installed,
-        native_required: meta.agent_type == AgentType::ZCode,
+        native_required: matches!(meta.agent_type, AgentType::Pi | AgentType::ZCode),
         native_cmd: relation.native_cmd.to_string(),
         native_label: relation.native_label.to_string(),
         native_path,
@@ -296,11 +317,10 @@ fn build_adapter_info(
     }
 }
 
-/// The packaged Codex adapter requires Node and the staged entry file, not npm
-/// or a globally-installed `codex-acp` command. Keep native `codex` discovery
-/// in [`probe_adapter`] separate so the shared-config explanation remains
-/// useful without turning it into a launch dependency.
-async fn check_packaged_codex_environment(node_required: Option<&str>) -> Vec<CheckItem> {
+/// The packaged adapters require Node and their staged entry files, not npm or
+/// a globally-installed adapter command. Keep vendor CLI discovery separate so
+/// the shared-config explanation remains useful without changing launch policy.
+async fn check_packaged_node_environment(node_required: Option<&str>) -> Vec<CheckItem> {
     let node_path = which::which("node").ok();
     let node_result = match &node_path {
         Some(path) => {
@@ -347,6 +367,11 @@ async fn check_packaged_codex_environment(node_required: Option<&str>) -> Vec<Ch
             checks.push(build_node_version_check(node_version.as_deref(), required));
         }
     }
+    checks
+}
+
+async fn check_packaged_codex_environment(node_required: Option<&str>) -> Vec<CheckItem> {
+    let mut checks = check_packaged_node_environment(node_required).await;
     let packaged = crate::acp::codex_backend::packaged_adapter_entry().is_some();
     checks.push(CheckItem {
         check_id: "codex_adapter_packaged".into(),
@@ -364,6 +389,92 @@ async fn check_packaged_codex_environment(node_required: Option<&str>) -> Vec<Ch
         fixes: vec![],
     });
     checks
+}
+
+async fn check_packaged_pi_environment(
+    node_required: Option<&str>,
+    runtime_env: &std::collections::BTreeMap<String, String>,
+) -> Vec<CheckItem> {
+    let mut checks = check_packaged_node_environment(node_required).await;
+    let packaged = crate::acp::pi_backend::packaged_adapter_entry().is_some();
+    checks.push(CheckItem {
+        check_id: "pi_adapter_packaged".into(),
+        label: "Pi ACP adapter".into(),
+        status: if packaged {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        message: if packaged {
+            "Repository-packaged pi-acp adapter is available".into()
+        } else {
+            "Repository-packaged pi-acp adapter is missing".into()
+        },
+        fixes: vec![],
+    });
+
+    checks.push(check_pi_runtime(runtime_env).await);
+    checks
+}
+
+async fn check_pi_runtime(runtime_env: &std::collections::BTreeMap<String, String>) -> CheckItem {
+    let command = crate::commands::acp::pi_command_for_env(runtime_env);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let Some(path) = crate::commands::acp::resolve_pi_command_for_launch(runtime_env, &cwd).await
+    else {
+        return CheckItem {
+            check_id: "pi_available".into(),
+            label: "Pi CLI".into(),
+            status: CheckStatus::Fail,
+            message: if command == "pi" {
+                "Pi CLI is not installed or not in PATH".into()
+            } else {
+                format!("Pi CLI command is not available: {command}")
+            },
+            fixes: vec![],
+        };
+    };
+
+    let mut version_command = crate::process::tokio_command(&path);
+    for (key, value) in runtime_env {
+        version_command.env(key, value);
+    }
+    let output = version_command.arg("--version").output().await;
+    let version = output.ok().and_then(|result| {
+        result.status.success().then(|| {
+            String::from_utf8_lossy(&result.stdout)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
+    });
+    let status = match version.as_deref().and_then(parse_node_version) {
+        Some(current) => match parse_node_version(crate::acp::registry::PI_MIN_RUNTIME_VERSION) {
+            Some(required) if current < required => CheckStatus::Fail,
+            _ => CheckStatus::Pass,
+        },
+        None => CheckStatus::Warn,
+    };
+    let message = match (version.as_deref(), &status) {
+        (Some(version), &CheckStatus::Fail) => format!(
+            "Pi CLI {version} is too old; Pi {} or newer is required",
+            crate::acp::registry::PI_MIN_RUNTIME_VERSION
+        ),
+        (Some(version), _) => format!("Pi CLI {version} available"),
+        (None, _) => format!(
+            "Pi CLI is available, but its version could not be verified ({} required)",
+            crate::acp::registry::PI_MIN_RUNTIME_VERSION
+        ),
+    };
+    CheckItem {
+        check_id: "pi_version".into(),
+        label: "Pi CLI version".into(),
+        status,
+        message,
+        fixes: vec![],
+    }
 }
 
 async fn check_npm_environment(node_required: Option<&str>) -> Vec<CheckItem> {
@@ -1041,6 +1152,19 @@ mod adapter_tests {
         assert_eq!(info.shared_config_dir, "~/.codex");
     }
 
+    #[test]
+    fn pi_adapter_info_keeps_the_cli_as_a_separate_runtime() {
+        let info = info_for(AgentType::Pi, Some("/usr/local/bin/pi"), true);
+        assert_eq!(info.adapter_package, "pi-acp@0.0.34");
+        assert_eq!(info.adapter_cmd, "pi-acp");
+        assert!(info.adapter_installed);
+        assert_eq!(info.native_cmd, "pi");
+        assert_eq!(info.native_label, "Pi coding agent");
+        assert_eq!(info.native_path.as_deref(), Some("/usr/local/bin/pi"));
+        assert!(info.native_required);
+        assert_eq!(info.shared_config_dir, "~/.pi");
+    }
+
     // Non-adapter agents must produce nothing: `probe_adapter` short-circuits
     // on the registry relation, so an agent whose `cmd` IS the vendor CLI never
     // gets an explainer claiming otherwise.
@@ -1054,10 +1178,58 @@ mod adapter_tests {
         ] {
             let meta = registry::get_agent_meta(agent_type);
             assert!(
-                probe_adapter(&meta).await.is_none(),
+                probe_adapter(&meta, &std::collections::BTreeMap::new())
+                    .await
+                    .is_none(),
                 "unexpected adapter info for {agent_type:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pi_adapter_probe_uses_the_configured_runtime_command() {
+        let meta = registry::get_agent_meta(AgentType::Pi);
+        let custom_command = std::env::current_exe().expect("current executable");
+        let custom_path = custom_command.to_string_lossy().into_owned();
+        let mut runtime_env = std::collections::BTreeMap::new();
+        runtime_env.insert(
+            "PI_ACP_PI_COMMAND".to_string(),
+            custom_path.clone(),
+        );
+
+        let info = probe_adapter(&meta, &runtime_env)
+            .await
+            .expect("Pi has an adapter relation");
+        assert_eq!(
+            info.native_path.as_deref(),
+            Some(custom_path.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pi_version_probe_inherits_configured_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temporary Pi wrapper directory");
+        let wrapper = dir.path().join("pi-wrapper");
+        std::fs::write(&wrapper, "#!/bin/sh\nprintf '%s\\n' \"$PI_TEST_VERSION\"\n")
+            .expect("write Pi wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("Pi wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("make Pi wrapper executable");
+
+        let mut runtime_env = std::collections::BTreeMap::new();
+        runtime_env.insert(
+            "PI_ACP_PI_COMMAND".to_string(),
+            wrapper.to_string_lossy().into_owned(),
+        );
+        runtime_env.insert("PI_TEST_VERSION".to_string(), "1.4.0".to_string());
+
+        let check = check_pi_runtime(&runtime_env).await;
+        assert!(matches!(check.status, CheckStatus::Pass), "{check:?}");
     }
 
     #[test]

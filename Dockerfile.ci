@@ -34,6 +34,7 @@ COPY dist/${TARGETARCH}/codeg-cli /usr/local/bin/codeg-cli
 # runtime-prerequisites.json records that its external Codex executable must
 # be supplied through CODEX_PATH when the artifact is launched in the future.
 COPY dist/${TARGETARCH}/codex-acp /opt/codeg/codex-acp
+COPY dist/${TARGETARCH}/pi-acp /opt/codeg/pi-acp
 COPY dist/web /app/web
 
 ENV CODEG_STATIC_DIR=/app/web
