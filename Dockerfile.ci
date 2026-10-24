@@ -30,6 +30,10 @@ COPY dist/${TARGETARCH}/codeg-mcp /usr/local/bin/codeg-mcp
 # codeg-cli: `docker exec <container> codeg-cli run …` finds this server through
 # its discovery file under CODEG_DATA_DIR (/data/cli).
 COPY dist/${TARGETARCH}/codeg-cli /usr/local/bin/codeg-cli
+# Repository-owned Node ESM adapter staged from the pinned codex-acp submodule;
+# runtime-prerequisites.json records that its external Codex executable must
+# be supplied through CODEX_PATH when the artifact is launched in the future.
+COPY dist/${TARGETARCH}/codex-acp /opt/codeg/codex-acp
 COPY dist/web /app/web
 
 ENV CODEG_STATIC_DIR=/app/web

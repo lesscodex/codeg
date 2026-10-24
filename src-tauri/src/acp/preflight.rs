@@ -92,26 +92,36 @@ pub async fn run_preflight_with_env(
 ) -> PreflightResult {
     let meta = registry::get_agent_meta(agent_type);
     debug_assert_eq!(meta.agent_type, agent_type);
-    let mut checks = match &meta.distribution {
-        AgentDistribution::Npx { node_required, .. } => check_npm_environment(*node_required).await,
-        AgentDistribution::Binary {
-            version,
-            cmd,
-            platforms,
-            ..
-        } => check_binary_environment(agent_type, version, cmd, platforms).await,
-        AgentDistribution::Uvx {
-            uv_required,
-            system_cmd,
-            ..
-        } => check_uv_environment(*uv_required, *system_cmd).await,
-        AgentDistribution::System {
-            cmd, install_url, ..
-        } => vec![build_system_cli_check(
-            cmd,
-            install_url,
-            crate::commands::acp::resolve_system_agent_binary_for(agent_type, cmd).as_deref(),
-        )],
+    let mut checks = if agent_type == AgentType::Codex {
+        check_packaged_codex_environment(match &meta.distribution {
+            AgentDistribution::Npx { node_required, .. } => *node_required,
+            _ => None,
+        })
+        .await
+    } else {
+        match &meta.distribution {
+            AgentDistribution::Npx { node_required, .. } => {
+                check_npm_environment(*node_required).await
+            }
+            AgentDistribution::Binary {
+                version,
+                cmd,
+                platforms,
+                ..
+            } => check_binary_environment(agent_type, version, cmd, platforms).await,
+            AgentDistribution::Uvx {
+                uv_required,
+                system_cmd,
+                ..
+            } => check_uv_environment(*uv_required, *system_cmd).await,
+            AgentDistribution::System {
+                cmd, install_url, ..
+            } => vec![build_system_cli_check(
+                cmd,
+                install_url,
+                crate::commands::acp::resolve_system_agent_binary_for(agent_type, cmd).as_deref(),
+            )],
+        }
     };
 
     let mut adapter = probe_adapter(&meta).await;
@@ -230,6 +240,8 @@ fn zcode_checks(
 /// sequence would pay `NPM_PREFIX_TIMEOUT` twice per adapter agent; overlapping
 /// them costs the same two spawns but bounds the added Settings latency to one
 /// timeout.
+/// Codex instead checks its packaged entry and resolves only its native CLI for
+/// the explainer.
 async fn probe_adapter(meta: &AcpAgentMeta) -> Option<AdapterInfo> {
     let relation = registry::acp_adapter_relation(meta.agent_type)?;
     let adapter_cmd = match &meta.distribution {
@@ -238,10 +250,18 @@ async fn probe_adapter(meta: &AcpAgentMeta) -> Option<AdapterInfo> {
         // launchability probe of its own rather than a silently wrong answer.
         _ => return None,
     };
-    let (adapter_installed, native_path) = tokio::join!(
-        crate::commands::acp::is_cmd_available(meta.agent_type, adapter_cmd),
-        crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs),
-    );
+    let (adapter_installed, native_path) = if meta.agent_type == AgentType::Codex {
+        (
+            crate::acp::codex_backend::packaged_adapter_entry().is_some(),
+            crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs)
+                .await,
+        )
+    } else {
+        tokio::join!(
+            crate::commands::acp::is_cmd_available(meta.agent_type, adapter_cmd),
+            crate::commands::acp::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs),
+        )
+    };
 
     Some(build_adapter_info(
         meta,
@@ -274,6 +294,76 @@ fn build_adapter_info(
         shared_config_dir: relation.shared_config_dir.to_string(),
         docs_url: relation.docs_url.to_string(),
     }
+}
+
+/// The packaged Codex adapter requires Node and the staged entry file, not npm
+/// or a globally-installed `codex-acp` command. Keep native `codex` discovery
+/// in [`probe_adapter`] separate so the shared-config explanation remains
+/// useful without turning it into a launch dependency.
+async fn check_packaged_codex_environment(node_required: Option<&str>) -> Vec<CheckItem> {
+    let node_path = which::which("node").ok();
+    let node_result = match &node_path {
+        Some(path) => {
+            crate::process::tokio_command(path)
+                .arg("--version")
+                .output()
+                .await
+        }
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "node not found in PATH",
+        )),
+    };
+
+    let mut node_version = None;
+    let node_check = match node_result {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            node_version = Some(version.clone());
+            CheckItem {
+                check_id: "node_available".into(),
+                label: "Node.js".into(),
+                status: CheckStatus::Pass,
+                message: format!("Node.js {version} available"),
+                fixes: vec![],
+            }
+        }
+        _ => CheckItem {
+            check_id: "node_available".into(),
+            label: "Node.js".into(),
+            status: CheckStatus::Fail,
+            message: "Node.js is not installed or not in PATH".into(),
+            fixes: vec![FixAction {
+                label: "Install Node.js".into(),
+                kind: FixActionKind::OpenUrl,
+                payload: "https://nodejs.org/".into(),
+            }],
+        },
+    };
+
+    let mut checks = vec![node_check];
+    if let Some(required) = node_required {
+        if node_version.is_some() {
+            checks.push(build_node_version_check(node_version.as_deref(), required));
+        }
+    }
+    let packaged = crate::acp::codex_backend::packaged_adapter_entry().is_some();
+    checks.push(CheckItem {
+        check_id: "codex_adapter_packaged".into(),
+        label: "Codex ACP adapter".into(),
+        status: if packaged {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        message: if packaged {
+            "Repository-packaged codex-acp adapter is available".into()
+        } else {
+            "Repository-packaged codex-acp adapter is missing".into()
+        },
+        fixes: vec![],
+    });
+    checks
 }
 
 async fn check_npm_environment(node_required: Option<&str>) -> Vec<CheckItem> {

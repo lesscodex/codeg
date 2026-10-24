@@ -9,7 +9,20 @@ COPY public/ ./public/
 COPY next.config.ts tsconfig.json postcss.config.mjs components.json ./
 RUN pnpm build
 
-# Stage 2: Build Rust server binary + codeg-mcp companion + codeg-cli
+# Stage 2: Build the pinned codex-acp adapter with the repository staging command
+FROM node:24-bookworm-slim AS codex-acp
+WORKDIR /app
+COPY src-tauri/scripts/stage-codex-acp.mjs src-tauri/scripts/
+COPY src-tauri/vendor/codex-acp/package.json \
+     src-tauri/vendor/codex-acp/package-lock.json \
+     src-tauri/vendor/codex-acp/build.mjs \
+     src-tauri/vendor/codex-acp/tsconfig.json \
+     src-tauri/vendor/codex-acp/
+COPY src-tauri/vendor/codex-acp/src/ src-tauri/vendor/codex-acp/src/
+RUN node src-tauri/scripts/stage-codex-acp.mjs \
+    --source-gitlink=4d191c30e84db1806eeac33248b7130d2276efd2
+
+# Stage 3: Build Rust server binary + codeg-mcp companion + codeg-cli
 FROM rust:slim-bookworm AS backend
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/src-tauri
@@ -21,7 +34,7 @@ RUN cargo build --release --bin codeg-server --no-default-features --features se
  && cargo build --release --bin codeg-mcp --no-default-features --features mcp-bin \
  && cargo build --release --bin codeg-cli --no-default-features --features cli-bin
 
-# Stage 3: Runtime
+# Stage 4: Runtime
 FROM node:24-bookworm-slim
 RUN apt-get update && apt-get install -y \
     libsqlite3-0 \
@@ -46,6 +59,7 @@ COPY --from=backend /app/src-tauri/target/release/codeg-mcp /usr/local/bin/codeg
 # codeg-cli: `docker exec <container> codeg-cli run …` finds this server through
 # its discovery file under CODEG_DATA_DIR (/data/cli).
 COPY --from=backend /app/src-tauri/target/release/codeg-cli /usr/local/bin/codeg-cli
+COPY --from=codex-acp /app/src-tauri/build/staging/codex-acp /opt/codeg/codex-acp
 COPY --from=frontend /app/out /app/web
 
 ENV CODEG_STATIC_DIR=/app/web

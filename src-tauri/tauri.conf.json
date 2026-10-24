@@ -27,7 +27,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../out": "web/"
+      "../out": "web/",
+      "build/staging/codex-acp": "codex-acp/"
     },
     "externalBin": [
       "binaries/codeg-mcp",

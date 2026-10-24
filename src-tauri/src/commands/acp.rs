@@ -639,6 +639,19 @@ fn system_agent_is_user_managed(name: &str, install_url: &str) -> AcpError {
 /// already cached locally.
 pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), AcpError> {
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::Codex {
+        if crate::acp::codex_backend::packaged_adapter_entry().is_none() {
+            return Err(AcpError::SdkNotInstalled(
+                "The repository-packaged Codex ACP adapter is not available".to_string(),
+            ));
+        }
+        if which::which("node").is_err() {
+            return Err(AcpError::SdkNotInstalled(
+                "Node.js is required to launch the packaged Codex ACP adapter".to_string(),
+            ));
+        }
+        return Ok(());
+    }
     match meta.distribution {
         registry::AgentDistribution::Npx { cmd, .. } => {
             if !is_cmd_available(agent_type, cmd).await {
@@ -768,6 +781,10 @@ async fn npm_list_version(
 
 async fn detect_local_version(agent_type: AgentType) -> Option<String> {
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::Codex {
+        return crate::acp::codex_backend::packaged_adapter_entry()
+            .and_then(|_| meta.registry_version().map(str::to_string));
+    }
     match meta.distribution {
         registry::AgentDistribution::Npx { cmd, package, .. } => {
             let resolved = resolve_npx_command_for(agent_type, cmd).await?;
@@ -892,13 +909,14 @@ struct AgentDiag {
     package: Option<String>,
     node_required: Option<String>,
     /// Distribution-appropriate launchability, mirroring `verify_agent_installed`:
-    /// npx → `resolve_npx_command`; binary → cached/system binary; uvx →
+    /// packaged Codex → staged entry; npx → `resolve_npx_command`; binary →
+    /// cached/system binary; uvx →
     /// `uvx_agent_launchable`. `None` = the agent cannot launch right now. This
     /// (NOT `resolve_npx`) is what the verdict uses for non-npx agents, so a
     /// working cached-binary / uvx agent is not misreported as node-missing.
     launchable: Option<String>,
-    /// `resolve_npx_command(cmd)` — the resolution the new-session page gates on
-    /// (npx agents only; `None` for binary/uvx).
+    /// The packaged Codex entry or `resolve_npx_command(cmd)` for npx agents;
+    /// `None` for binary/uvx.
     resolve_npx: Option<String>,
     /// `<npm prefix -g>/bin/<cmd>` when it exists.
     system_prefix_bin: Option<String>,
@@ -1104,41 +1122,49 @@ async fn collect_agent_diag(
             ..
         } => {
             diag.cmd = cmd.to_string();
-            diag.distribution = "npx";
+            let packaged_codex = agent_type == AgentType::Codex;
+            diag.distribution = if packaged_codex { "packaged" } else { "npx" };
             diag.package = Some(package.to_string());
             diag.node_required = node_required.map(str::to_string);
 
-            let resolve_npx = resolve_npx_command_for(agent_type, cmd)
-                .await
-                .map(|p| p.to_string_lossy().to_string());
-            diag.launchable = resolve_npx.clone();
-            diag.resolve_npx = resolve_npx;
-
-            diag.system_prefix_bin = npm_prefix_g.and_then(|p| {
-                let cand = npm_prefix_bin_dir(Path::new(p)).join(diag_exe_name(cmd));
-                cand.is_file().then(|| cand.to_string_lossy().to_string())
-            });
-            diag.user_prefix_bin = crate::process::user_npm_prefix().and_then(|prefix| {
-                let cand = npm_prefix_bin_dir(&prefix).join(diag_exe_name(cmd));
-                cand.is_file().then(|| cand.to_string_lossy().to_string())
-            });
-            diag.homebrew_bin = if cfg!(target_os = "macos") {
-                ["/opt/homebrew/bin", "/usr/local/bin"].iter().find_map(|d| {
-                    let cand = Path::new(d).join(diag_exe_name(cmd));
-                    cand.is_file().then(|| cand.to_string_lossy().to_string())
-                })
+            if packaged_codex {
+                let packaged = crate::acp::codex_backend::packaged_adapter_entry()
+                    .map(|p| p.to_string_lossy().to_string());
+                diag.launchable = packaged.clone();
+                diag.resolve_npx = packaged;
             } else {
-                None
-            };
-            // `npm list` can hang on a stalled global prefix; bound it (the child
-            // is killed on drop via `npm_list_version`'s `kill_on_drop`).
-            diag.detected_version = tokio::time::timeout(
-                DIAG_PROBE_TIMEOUT,
-                detect_npm_global_version(&package_name_from_spec(package)),
-            )
-            .await
-            .ok()
-            .flatten();
+                let resolve_npx = resolve_npx_command_for(agent_type, cmd)
+                    .await
+                    .map(|p| p.to_string_lossy().to_string());
+                diag.launchable = resolve_npx.clone();
+                diag.resolve_npx = resolve_npx;
+
+                diag.system_prefix_bin = npm_prefix_g.and_then(|p| {
+                    let cand = npm_prefix_bin_dir(Path::new(p)).join(diag_exe_name(cmd));
+                    cand.is_file().then(|| cand.to_string_lossy().to_string())
+                });
+                diag.user_prefix_bin = crate::process::user_npm_prefix().and_then(|prefix| {
+                    let cand = npm_prefix_bin_dir(&prefix).join(diag_exe_name(cmd));
+                    cand.is_file().then(|| cand.to_string_lossy().to_string())
+                });
+                diag.homebrew_bin = if cfg!(target_os = "macos") {
+                    ["/opt/homebrew/bin", "/usr/local/bin"].iter().find_map(|d| {
+                        let cand = Path::new(d).join(diag_exe_name(cmd));
+                        cand.is_file().then(|| cand.to_string_lossy().to_string())
+                    })
+                } else {
+                    None
+                };
+                // `npm list` can hang on a stalled global prefix; bound it (the child
+                // is killed on drop via `npm_list_version`'s `kill_on_drop`).
+                diag.detected_version = tokio::time::timeout(
+                    DIAG_PROBE_TIMEOUT,
+                    detect_npm_global_version(&package_name_from_spec(package)),
+                )
+                .await
+                .ok()
+                .flatten();
+            }
 
             // Adapter agents only: locate the vendor CLI the user installed
             // themselves. Unlike preflight (path-only, runs on every Settings
@@ -1317,6 +1343,44 @@ fn compute_verdict(inp: &DiagInputs) -> DiagnosticsVerdict {
         }
         Some(a) => a,
     };
+
+    // The packaged Codex adapter uses Node plus its staged entry; npm and
+    // globally-installed `codex-acp` commands are not launch dependencies.
+    if agent.distribution == "packaged" {
+        if inp.node.path.is_none() {
+            return diag_verdict(
+                DiagLevel::Fail,
+                "node_missing",
+                "Node.js was not found on the app's PATH.",
+            );
+        }
+        if let (Some(req), Some(ver)) =
+            (agent.node_required.as_deref(), inp.node.version.as_deref())
+        {
+            if let (Some(rmaj), Some(nmaj)) = (parse_node_major(req), parse_node_major(ver)) {
+                if nmaj < rmaj {
+                    return diag_verdict(
+                        DiagLevel::Fail,
+                        "node_too_old",
+                        "The active Node.js is older than this agent requires.",
+                    );
+                }
+            }
+        }
+        return if agent.launchable.is_some() {
+            diag_verdict(
+                DiagLevel::Ok,
+                "ok",
+                "The packaged Codex ACP adapter is launchable.",
+            )
+        } else {
+            diag_verdict(
+                DiagLevel::Fail,
+                "packaged_adapter_missing",
+                "The repository-packaged Codex ACP adapter is missing.",
+            )
+        };
+    }
 
     // Binary/Uvx agents do not depend on Node/npm — judge them by their own
     // launch gate so a working cached-binary / uvx agent is never misreported.
@@ -1528,6 +1592,7 @@ fn build_report(
     // 4. Target agent — launchability keyed to its distribution.
     if let Some(a) = &inp.agent {
         let launch_label = match a.distribution {
+            "packaged" => format!("{} (packaged adapter)", a.cmd),
             "npx" => format!("{} (resolve_npx_command)", a.cmd),
             "binary" => format!("{} (cached / system binary)", a.cmd),
             "system" => format!("{} (system CLI: PATH / ~/.local/bin)", a.cmd),
@@ -1932,6 +1997,20 @@ mod diagnostics_tests {
         let mut a = agent_installed_unresolved();
         a.resolve_npx = Some("/usr/local/bin/codex-acp".to_string());
         inp.agent = Some(a);
+        assert_eq!(compute_verdict(&inp).code, "ok");
+    }
+
+    #[test]
+    fn verdict_packaged_codex_ignores_npm_and_global_adapter() {
+        let mut inp = base_inputs();
+        inp.npm = CmdProbe::default();
+        inp.agent = Some(AgentDiag {
+            cmd: "codex-acp".to_string(),
+            distribution: "packaged",
+            node_required: Some("20.0.0".to_string()),
+            launchable: Some("/bundle/codex-acp/dist/index.js".to_string()),
+            ..Default::default()
+        });
         assert_eq!(compute_verdict(&inp).code, "ok");
     }
 
@@ -11926,21 +12005,34 @@ pub(crate) async fn acp_get_agent_status_core(
 
     let (available, installed_version) = match &meta.distribution {
         registry::AgentDistribution::Npx { cmd, package, .. } => {
-            let resolved = resolve_npx_command_for(agent_type, cmd).await;
-            let mut version = resolved
-                .as_ref()
-                .and_then(|_| setting.as_ref().and_then(|m| m.installed_version.clone()));
-            // An agent the user installed themselves (npm -g, bun, brew, …)
-            // resolves but has no managed install record — probe the system
-            // install so it reads as installed rather than demanding a
-            // second, managed copy. Launch already prefers the PATH
-            // resolution, so this only makes the UI agree with what runs.
-            if version.is_none() {
-                if let Some(bin) = &resolved {
-                    version = system_probed_version(agent_type, bin, Some(package)).await;
+            if agent_type == AgentType::Codex {
+                let available = crate::acp::codex_backend::packaged_adapter_entry().is_some();
+                let version = if available {
+                    setting
+                        .as_ref()
+                        .and_then(|m| m.installed_version.clone())
+                        .or_else(|| meta.registry_version().map(str::to_string))
+                } else {
+                    None
+                };
+                (available, version)
+            } else {
+                let resolved = resolve_npx_command_for(agent_type, cmd).await;
+                let mut version = resolved
+                    .as_ref()
+                    .and_then(|_| setting.as_ref().and_then(|m| m.installed_version.clone()));
+                // An agent the user installed themselves (npm -g, bun, brew, …)
+                // resolves but has no managed install record — probe the system
+                // install so it reads as installed rather than demanding a
+                // second, managed copy. Launch already prefers the PATH
+                // resolution, so this only makes the UI agree with what runs.
+                if version.is_none() {
+                    if let Some(bin) = &resolved {
+                        version = system_probed_version(agent_type, bin, Some(package)).await;
+                    }
                 }
+                (true, version)
             }
-            (true, version)
         }
         registry::AgentDistribution::Binary {
             platforms,
@@ -12035,21 +12127,33 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         let meta = registry::get_agent_meta(agent_type);
         let (available, dist_type, local_installed_version) = match &meta.distribution {
             registry::AgentDistribution::Npx { cmd, package, .. } => {
-                // Keep the list path bounded: each list request probes npm
-                // global prefix at most once, then reuses the result across
-                // all NPX agents in the loop.
-                let resolved = npx_resolver.resolve_for_list(agent_type, cmd).await;
-                let mut version = resolved
-                    .as_ref()
-                    .and_then(|_| setting.and_then(|m| m.installed_version.clone()));
-                // Mirror the status path: an agent's own system install
-                // counts as installed (per-agent cached probe).
-                if version.is_none() {
-                    if let Some(bin) = &resolved {
-                        version = system_probed_version(agent_type, bin, Some(package)).await;
+                if agent_type == AgentType::Codex {
+                    let available = crate::acp::codex_backend::packaged_adapter_entry().is_some();
+                    let version = if available {
+                        setting
+                            .and_then(|m| m.installed_version.clone())
+                            .or_else(|| meta.registry_version().map(str::to_string))
+                    } else {
+                        None
+                    };
+                    (available, "packaged", version)
+                } else {
+                    // Keep the list path bounded: each list request probes npm
+                    // global prefix at most once, then reuses the result across
+                    // all NPX agents in the loop.
+                    let resolved = npx_resolver.resolve_for_list(agent_type, cmd).await;
+                    let mut version = resolved
+                        .as_ref()
+                        .and_then(|_| setting.and_then(|m| m.installed_version.clone()));
+                    // Mirror the status path: an agent's own system install
+                    // counts as installed (per-agent cached probe).
+                    if version.is_none() {
+                        if let Some(bin) = &resolved {
+                            version = system_probed_version(agent_type, bin, Some(package)).await;
+                        }
                     }
+                    (true, "npx", version)
                 }
-                (true, "npx", version)
             }
             registry::AgentDistribution::Binary {
                 platforms,
@@ -13874,6 +13978,66 @@ pub(crate) async fn acp_prepare_npx_agent_core(
     emit_agent_install_event(emitter, &task_id, AgentInstallEventKind::Started, "");
 
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::Codex {
+        let result = if crate::acp::codex_backend::packaged_adapter_entry().is_none() {
+            Err(AcpError::SdkNotInstalled(
+                "The repository-packaged Codex ACP adapter is not available".to_string(),
+            ))
+        } else if which::which("node").is_err() {
+            Err(AcpError::SdkNotInstalled(
+                "Node.js is required to launch the packaged Codex ACP adapter".to_string(),
+            ))
+        } else {
+            let version = meta
+                .registry_version()
+                .map(str::to_string)
+                .or(registry_version)
+                .ok_or_else(|| {
+                    AcpError::protocol(
+                        "packaged Codex ACP adapter has no registry version metadata",
+                    )
+                });
+            match version {
+                Ok(version) => {
+                    match agent_setting_service::set_installed_version(
+                        &db.conn,
+                        agent_type,
+                        Some(version.clone()),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            emit_acp_agents_updated(
+                                emitter,
+                                "packaged_codex_ready",
+                                Some(agent_type),
+                            );
+                            Ok(version)
+                        }
+                        Err(error) => Err(AcpError::protocol(error.to_string())),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        };
+
+        match &result {
+            Ok(version) => emit_agent_install_event(
+                emitter,
+                &task_id,
+                AgentInstallEventKind::Completed,
+                format!("{} v{version} is already packaged", meta.name),
+            ),
+            Err(error) => emit_agent_install_event(
+                emitter,
+                &task_id,
+                AgentInstallEventKind::Failed,
+                error.to_string(),
+            ),
+        }
+        return result;
+    }
+
     let result = match meta.distribution {
         registry::AgentDistribution::Npx { package, cmd, .. } => {
             // `version_override` of None/empty keeps the registry-pinned spec;
@@ -14117,6 +14281,18 @@ pub(crate) async fn acp_uninstall_agent_core(
     emit_agent_install_event(emitter, &task_id, AgentInstallEventKind::Started, "");
 
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::Codex {
+        let error = AcpError::protocol(
+            "Codex ACP is repository-packaged and cannot be uninstalled with npm",
+        );
+        emit_agent_install_event(
+            emitter,
+            &task_id,
+            AgentInstallEventKind::Failed,
+            error.to_string(),
+        );
+        return Err(error);
+    }
     emit_agent_install_event(
         emitter,
         &task_id,
