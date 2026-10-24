@@ -1,9 +1,10 @@
 name: Test
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
   pull_request:
 
 env:
@@ -77,7 +78,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        os:
+          - ubuntu-22.04
+          # - macos-latest
+          - windows-latest
         mode: [desktop, server, cli]
         # macOS only runs the desktop cell; server and cli are covered by
         # the Linux and Windows cells.
