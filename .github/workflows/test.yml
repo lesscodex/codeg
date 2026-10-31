@@ -144,7 +144,7 @@ jobs:
         if: matrix.mode == 'desktop'
         shell: bash
         run: |
-          mkdir -p out
+          mkdir -p out src-tauri/build/staging/codex-acp
           printf '<!doctype html><html><body></body></html>\n' > out/index.html
 
       - name: cargo test
