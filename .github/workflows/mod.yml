@@ -257,6 +257,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -323,7 +325,10 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Build server + codeg-mcp companion
+      - name: Stage codex-acp adapter
+        run: pnpm tauri:stage-codex-acp
+
+      - name: Build server + codeg-mcp companion + codeg-cli
         working-directory: src-tauri
         # `codeg-mcp` is the stdio MCP companion the runtime injects per
         # session (see acp/delegation/companion.rs). Built with the same
@@ -336,6 +341,7 @@ jobs:
         run: |
           cargo build --release --bin codeg-server --no-default-features --features server-bin --target ${{ matrix.target }}
           cargo build --release --bin codeg-mcp --no-default-features --features mcp-bin --target ${{ matrix.target }}
+          cargo build --release --bin codeg-cli --no-default-features --features cli-bin --target ${{ matrix.target }}
           # cargo build --release --bin codeg-computer-helper --no-default-features --features computer-helper --target ${{ matrix.target }}
 
       - name: Package (Unix)
@@ -344,7 +350,9 @@ jobs:
           mkdir -p dist/${{ matrix.artifact }}
           cp src-tauri/target/${{ matrix.target }}/release/codeg-server dist/${{ matrix.artifact }}/
           cp src-tauri/target/${{ matrix.target }}/release/codeg-mcp dist/${{ matrix.artifact }}/
-          chmod +x dist/${{ matrix.artifact }}/codeg-server dist/${{ matrix.artifact }}/codeg-mcp
+          cp src-tauri/target/${{ matrix.target }}/release/codeg-cli dist/${{ matrix.artifact }}/
+          cp -r src-tauri/build/staging/codex-acp dist/${{ matrix.artifact }}/codex-acp
+          chmod +x dist/${{ matrix.artifact }}/codeg-server dist/${{ matrix.artifact }}/codeg-mcp dist/${{ matrix.artifact }}/codeg-cli
           cp -r out dist/${{ matrix.artifact }}/web
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
@@ -355,6 +363,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/${{ matrix.artifact }}
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-server.exe dist/${{ matrix.artifact }}/
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-mcp.exe dist/${{ matrix.artifact }}/
+          Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-cli.exe dist/${{ matrix.artifact }}/
+          Copy-Item -Recurse src-tauri/build/staging/codex-acp dist/${{ matrix.artifact }}/codex-acp
           Copy-Item -Recurse out dist/${{ matrix.artifact }}/web
           Compress-Archive -Path dist/${{ matrix.artifact }} -DestinationPath dist/${{ matrix.artifact }}.zip
 
@@ -364,6 +374,11 @@ jobs:
           set -euo pipefail
           test -x "dist/${{ matrix.artifact }}/codeg-server"
           test -x "dist/${{ matrix.artifact }}/codeg-mcp"
+          test -x "dist/${{ matrix.artifact }}/codeg-cli"
+          test -f "dist/${{ matrix.artifact }}/codex-acp/dist/index.js"
+          test -f "dist/${{ matrix.artifact }}/codex-acp/package.json"
+          test -f "dist/${{ matrix.artifact }}/codex-acp/runtime-prerequisites.json"
+          test -f "dist/${{ matrix.artifact }}/codex-acp/node_modules/@openai/codex/bin/codex.js"
 
       - name: Verify packaged artifact (Windows)
         if: runner.os == 'Windows'
@@ -374,6 +389,21 @@ jobs:
           }
           if (-not (Test-Path "dist/${{ matrix.artifact }}/codeg-mcp.exe")) {
             throw "codeg-mcp.exe missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/codeg-cli.exe")) {
+            throw "codeg-cli.exe missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/codex-acp/dist/index.js")) {
+            throw "codex-acp build output missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/codex-acp/package.json")) {
+            throw "codex-acp package.json missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/codex-acp/runtime-prerequisites.json")) {
+            throw "codex-acp runtime prerequisites missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/codex-acp/node_modules/@openai/codex/bin/codex.js")) {
+            throw "bundled Codex runtime missing from packaged artifact"
           }
 
       - name: Upload artifact for Docker build (Linux only)
@@ -434,17 +464,25 @@ jobs:
           # mkdir -p dist/arm64
           cp artifacts/linux-x64/codeg-server dist/amd64/codeg-server
           cp artifacts/linux-x64/codeg-mcp dist/amd64/codeg-mcp
+          cp artifacts/linux-x64/codeg-cli dist/amd64/codeg-cli
+          cp -r artifacts/linux-x64/codex-acp dist/amd64/codex-acp
           # cp artifacts/linux-arm64/codeg-server dist/arm64/codeg-server
           # cp artifacts/linux-arm64/codeg-mcp dist/arm64/codeg-mcp
+          # cp artifacts/linux-arm64/codeg-cli dist/arm64/codeg-cli
           cp -r artifacts/linux-x64/web dist/web
-          chmod +x dist/amd64/codeg-server dist/amd64/codeg-mcp
-          # chmod +x dist/arm64/codeg-server dist/arm64/codeg-mcp
+          chmod +x dist/amd64/codeg-server dist/amd64/codeg-mcp dist/amd64/codeg-cli
+          # chmod +x dist/arm64/codeg-server dist/arm64/codeg-mcp dist/arm64/codeg-cli
           # Fail fast if any companion went missing — Docker would otherwise
           # produce an image where delegation silently degrades.
           # for f in dist/amd64/codeg-mcp dist/arm64/codeg-mcp; do
           for f in dist/amd64/codeg-mcp; do
             test -x "$f" || { echo "FATAL: $f missing or non-exec"; exit 1; }
           done
+          test -x dist/amd64/codeg-cli
+          test -f dist/amd64/codex-acp/dist/index.js
+          test -f dist/amd64/codex-acp/package.json
+          test -f dist/amd64/codex-acp/runtime-prerequisites.json
+          test -f dist/amd64/codex-acp/node_modules/@openai/codex/bin/codex.js
 
       # - name: Set up QEMU
       #   uses: docker/setup-qemu-action@v3
