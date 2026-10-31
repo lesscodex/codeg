@@ -1,13 +1,15 @@
 //! Codex's ACP adapter launch boundary.
 //!
-//! Codex still starts through the published `codex-acp` package and speaks the
-//! same ACP protocol as every other connection. Keeping its adapter-specific
+//! Codex starts through the repository-packaged `codex-acp` bundle and speaks
+//! the same ACP protocol as every other connection. Keeping its adapter-specific
 //! launch policy here makes the process boundary explicit without changing the
 //! shared connection loop or any other agent launcher.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "tauri-runtime")]
+use std::sync::OnceLock;
 
 use crate::acp::agent_process::AcpAgent;
 use crate::acp::connection::{
@@ -18,6 +20,64 @@ use crate::acp::error::AcpError;
 use crate::acp::registry::{AcpAgentMeta, AgentDistribution};
 use crate::acp::stderr_tail::StderrTail;
 use crate::models::agent::AgentType;
+
+const CODEX_ACP_DIR: &str = "codex-acp";
+const CODEX_ACP_ENTRY: &str = "dist/index.js";
+#[cfg(not(feature = "tauri-runtime"))]
+const DOCKER_CODEX_ACP_DIR: &str = "/opt/codeg/codex-acp";
+
+#[cfg(feature = "tauri-runtime")]
+static DESKTOP_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+#[cfg(feature = "tauri-runtime")]
+pub(crate) fn set_desktop_resource_dir(resource_dir: PathBuf) {
+    let _ = DESKTOP_RESOURCE_DIR.set(resource_dir);
+}
+
+pub(crate) fn packaged_adapter_entry_path(root: &Path) -> PathBuf {
+    root.join(CODEX_ACP_ENTRY)
+}
+
+fn packaged_adapter_roots() -> Vec<PathBuf> {
+    #[cfg(feature = "tauri-runtime")]
+    {
+        DESKTOP_RESOURCE_DIR
+            .get()
+            .map(|dir| dir.join(CODEX_ACP_DIR))
+            .into_iter()
+            .collect()
+    }
+
+    #[cfg(not(feature = "tauri-runtime"))]
+    {
+        let mut roots = Vec::new();
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(parent) = executable.parent() {
+                roots.push(parent.join(CODEX_ACP_DIR));
+            }
+        }
+        roots.push(PathBuf::from(DOCKER_CODEX_ACP_DIR));
+        roots
+    }
+}
+
+pub(crate) fn packaged_adapter_entry() -> Option<PathBuf> {
+    packaged_adapter_roots()
+        .into_iter()
+        .map(|root| packaged_adapter_entry_path(&root))
+        .find(|entry| entry.is_file())
+}
+
+fn packaged_adapter_process_args(node: &Path, entry: &Path, args: &[&str]) -> Vec<String> {
+    let mut parts = vec![
+        crate::process::normalized_program(node)
+            .to_string_lossy()
+            .into_owned(),
+        entry.to_string_lossy().into_owned(),
+    ];
+    parts.extend(args.iter().map(|arg| (*arg).to_string()));
+    parts
+}
 
 /// Build the Codex ACP adapter process while leaving the generic launcher
 /// responsible for all other distributions.
@@ -34,11 +94,22 @@ pub(crate) async fn build_agent(
         ));
     }
 
-    let AgentDistribution::Npx { cmd, args, env, .. } = meta.distribution else {
+    let AgentDistribution::Npx { args, env, .. } = meta.distribution else {
         return Err(AcpError::SpawnFailed(
             "Codex ACP registry entry must use the npx distribution".to_string(),
         ));
     };
+
+    let node = which::which("node").map_err(|_| {
+        AcpError::SdkNotInstalled(
+            "Node.js is required to launch the packaged Codex ACP adapter".to_string(),
+        )
+    })?;
+    let entry = packaged_adapter_entry().ok_or_else(|| {
+        AcpError::SdkNotInstalled(
+            "The repository-packaged Codex ACP adapter is not available".to_string(),
+        )
+    })?;
 
     let mut merged_env = merge_agent_env(env, runtime_env, scratch);
     let initial_agent_mode = crate::commands::acp::codex_launch_initial_agent_mode();
@@ -70,17 +141,7 @@ pub(crate) async fn build_agent(
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect();
-    parts.push(
-        crate::commands::acp::resolve_npx_command(cmd)
-            .await
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                crate::process::normalized_program(cmd)
-                    .to_string_lossy()
-                    .to_string()
-            }),
-    );
-    parts.extend(args.iter().map(|arg| (*arg).to_string()));
+    parts.extend(packaged_adapter_process_args(&node, &entry, args));
 
     let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
     let agent_name = meta.name.to_string();
@@ -93,6 +154,31 @@ pub(crate) async fn build_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_launch_uses_node_and_local_entry() {
+        let parts = packaged_adapter_process_args(
+            Path::new("/runtime/node"),
+            Path::new("/bundle/codex-acp/dist/index.js"),
+            &[],
+        );
+        assert_eq!(
+            parts,
+            vec![
+                "/runtime/node".to_string(),
+                "/bundle/codex-acp/dist/index.js".to_string()
+            ]
+        );
+        assert!(!parts.iter().any(|part| part == "codex-acp"));
+    }
+
+    #[test]
+    fn packaged_entry_path_matches_staged_layout() {
+        assert_eq!(
+            packaged_adapter_entry_path(Path::new("/bundle/codex-acp")),
+            PathBuf::from("/bundle/codex-acp/dist/index.js")
+        );
+    }
 
     #[tokio::test]
     async fn backend_rejects_non_codex_metadata() {

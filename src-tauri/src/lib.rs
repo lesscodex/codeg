@@ -755,6 +755,9 @@ mod tauri_app {
             // same download progress; lets the upgrade UI survive navigation.
             .manage(crate::update::new_update_state_handle())
             .setup(|app| {
+                if let Ok(resource_dir) = app.path().resource_dir() {
+                    crate::acp::codex_backend::set_desktop_resource_dir(resource_dir);
+                }
                 let app_data_dir = app.path().app_data_dir()?;
 
                 // Unify the data root across every consumer:

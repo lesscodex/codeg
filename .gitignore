@@ -57,6 +57,9 @@ docs/superpowers
 # release.yml, not git.
 src-tauri/binaries/
 
+# Generated codex-acp runtime staging for desktop and server bundles.
+src-tauri/build/staging/
+
 # pnpm local store (pnpm 11+)
 .pnpm-store/
 

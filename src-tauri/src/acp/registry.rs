@@ -3256,7 +3256,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // stays None), `agentFileChangeReport` / native subagent sessions
             // are still not adopted, and there is still no `engines.node`, so
             // the 20.0.0 floor is retained. `@openai/codex` moves ^0.152 →
-            // ^0.153.3 (one minor plus patches).
+            // ^0.153.4 (one minor plus patches).
             //
             // 1.11.0 is a SMALL bump — the whole bundle diff is +148/-63 lines,
             // and the literal-set delta is six strings in (`recommendedValue`,
