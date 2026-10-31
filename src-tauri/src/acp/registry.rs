@@ -3932,7 +3932,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // stays None), `agentFileChangeReport` / native subagent sessions
             // are still not adopted, and there is still no `engines.node`, so
             // the 20.0.0 floor is retained. `@openai/codex` moves ^0.152 →
-            // ^0.153.3 (one minor plus patches).
+            // ^0.153.4 (one minor plus patches).
             //
             // 1.11.0 is a SMALL bump — the whole bundle diff is +148/-63 lines,
             // and the literal-set delta is six strings in (`recommendedValue`,
@@ -5011,8 +5011,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // Retry.
             //
             // 2.7.0 keeps `@openai/codex` at ^0.166.0 (a fresh install resolves
-            // the same 0.166.0 binary, so the offline catalog snapshot and
-            // `CODEX_NESTED_VERSION_FALLBACK` stand) and moves the inline
+            // the same 0.166.0 binary) and moves the inline
             // `@agentclientprotocol/sdk` ~2.4.0 → ~2.6.0 (schema 1.31.0).
             // `engines` is still absent, and the 20.3.0 floor stands: live on
             // 20.3.0 a session runs a plain and a shell turn, and turns a hook

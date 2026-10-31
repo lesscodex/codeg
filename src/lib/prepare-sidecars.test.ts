@@ -40,6 +40,10 @@ function prepare({
   const entry = join(crate, "scripts", "prepare-sidecars.mjs")
   mkdirSync(dirname(entry), { recursive: true })
   copyFileSync(script, entry)
+  writeFileSync(
+    join(dirname(entry), "stage-codex-acp.mjs"),
+    "export function stageCodexAcp() {}\n"
+  )
   const output = shared
     ? join(root, "shared Cargo cache")
     : join(crate, "target")

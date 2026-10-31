@@ -1,0 +1,4 @@
+[submodule "src-tauri/vendor/codex-acp"]
+	path = src-tauri/vendor/codex-acp
+	url = ../codeg.git
+	branch = codex-acp

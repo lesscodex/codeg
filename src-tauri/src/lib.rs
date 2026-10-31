@@ -777,6 +777,9 @@ mod tauri_app {
                 // `0xC0000374`. See `web::event_bridge::EventEmitter`.
                 web::event_bridge::install_tauri_app_handle(app.handle());
 
+                if let Ok(resource_dir) = app.path().resource_dir() {
+                    crate::acp::codex_backend::set_desktop_resource_dir(resource_dir);
+                }
                 let app_data_dir = app.path().app_data_dir()?;
 
                 // Unify the data root across every consumer:
