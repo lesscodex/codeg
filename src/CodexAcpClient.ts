@@ -695,14 +695,14 @@ export class CodexAcpClient {
 
         const {config, skippedMcpServers, defaultPermissionProfileId, ...permissionProfileMetadata} =
             await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []);
-        const response = await this.resumeThreadWithInstructions({
+        const response = await this.resumeThreadWithInstructions(withCodegResumeOverrides({
             excludeTurns: true,
             config,
             cwd: request.cwd,
             modelProvider: await this.getResumeModelProvider(),
             threadId: request.sessionId,
             ...(instructions?.text !== undefined ? {developerInstructions: instructions.developerInstructions} : {}),
-        }, request, previousInstructions);
+        }, request._meta), request, previousInstructions);
         onSubscribed?.();
         const codexModels = await this.fetchAvailableModels();
         const currentModelId = this.createModelId(codexModels, response.model, response.reasoningEffort).toString();
@@ -758,14 +758,14 @@ export class CodexAcpClient {
 
         const {config, skippedMcpServers, defaultPermissionProfileId, ...permissionProfileMetadata} =
             await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []);
-        const response = await this.resumeThreadWithInstructions({
+        const response = await this.resumeThreadWithInstructions(withCodegResumeOverrides({
             excludeTurns: true,
             config,
             cwd: request.cwd,
             modelProvider: await this.getResumeModelProvider(),
             threadId: request.sessionId,
             ...(instructions?.text !== undefined ? {developerInstructions: instructions.developerInstructions} : {}),
-        }, request, previousInstructions);
+        }, request._meta), request, previousInstructions);
         onSubscribed?.();
         // Resume cursors bound durable history; later turns arrive through live events.
         // A null paginated cursor means there was no durable history at resume time.
@@ -1750,6 +1750,42 @@ function readMetaAdditionalRoots(meta?: Record<string, unknown> | null): string[
         .filter(value => value.length > 0));
 }
 
+function withCodegResumeOverrides(
+    params: ThreadResumeParams,
+    meta?: Record<string, unknown> | null,
+): ThreadResumeParams {
+    // ACP has no standard resume selectors. Codeg supplies its conversation-scoped
+    // model and effort here so Codex applies them before reconstructing the thread.
+    const codeg = meta?.["codeg"];
+    if (!isJsonObject(codeg) || !isJsonObject(codeg["resume"])) {
+        return params;
+    }
+    const resume = codeg["resume"];
+    const model = nonEmptyString(resume["model"]);
+    const reasoningEffort = nonEmptyString(resume["reasoningEffort"]);
+    if (model === undefined && reasoningEffort === undefined) {
+        return params;
+    }
+    return {
+        ...params,
+        ...(model === undefined ? {} : {model}),
+        ...(reasoningEffort === undefined ? {} : {
+            config: {
+                ...(params.config ?? {}),
+                model_reasoning_effort: reasoningEffort,
+            },
+        }),
+    };
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function readAdditionalDirectories(cwd: string, additionalDirectories?: string[],  meta?: Record<string, unknown> | null): string[] {
     const rawDirectories = additionalDirectories ?? readMetaAdditionalRoots(meta);
     if (!rawDirectories) {
@@ -1835,7 +1871,7 @@ function arraysEqual(left: string[], right: string[]): boolean {
     return left.every((value, index) => value === right[index]);
 }
 
-function isJsonObject(value: JsonValue | undefined): value is JsonObject {
+function isJsonObject(value: unknown): value is JsonObject {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 

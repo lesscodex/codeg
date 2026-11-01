@@ -744,6 +744,96 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         expect(threadReadSpy).toHaveBeenCalledWith("thread-id");
     });
 
+    it('applies Codeg selector overrides before resuming and loading sessions', async () => {
+        const mockFixture = createCodexMockTestFixture();
+        const codexAcpClient = mockFixture.getCodexAcpClient();
+        const codexAppServerClient = mockFixture.getCodexAppServerClient();
+
+        vi.spyOn(codexAppServerClient, "skillsExtraRootsSet").mockResolvedValue(undefined);
+        vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({data: []});
+        const threadResumeSpy = vi.spyOn(codexAppServerClient, "threadResume").mockResolvedValue({
+            thread: {id: "thread-id"} as any,
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh",
+            serviceTier: null,
+        } as any);
+        vi.spyOn(codexAppServerClient, "threadReadWithHistory").mockResolvedValue({
+            thread: {id: "thread-id", turns: []} as any,
+        });
+        vi.spyOn(codexAppServerClient, "listModels").mockResolvedValue({
+            data: [createTestModel({id: "gpt-5.6-sol"})],
+            nextCursor: null,
+        });
+        const meta = {
+            codeg: {
+                resume: {
+                    model: "gpt-5.6-sol",
+                    reasoningEffort: "xhigh",
+                },
+            },
+        };
+
+        await codexAcpClient.resumeSession({
+            sessionId: "resume-id",
+            cwd: "/workspace",
+            _meta: meta,
+        });
+        await codexAcpClient.loadSession({
+            sessionId: "load-id",
+            cwd: "/workspace",
+            mcpServers: [],
+            _meta: meta,
+        });
+
+        for (const [params] of threadResumeSpy.mock.calls) {
+            expect(params.model).toBe("gpt-5.6-sol");
+            expect(params.config?.["model_reasoning_effort"]).toBe("xhigh");
+        }
+    });
+
+    it('ignores malformed Codeg resume selector metadata', async () => {
+        const mockFixture = createCodexMockTestFixture();
+        const codexAcpClient = mockFixture.getCodexAcpClient();
+        const codexAppServerClient = mockFixture.getCodexAppServerClient();
+
+        vi.spyOn(codexAppServerClient, "skillsExtraRootsSet").mockResolvedValue(undefined);
+        vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({data: []});
+        const threadResumeSpy = vi.spyOn(codexAppServerClient, "threadResume").mockResolvedValue({
+            thread: {id: "thread-id"} as any,
+            model: "gpt-5",
+            reasoningEffort: "medium",
+            serviceTier: null,
+        } as any);
+        vi.spyOn(codexAppServerClient, "listModels").mockResolvedValue({
+            data: [createTestModel({id: "gpt-5"})],
+            nextCursor: null,
+        });
+
+        await codexAcpClient.resumeSession({
+            sessionId: "baseline-id",
+            cwd: "/workspace",
+        });
+        await codexAcpClient.resumeSession({
+            sessionId: "malformed-id",
+            cwd: "/workspace",
+            _meta: {
+                codeg: {
+                    resume: {
+                        model: "   ",
+                        reasoningEffort: 7,
+                    },
+                },
+            },
+        });
+
+        const baseline = threadResumeSpy.mock.calls[0]![0];
+        const malformed = threadResumeSpy.mock.calls[1]![0];
+        expect(malformed.model).toBe(baseline.model);
+        expect(malformed.config?.["model_reasoning_effort"]).toBe(
+            baseline.config?.["model_reasoning_effort"],
+        );
+    });
+
     it('forks an ACP session through thread/fork with the requested workspace', async () => {
         const mockFixture = createCodexMockTestFixture();
         const codexAcpClient = mockFixture.getCodexAcpClient();
