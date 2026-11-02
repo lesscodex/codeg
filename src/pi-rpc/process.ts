@@ -45,8 +45,17 @@ function stripAnsi(s: string): string {
 }
 
 type PiRpcCommand =
-  | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
+  | {
+      type: 'prompt'
+      id?: string
+      message: string
+      images?: unknown[]
+      streamingBehavior?: 'steer' | 'followUp'
+    }
+  | { type: 'steer'; id?: string; message: string; images?: unknown[] }
+  | { type: 'follow_up'; id?: string; message: string; images?: unknown[] }
   | { type: 'abort'; id?: string }
+  | { type: 'clear_queue'; id?: string }
   | { type: 'get_state'; id?: string }
   // Model
   | { type: 'get_available_models'; id?: string }
@@ -322,14 +331,38 @@ export class PiRpcProcess {
     return lines
   }
 
-  async prompt(message: string, images: unknown[] = []): Promise<void> {
-    const res = await this.request({ type: 'prompt', message, images })
+  async prompt(
+    message: string,
+    images: unknown[] = [],
+    streamingBehavior?: 'steer' | 'followUp'
+  ): Promise<void> {
+    const res = await this.request({
+      type: 'prompt',
+      message,
+      images,
+      ...(streamingBehavior ? { streamingBehavior } : {})
+    })
     if (!res.success) throw new Error(`pi prompt failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  async steer(message: string, images: unknown[] = []): Promise<void> {
+    const res = await this.request({ type: 'steer', message, images })
+    if (!res.success) throw new Error(`pi steer failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  async followUp(message: string, images: unknown[] = []): Promise<void> {
+    const res = await this.request({ type: 'follow_up', message, images })
+    if (!res.success) throw new Error(`pi follow_up failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 
   async abort(): Promise<void> {
     const res = await this.request({ type: 'abort' })
     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
+  }
+
+  async clearQueue(): Promise<void> {
+    const res = await this.request({ type: 'clear_queue' })
+    if (!res.success) throw new Error(`pi clear_queue failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 
   async getState(): Promise<unknown> {

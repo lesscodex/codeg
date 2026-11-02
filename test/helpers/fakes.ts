@@ -27,8 +27,12 @@ export class FakePiRpcProcess {
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
+  readonly steers: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  clearQueueCount = 0
+  clearQueueError: unknown = null
+  steerError: unknown = null
   getSessionStatsCount = 0
 
   sessionStats: PiSessionStats = {}
@@ -50,8 +54,18 @@ export class FakePiRpcProcess {
     this.prompts.push({ message, attachments })
   }
 
+  async steer(message: string, attachments: unknown[] = []): Promise<void> {
+    if (this.steerError) throw this.steerError
+    this.steers.push({ message, attachments })
+  }
+
   async abort(): Promise<void> {
     this.abortCount += 1
+  }
+
+  async clearQueue(): Promise<void> {
+    this.clearQueueCount += 1
+    if (this.clearQueueError) throw this.clearQueueError
   }
 
   async sendExtensionUiResponse(response: unknown): Promise<void> {

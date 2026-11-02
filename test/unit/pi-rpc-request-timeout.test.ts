@@ -135,3 +135,38 @@ test('PiRpcProcess: responses with unknown ids are dropped while real events are
 
   assert.deepEqual(events, [{ type: 'agent_start' }])
 })
+
+test('PiRpcProcess sends native steering and clear_queue commands', async () => {
+  const { child, stdout, written } = makeFakeChild()
+  const proc = makeProcess(child)
+
+  const steer = proc.steer('adjust', [{ type: 'image', data: 'abc' }])
+  const steerCommand = JSON.parse(written.at(-1)!) as {
+    id: string
+    type: string
+    message: string
+    images: unknown[]
+  }
+  assert.equal(steerCommand.type, 'steer')
+  assert.equal(steerCommand.message, 'adjust')
+  assert.deepEqual(steerCommand.images, [{ type: 'image', data: 'abc' }])
+  await writeLine(stdout, { type: 'response', id: steerCommand.id, command: 'steer', success: true })
+  await steer
+
+  const prompt = proc.prompt('adjust', [], 'steer')
+  const promptCommand = JSON.parse(written.at(-1)!) as {
+    id: string
+    type: string
+    streamingBehavior: string
+  }
+  assert.equal(promptCommand.type, 'prompt')
+  assert.equal(promptCommand.streamingBehavior, 'steer')
+  await writeLine(stdout, { type: 'response', id: promptCommand.id, command: 'prompt', success: true })
+  await prompt
+
+  const clear = proc.clearQueue()
+  const clearCommand = JSON.parse(written.at(-1)!) as { id: string; type: string }
+  assert.equal(clearCommand.type, 'clear_queue')
+  await writeLine(stdout, { type: 'response', id: clearCommand.id, command: 'clear_queue', success: true })
+  await clear
+})
