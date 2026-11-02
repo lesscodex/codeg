@@ -21,7 +21,8 @@ import {
   type SetSessionModeResponse,
   type StopReason,
   type DeleteSessionRequest,
-  type DeleteSessionResponse
+  type DeleteSessionResponse,
+  type ContentBlock
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
@@ -59,6 +60,77 @@ type AdvertisedModel = {
 
 const MODEL_CONFIG_ID = 'model'
 const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
+const SESSION_STEERING_METHOD = '_session/steering'
+
+type SteeringRequestParams = {
+  sessionId: string
+  prompt: ContentBlock[]
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseSteeringRequest(params: unknown): SteeringRequestParams {
+  if (!isRecord(params)) throw RequestError.invalidParams('steering params must be an object')
+
+  if (typeof params.sessionId !== 'string' || !params.sessionId) {
+    throw RequestError.invalidParams('sessionId must be a non-empty string')
+  }
+
+  if (!Array.isArray(params.prompt)) {
+    throw RequestError.invalidParams('prompt must be an array of content blocks')
+  }
+
+  for (const block of params.prompt) {
+    if (!isRecord(block) || typeof block.type !== 'string') {
+      throw RequestError.invalidParams('prompt contains an invalid content block')
+    }
+
+    if (!['text', 'image', 'resource_link', 'resource', 'audio'].includes(block.type)) {
+      throw RequestError.invalidRequest(`unsupported steering content block: ${block.type}`)
+    }
+
+    if (block.type === 'audio') {
+      throw RequestError.invalidRequest('audio steering content blocks are unsupported')
+    }
+    if (block.type === 'text' && typeof block.text !== 'string') {
+      throw RequestError.invalidParams('text steering content blocks require text')
+    }
+    if (
+      block.type === 'image' &&
+      (typeof block.mimeType !== 'string' || typeof block.data !== 'string')
+    ) {
+      throw RequestError.invalidParams('image steering content blocks require mimeType and data')
+    }
+    if (block.type === 'resource_link' && typeof block.uri !== 'string') {
+      throw RequestError.invalidParams('resource_link steering content blocks require uri')
+    }
+    if (block.type === 'resource' && !isRecord(block.resource)) {
+      throw RequestError.invalidParams('resource steering content blocks require resource')
+    }
+  }
+
+  if (params._meta !== undefined && params._meta !== null && !isRecord(params._meta)) {
+    throw RequestError.invalidParams('_meta must be an object or null')
+  }
+
+  const meta = isRecord(params._meta) ? params._meta : undefined
+  if (meta?.steering !== undefined && !isRecord(meta.steering)) {
+    throw RequestError.invalidParams('_meta.steering must be an object')
+  }
+  const steeringValue = meta?.steering
+  const steering = isRecord(steeringValue) ? steeringValue : undefined
+  const idleBehavior = steering?.idleBehavior
+  if (idleBehavior !== undefined && idleBehavior !== 'promptRequired') {
+    throw RequestError.invalidParams('unsupported steering idleBehavior')
+  }
+
+  return {
+    sessionId: params.sessionId,
+    prompt: params.prompt as ContentBlock[]
+  }
+}
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -251,7 +323,7 @@ export class PiAcpAgent implements ACPAgent {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
       agentInfo: {
         name: pkg.name ?? 'pi-acp',
-        title: 'pi ACP adapter',
+        title: 'pi ACP adapter (Codeg steering)',
         version: pkg.version ?? '0.0.0'
       },
       // Zed currently uses ClientCapabilities._meta["terminal-auth"] to decide whether to show
@@ -273,8 +345,26 @@ export class PiAcpAgent implements ACPAgent {
           list: {},
           delete: {}
         }
+      },
+      _meta: {
+        steering: { supported: true }
       }
     }
+  }
+
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (method !== SESSION_STEERING_METHOD) throw RequestError.methodNotFound(method)
+
+    const parsed = parseSteeringRequest(params)
+    const session = this.sessions.maybeGet(parsed.sessionId)
+    if (!session) throw RequestError.invalidParams(`Unknown sessionId: ${parsed.sessionId}`)
+
+    const { message, images } = promptToPiMessage(parsed.prompt)
+    const outcome = await session.steer(message, images)
+
+    return outcome === 'injected'
+      ? { outcome: 'injected' }
+      : { outcome: 'promptRequired', reason: 'noRunningTurn' }
   }
 
   async newSession(params: NewSessionRequest) {
