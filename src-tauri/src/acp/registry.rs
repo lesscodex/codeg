@@ -476,6 +476,12 @@ pub const PI_ACP_SOURCE_GITLINK: &str = "922aa67fc2208b8a4d56aa9a29394434234b1b3
 pub const PI_ACP_SOURCE_DIGEST: &str =
     "ce5983511e25434e7cad96d74e1e220293af88b064da03610308d55dea7199cb";
 
+/// The first maintained pi-acp release that implements Codeg's native
+/// steering contract. It is checked as an exact source identity, because the
+/// public stock 0.0.35 release has higher SemVer precedence than this local
+/// prerelease and must remain on the fallback channel.
+pub const PI_ACP_STEERING_MIN_VERSION: &str = PI_ACP_ADAPTER_VERSION;
+
 /// The identity reported by the maintained pi-acp adapter at initialize.
 pub const PI_ACP_PACKAGE_NAME: &str = "pi-acp";
 
@@ -558,6 +564,11 @@ pub fn steering_prompt_required_min_version(agent_type: AgentType) -> Option<&'s
         // stay on the pull channel. An open approval needs one more rule,
         // see [`steering_waits_out_open_permission`].
         AgentType::Codex => Some("2.4.0"),
+        // Only the maintained adapter's exact source identity advertises and
+        // implements this contract. The public stock 0.0.35 build stays on
+        // the pull channel even though its SemVer is higher than this local
+        // prerelease.
+        AgentType::Pi => Some(PI_ACP_STEERING_MIN_VERSION),
         _ => None,
     }
 }
@@ -10551,17 +10562,18 @@ mod tests {
     }
 
     #[test]
-    fn steering_prompt_required_min_version_gates_claude_and_codex_only() {
+    fn steering_prompt_required_min_version_gates_supported_adapters() {
         // The native-steering policy bit: only an adapter that honors the
         // `promptRequired` opt-in AND keeps the owning prompt in flight across
         // a steered turn gets a minimum version. The floor is the release that
         // fixed the latter (claude-agent-acp 0.65.0 / #958), NOT the one that
         // introduced the opt-in — every 0.64.x settles the prompt early (#934).
         // codex-acp's active path always kept the prompt in flight, and 2.4.0
-        // (#593) is the first release with the opt-in. Everyone else stays
-        // None and rides the MCP pull channel. Flipping an agent on here
-        // without the runtime `agent_info.version` proof is not enough by
-        // design.
+        // (#593) is the first release with the opt-in. Pi's maintained
+        // adapter has its own identity/version floor; the public stock 0.0.35
+        // adapter stays on the pull channel. Everyone else stays None
+        // and rides the MCP pull channel. Flipping an agent on here without
+        // the runtime `agent_info.version` proof is not enough by design.
         assert_eq!(
             steering_prompt_required_min_version(AgentType::ClaudeCode),
             Some("0.65.0")
@@ -10569,6 +10581,10 @@ mod tests {
         assert_eq!(
             steering_prompt_required_min_version(AgentType::Codex),
             Some("2.4.0")
+        );
+        assert_eq!(
+            steering_prompt_required_min_version(AgentType::Pi),
+            Some(PI_ACP_STEERING_MIN_VERSION)
         );
         for agent in [
             AgentType::Gemini,
