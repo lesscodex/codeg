@@ -20303,8 +20303,27 @@ fn version_at_least(version: &str, min: &str) -> bool {
 /// the pinned npx package (see `commands::acp::acp_get_agent_status_core`) —
 /// report an `agent_info.version` at or above the registry minimum? Fail
 /// closed on a missing `agent_info` or an unparseable version.
-fn steering_version_ok(agent_info: Option<&agent_client_protocol::schema::v1::Implementation>, min: &str) -> bool {
+fn steering_version_ok(
+    agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
+    min: &str,
+) -> bool {
     agent_info.is_some_and(|info| version_at_least(&info.version, min))
+}
+
+/// The Pi entry launches the maintained adapter selected by the verified local
+/// bundle. Require its exact source version so the public stock 0.0.34 adapter
+/// cannot opt into Pi's steering policy by advertising the same extension.
+fn steering_identity_ok(
+    agent_type: AgentType,
+    agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
+) -> bool {
+    match agent_type {
+        AgentType::Pi => agent_info.is_some_and(|info| {
+            info.name == registry::PI_ACP_PACKAGE_NAME
+                && info.version == registry::PI_ACP_ADAPTER_VERSION
+        }),
+        _ => true,
+    }
 }
 
 /// Synthesize `SessionState.native_steering_available` from an `initialize`
@@ -20318,7 +20337,8 @@ fn synthesize_native_steering(
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
     agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
 ) -> bool {
-    init_advertises_steering(meta)
+    steering_identity_ok(agent_type, agent_info)
+        && init_advertises_steering(meta)
         && registry::steering_prompt_required_min_version(steering_policy_agent(
             agent_type, agent_info,
         ))
@@ -30803,6 +30823,46 @@ mod tests {
             AgentType::ClaudeCode,
             None,
             Some(&proven)
+        ));
+    }
+
+    #[test]
+    fn pi_native_steering_requires_maintained_adapter_proof() {
+        use agent_client_protocol::schema::v1::Implementation;
+
+        let advertised = meta_map(serde_json::json!({"steering": {"supported": true}}));
+        let current = Implementation::new(
+            registry::PI_ACP_PACKAGE_NAME,
+            registry::PI_ACP_STEERING_MIN_VERSION,
+        );
+        let old = Implementation::new(registry::PI_ACP_PACKAGE_NAME, "0.0.34");
+        let future_unproven = Implementation::new(registry::PI_ACP_PACKAGE_NAME, "0.0.36");
+        let unknown = Implementation::new(registry::PI_ACP_PACKAGE_NAME, "unknown");
+        let wrong_identity = Implementation::new("pi-acp-fork", "0.0.36");
+
+        assert!(
+            synthesize_native_steering(AgentType::Pi, Some(&advertised), Some(&current))
+        );
+        for (label, info) in [
+            ("old", &old),
+            ("future unproven", &future_unproven),
+            ("unknown", &unknown),
+            ("wrong identity", &wrong_identity),
+        ] {
+            assert!(
+                !synthesize_native_steering(AgentType::Pi, Some(&advertised), Some(info)),
+                "Pi adapter proof must fail for {label}"
+            );
+        }
+        assert!(!synthesize_native_steering(
+            AgentType::Pi,
+            Some(&advertised),
+            None
+        ));
+        assert!(!synthesize_native_steering(
+            AgentType::Pi,
+            None,
+            Some(&current)
         ));
     }
 
