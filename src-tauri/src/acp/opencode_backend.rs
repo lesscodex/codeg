@@ -2,7 +2,8 @@
 //!
 //! The stock OpenCode binary remains the fallback launch path.  A maintained
 //! adapter is selected only from a staged bundle carrying a source identity
-//! manifest; PATH binaries and the stock 2.x release remain the fallback.
+//! manifest; PATH binaries and the stock 2.x release never inherit this
+//! adapter's steering policy.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,8 +30,8 @@ const RUNTIME_PREREQUISITES: &str = "runtime-prerequisites.json";
 const DOCKER_OPENCODE_ACP_DIR: &str = "/opt/codeg/opencode-acp";
 
 /// The maintained source identity is part of the launch gate. A staged
-/// manifest must prove both values before the bundled executable is selected;
-/// stock and unknown PATH adapters remain on the fallback path.
+/// manifest must prove both values before OpenCode can opt into native
+/// steering; stock and unknown PATH adapters remain on the fallback channel.
 pub(crate) const OPENCODE_SOURCE_GITLINK: Option<&str> =
     Some("4c3fedb08a4b47099570d06774c795188282fa84");
 pub(crate) const OPENCODE_SOURCE_DIGEST: Option<&str> =
@@ -163,7 +164,7 @@ pub(crate) async fn build_agent(
     runtime_env: &BTreeMap<String, String>,
     stderr_tail: &Arc<StderrTail>,
     scratch: Option<&Path>,
-) -> Result<Option<AcpAgent>, AcpError> {
+) -> Result<Option<(AcpAgent, MaintainedAdapterIdentity)>, AcpError> {
     if meta.agent_type != AgentType::OpenCode {
         return Err(AcpError::SpawnFailed(
             "OpenCode ACP backend received metadata for a different agent".to_string(),
@@ -177,9 +178,11 @@ pub(crate) async fn build_agent(
         ));
     };
 
+    let identity = packaged_adapter_identity();
     if !maintained_adapter_available().await {
         return Ok(None);
     }
+    let identity = identity.expect("bundle availability checked above");
     let entry = packaged_adapter_entry().ok_or_else(|| {
         AcpError::SdkNotInstalled(
             "The maintained OpenCode ACP adapter bundle is incomplete".to_string(),
@@ -198,7 +201,7 @@ pub(crate) async fn build_agent(
     let agent = AcpAgent::from_args(&refs)
         .map(|agent| agent.with_debug(agent_debug_callback(agent_name, tail, false)))
         .map_err(|err| AcpError::SpawnFailed(err.to_string()))?;
-    Ok(Some(agent))
+    Ok(Some((agent, identity)))
 }
 
 #[cfg(test)]

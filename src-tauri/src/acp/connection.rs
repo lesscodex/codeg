@@ -2180,7 +2180,14 @@ async fn build_agent(
     stderr_tail: &Arc<StderrTail>,
     scratch: Option<&Path>,
     prompt_suggestions: bool,
-) -> Result<(AcpAgent, crate::acp::reported_usage::PromptUsageMode), AcpError> {
+) -> Result<
+    (
+        AcpAgent,
+        crate::acp::reported_usage::PromptUsageMode,
+        Option<crate::acp::opencode_backend::MaintainedAdapterIdentity>,
+    ),
+    AcpError,
+> {
     // A conversation can outlive the custom-agent definition it was started
     // with (the user deleted it in settings). `get_agent_meta` cannot report
     // that — it is infallible — so it hands back a placeholder with an empty
@@ -2214,7 +2221,7 @@ async fn build_agent(
         } else {
             agent
         };
-        return Ok((agent, prompt_usage_mode));
+        return Ok((agent, prompt_usage_mode, None));
     }
 
     if agent_type == AgentType::Pi {
@@ -2246,11 +2253,11 @@ async fn build_agent(
         } else {
             agent
         };
-        return Ok((agent, prompt_usage_mode));
+        return Ok((agent, prompt_usage_mode, None));
     }
 
     if agent_type == AgentType::OpenCode {
-        if let Some(agent) = crate::acp::opencode_backend::build_agent(
+        if let Some((agent, identity)) = crate::acp::opencode_backend::build_agent(
             meta.clone(),
             runtime_env,
             stderr_tail,
@@ -2263,7 +2270,7 @@ async fn build_agent(
             } else {
                 agent
             };
-            return Ok((agent, prompt_usage_mode));
+            return Ok((agent, prompt_usage_mode, Some(identity)));
         }
     }
 
@@ -2716,7 +2723,7 @@ async fn build_agent(
     } else {
         agent
     };
-    Ok((agent, prompt_usage_mode))
+    Ok((agent, prompt_usage_mode, None))
 }
 
 /// Stack size for the dedicated OS thread that drives each ACP connection's
@@ -2846,7 +2853,7 @@ pub async fn spawn_agent_connection(
     // directory could not be created) means the child inherits the ambient
     // temp dir exactly as it did before.
     let scratch = crate::acp::scratch_dir::create(agent_type);
-    let (agent, prompt_usage_mode) = match build_agent(
+    let (agent, prompt_usage_mode, maintained_opencode_identity) = match build_agent(
         agent_type,
         &runtime_env,
         &launch_cwd,
@@ -3013,6 +3020,7 @@ pub async fn spawn_agent_connection(
             host_tools,
             claude_projects_dir,
             stderr_tail,
+            maintained_opencode_identity,
         )
         .await;
 
@@ -8575,6 +8583,11 @@ async fn run_connection(
     // callback installed by `build_agent`. Read only when a turn ends without
     // agent output, to attach evidence to the synthesized error.
     stderr_tail: Arc<StderrTail>,
+    // Present only when this launch selected the source-identified maintained
+    // OpenCode adapter. Stock OpenCode and PATH adapters leave it absent, so
+    // they cannot opt into native steering by advertising the same shape.
+    maintained_opencode_identity:
+        Option<crate::acp::opencode_backend::MaintainedAdapterIdentity>,
 ) -> Result<(), AcpError> {
     let pending_perms: PendingPermissions =
         Arc::new(tokio::sync::Mutex::new(PermissionQueue::default()));
@@ -9221,24 +9234,25 @@ async fn run_connection(
                 supports_close
             );
 
-            // Native live-feedback steering, synthesized ONCE from three gates
-            // so every consumer (the submit split, the snapshot, the frontend)
-            // reads a single authoritative bool: (1) the adapter advertises
-            // the extension (top-level `_meta`), (2) the registry says this
-            // agent type honors the `promptRequired` idle opt-in, and (3) the
-            // RUNNING binary proves it via `agent_info.version` — launch
-            // prefers a PATH-resolved install over the pinned package, so (2)
-            // alone can't vouch for the process on the other end of the pipe.
+            // Native live-feedback steering is synthesized once so every
+            // consumer reads one authoritative bool. Claude/Codex require the
+            // advertisement, policy and running-version gates. Pi also requires
+            // the exact maintained adapter identity. OpenCode uses its
+            // launch-scoped, source-identified bundle identity; stock/PATH
+            // launches stay on pull even if they copy the advertisement.
             // The raw advertisement is deliberately NOT stored: exposing it
             // would tempt the frontend to re-derive eligibility and show the
             // instant channel for adapters that advertise steering but would
             // detach a turn on the idle race (codex-acp before 2.4.0, which a
             // PATH install can still be).
             let steering_advertised = init_advertises_steering(init_resp.meta.as_ref());
-            let native_steering_available = synthesize_native_steering(
+            let native_steering_available = synthesize_native_steering_with_source(
                 agent_type,
                 init_resp.meta.as_ref(),
                 init_resp.agent_info.as_ref(),
+                maintained_opencode_identity
+                    .as_ref()
+                    .map(|identity| (identity.name.as_str(), identity.version.as_str())),
             );
             // Same `agent_info.version` proof, for a different shape decision:
             // which generation of codex's `request_user_input` form this
@@ -19961,11 +19975,11 @@ fn steering_identity_ok(
 }
 
 /// Synthesize `SessionState.native_steering_available` from an `initialize`
-/// response: extension advertised (top-level `_meta`) AND registry policy says
-/// this agent honors `promptRequired` AND the running binary's
-/// `agent_info.version` proves it. Pure so the full gate matrix is unit-tested;
-/// `run_connection` calls it once and everything downstream reads the stored
-/// bool.
+/// response: the maintained source identity (when required), extension
+/// advertised (top-level `_meta`), registry policy says this agent honors
+/// `promptRequired`, and the running binary's `agent_info.version` proves it.
+/// Pure so the full gate matrix is unit-tested; `run_connection` calls it once
+/// and everything downstream reads the stored bool.
 fn synthesize_native_steering(
     agent_type: AgentType,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -19977,6 +19991,28 @@ fn synthesize_native_steering(
             agent_type, agent_info,
         ))
         .is_some_and(|min| steering_version_ok(agent_info, min))
+}
+
+/// OpenCode has no stock ACP steering extension. Native steering is therefore
+/// reserved for the maintained adapter selected from a source-identified
+/// bundle. The bundle identity is launch-scoped: a stock 2.2.0 binary or an
+/// unproven PATH adapter has no expected identity and stays on the MCP pull
+/// channel even if it copies the same `_meta.steering` advertisement.
+fn synthesize_native_steering_with_source(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
+    maintained_opencode_identity: Option<(&str, &str)>,
+) -> bool {
+    if agent_type != AgentType::OpenCode {
+        return synthesize_native_steering(agent_type, meta, agent_info);
+    }
+    init_advertises_steering(meta)
+        && maintained_opencode_identity.is_some_and(|(name, min_version)| {
+            agent_info.is_some_and(|info| {
+                info.name == name && version_at_least(&info.version, min_version)
+            })
+        })
 }
 
 /// Whose steering policy a connection follows. A custom agent whose running
@@ -30033,6 +30069,60 @@ mod tests {
     }
 
     #[test]
+    fn opencode_native_steering_requires_the_maintained_source_identity() {
+        use agent_client_protocol::schema::v1::Implementation;
+
+        let advertised = meta_map(serde_json::json!({
+            "steering": {"supported": true}
+        }));
+        let maintained = Some(("OpenCode", "2.2.0"));
+
+        // The maintained adapter's name and version are proven by the staged
+        // bundle manifest. A current runtime can use the native channel.
+        assert!(synthesize_native_steering_with_source(
+            AgentType::OpenCode,
+            Some(&advertised),
+            Some(&Implementation::new("OpenCode", "2.2.0")),
+            maintained,
+        ));
+        // The same upstream identity from a stock/PATH launch is deliberately
+        // not trusted without the launch-scoped source proof.
+        assert!(!synthesize_native_steering_with_source(
+            AgentType::OpenCode,
+            Some(&advertised),
+            Some(&Implementation::new("OpenCode", "2.2.0")),
+            None,
+        ));
+        // A PATH adapter with an unknown identity has no source proof.
+        assert!(!synthesize_native_steering_with_source(
+            AgentType::OpenCode,
+            Some(&advertised),
+            Some(&Implementation::new("opencode-acp-other", "9.0.0")),
+            None,
+        ));
+        // A too-old maintained build stays on pull delivery.
+        assert!(!synthesize_native_steering_with_source(
+            AgentType::OpenCode,
+            Some(&advertised),
+            Some(&Implementation::new("OpenCode", "2.1.4")),
+            maintained,
+        ));
+        // Missing or malformed advertisements still fail closed.
+        assert!(!synthesize_native_steering_with_source(
+            AgentType::OpenCode,
+            None,
+            Some(&Implementation::new("OpenCode", "2.2.0")),
+            maintained,
+        ));
+        assert!(!synthesize_native_steering_with_source(
+            AgentType::OpenCode,
+            Some(&advertised),
+            None,
+            maintained,
+        ));
+    }
+
+    #[test]
     fn pi_native_steering_requires_maintained_adapter_proof() {
         use agent_client_protocol::schema::v1::Implementation;
 
@@ -36255,6 +36345,7 @@ mod tests {
                         // Watched only for a Claude launch.
                         cwd.join("claude-projects"),
                         Arc::new(StderrTail::new()),
+                        None,
                     ));
                     let _ = ended_tx.send(ended);
                 })
