@@ -58,6 +58,8 @@ export function acpVersion(key, { fsApi = fs, repoRoot = REPO_ROOT } = {}) {
       return distributionVersion(source, "Pi", "Npx")
     case "pi-runtime":
       return rustStringConstant(source, "PI_MIN_RUNTIME_VERSION")
+    case "opencode-adapter":
+      return distributionVersion(source, "OpenCode", "Binary")
     default:
       fail(`unknown ACP version key: ${key}`)
   }

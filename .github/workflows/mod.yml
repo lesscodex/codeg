@@ -54,6 +54,11 @@ jobs:
           node-version: 24
           cache: "pnpm"
 
+      - name: Setup Bun for maintained OpenCode
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.4
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -320,6 +325,11 @@ jobs:
           node-version: 24
           cache: "pnpm"
 
+      - name: Setup Bun for maintained OpenCode
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.4
+
       - name: Build frontend
         run: |
           pnpm install --frozen-lockfile
@@ -329,6 +339,7 @@ jobs:
         run: |
           pnpm tauri:stage-codex-acp
           pnpm tauri:stage-pi-acp
+          pnpm tauri:stage-opencode-acp
 
       - name: Build server + codeg-mcp companion + codeg-cli
         working-directory: src-tauri
@@ -355,6 +366,7 @@ jobs:
           cp src-tauri/target/${{ matrix.target }}/release/codeg-cli dist/${{ matrix.artifact }}/
           cp -r src-tauri/build/staging/codex-acp dist/${{ matrix.artifact }}/codex-acp
           cp -r src-tauri/build/staging/pi-acp dist/${{ matrix.artifact }}/pi-acp
+          cp -r src-tauri/build/staging/opencode-acp dist/${{ matrix.artifact }}/opencode-acp
           chmod +x dist/${{ matrix.artifact }}/codeg-server dist/${{ matrix.artifact }}/codeg-mcp dist/${{ matrix.artifact }}/codeg-cli
           cp -r out dist/${{ matrix.artifact }}/web
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
@@ -369,6 +381,7 @@ jobs:
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-cli.exe dist/${{ matrix.artifact }}/
           Copy-Item -Recurse src-tauri/build/staging/codex-acp dist/${{ matrix.artifact }}/codex-acp
           Copy-Item -Recurse src-tauri/build/staging/pi-acp dist/${{ matrix.artifact }}/pi-acp
+          Copy-Item -Recurse src-tauri/build/staging/opencode-acp dist/${{ matrix.artifact }}/opencode-acp
           Copy-Item -Recurse out dist/${{ matrix.artifact }}/web
           Compress-Archive -Path dist/${{ matrix.artifact }} -DestinationPath dist/${{ matrix.artifact }}.zip
 
@@ -388,6 +401,11 @@ jobs:
           test -f "dist/${{ matrix.artifact }}/pi-acp/package.json"
           test -f "dist/${{ matrix.artifact }}/pi-acp/runtime-prerequisites.json"
           test -f "dist/${{ matrix.artifact }}/pi-acp/node_modules/@agentclientprotocol/sdk/package.json"
+          test -x "dist/${{ matrix.artifact }}/opencode-acp/bin/opencode"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/package.json"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/runtime-prerequisites.json"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/LICENSE"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/README.md"
 
       - name: Verify packaged artifact (Windows)
         if: runner.os == 'Windows'
@@ -428,6 +446,21 @@ jobs:
           }
           if (-not (Test-Path "dist/${{ matrix.artifact }}/pi-acp/node_modules/@agentclientprotocol/sdk/package.json")) {
             throw "bundled pi-acp production dependencies missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/bin/opencode.exe")) {
+            throw "OpenCode ACP build output missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/package.json")) {
+            throw "OpenCode ACP package.json missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/runtime-prerequisites.json")) {
+            throw "OpenCode ACP runtime prerequisites missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/LICENSE")) {
+            throw "OpenCode ACP license missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/README.md")) {
+            throw "OpenCode ACP provenance README missing from packaged artifact"
           }
 
       - name: Upload artifact for Docker build (Linux only)
@@ -491,11 +524,12 @@ jobs:
           cp artifacts/linux-x64/codeg-cli dist/amd64/codeg-cli
           cp -r artifacts/linux-x64/codex-acp dist/amd64/codex-acp
           cp -r artifacts/linux-x64/pi-acp dist/amd64/pi-acp
+          cp -r artifacts/linux-x64/opencode-acp dist/amd64/opencode-acp
           # cp artifacts/linux-arm64/codeg-server dist/arm64/codeg-server
           # cp artifacts/linux-arm64/codeg-mcp dist/arm64/codeg-mcp
           # cp artifacts/linux-arm64/codeg-cli dist/arm64/codeg-cli
           cp -r artifacts/linux-x64/web dist/web
-          chmod +x dist/amd64/codeg-server dist/amd64/codeg-mcp dist/amd64/codeg-cli
+          chmod +x dist/amd64/codeg-server dist/amd64/codeg-mcp dist/amd64/codeg-cli dist/amd64/opencode-acp/bin/opencode
           # chmod +x dist/arm64/codeg-server dist/arm64/codeg-mcp dist/arm64/codeg-cli
           # Fail fast if any companion went missing — Docker would otherwise
           # produce an image where delegation silently degrades.
@@ -513,6 +547,11 @@ jobs:
           test -f dist/amd64/pi-acp/package.json
           test -f dist/amd64/pi-acp/runtime-prerequisites.json
           test -f dist/amd64/pi-acp/node_modules/@agentclientprotocol/sdk/package.json
+          test -x dist/amd64/opencode-acp/bin/opencode
+          test -f dist/amd64/opencode-acp/package.json
+          test -f dist/amd64/opencode-acp/runtime-prerequisites.json
+          test -f dist/amd64/opencode-acp/LICENSE
+          test -f dist/amd64/opencode-acp/README.md
 
       # - name: Set up QEMU
       #   uses: docker/setup-qemu-action@v3

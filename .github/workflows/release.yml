@@ -195,6 +195,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -206,6 +207,11 @@ jobs:
         with:
           node-version: 24
           cache: "pnpm"
+
+      - name: Setup Bun for maintained OpenCode
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -752,6 +758,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -812,6 +820,11 @@ jobs:
           node-version: 24
           cache: "pnpm"
 
+      - name: Setup Bun for maintained OpenCode
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.4
+
       - name: Build frontend
         env:
           # The `next build` type-check needs more than the 2 GB heap Node
@@ -822,6 +835,9 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+
+      - name: Stage OpenCode ACP adapter
+        run: pnpm tauri:stage-opencode-acp
 
       - name: Build server + codeg-mcp companion + computer-use helper + codeg-cli
         working-directory: src-tauri
@@ -1032,6 +1048,7 @@ jobs:
           cp src-tauri/target/${{ matrix.target }}/release/codeg-mcp dist/${{ matrix.artifact }}/
           cp src-tauri/target/${{ matrix.target }}/release/codeg-computer-helper dist/${{ matrix.artifact }}/
           cp src-tauri/target/${{ matrix.target }}/release/codeg-cli dist/${{ matrix.artifact }}/
+          cp -r src-tauri/build/staging/opencode-acp dist/${{ matrix.artifact }}/opencode-acp
           chmod +x dist/${{ matrix.artifact }}/codeg-server dist/${{ matrix.artifact }}/codeg-mcp dist/${{ matrix.artifact }}/codeg-computer-helper dist/${{ matrix.artifact }}/codeg-cli
           cp -r out dist/${{ matrix.artifact }}/web
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
@@ -1045,6 +1062,7 @@ jobs:
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-mcp.exe dist/${{ matrix.artifact }}/
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-computer-helper.exe dist/${{ matrix.artifact }}/
           Copy-Item src-tauri/target/${{ matrix.target }}/release/codeg-cli.exe dist/${{ matrix.artifact }}/
+          Copy-Item -Recurse src-tauri/build/staging/opencode-acp dist/${{ matrix.artifact }}/opencode-acp
           Copy-Item -Recurse out dist/${{ matrix.artifact }}/web
           Compress-Archive -Path dist/${{ matrix.artifact }} -DestinationPath dist/${{ matrix.artifact }}.zip
 
@@ -1056,6 +1074,11 @@ jobs:
           test -x "dist/${{ matrix.artifact }}/codeg-mcp"
           test -x "dist/${{ matrix.artifact }}/codeg-computer-helper"
           test -x "dist/${{ matrix.artifact }}/codeg-cli"
+          test -x "dist/${{ matrix.artifact }}/opencode-acp/bin/opencode"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/package.json"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/runtime-prerequisites.json"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/LICENSE"
+          test -f "dist/${{ matrix.artifact }}/opencode-acp/README.md"
           # `codeg-mcp --help` exits 0 without flags and prints the usage
           # line. Only run it for native targets; cross-compiled arm64
           # binaries on x64 runners can't execute.
@@ -1084,6 +1107,18 @@ jobs:
           }
           if (-not (Test-Path "dist/${{ matrix.artifact }}/codeg-cli.exe")) {
             throw "codeg-cli.exe missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/bin/opencode.exe")) {
+            throw "OpenCode ACP build output missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/runtime-prerequisites.json")) {
+            throw "OpenCode ACP runtime prerequisites missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/LICENSE")) {
+            throw "OpenCode ACP license missing from packaged artifact"
+          }
+          if (-not (Test-Path "dist/${{ matrix.artifact }}/opencode-acp/README.md")) {
+            throw "OpenCode ACP provenance README missing from packaged artifact"
           }
           $help = & "dist/${{ matrix.artifact }}/codeg-mcp.exe" --help
           if ($help -notlike "*codeg-mcp --parent-connection-id*") {
@@ -1189,14 +1224,28 @@ jobs:
           cp artifacts/linux-arm64/codeg-server dist/arm64/codeg-server
           cp artifacts/linux-arm64/codeg-mcp dist/arm64/codeg-mcp
           cp artifacts/linux-arm64/codeg-cli dist/arm64/codeg-cli
+          cp -r artifacts/linux-x64/opencode-acp dist/amd64/opencode-acp
+          cp -r artifacts/linux-arm64/opencode-acp dist/arm64/opencode-acp
           cp -r artifacts/linux-x64/web dist/web
           chmod +x dist/amd64/codeg-server dist/amd64/codeg-mcp dist/amd64/codeg-cli \
-                   dist/arm64/codeg-server dist/arm64/codeg-mcp dist/arm64/codeg-cli
+                   dist/arm64/codeg-server dist/arm64/codeg-mcp dist/arm64/codeg-cli \
+                   dist/amd64/opencode-acp/bin/opencode dist/arm64/opencode-acp/bin/opencode
           # Fail fast if any companion went missing — Docker would otherwise
           # produce an image where delegation silently degrades, or without
           # the codeg-cli its docs promise.
           for f in dist/amd64/codeg-mcp dist/arm64/codeg-mcp dist/amd64/codeg-cli dist/arm64/codeg-cli; do
             test -x "$f" || { echo "FATAL: $f missing or non-exec"; exit 1; }
+          done
+          for f in \
+            dist/amd64/opencode-acp/bin/opencode \
+            dist/amd64/opencode-acp/runtime-prerequisites.json \
+            dist/amd64/opencode-acp/LICENSE \
+            dist/amd64/opencode-acp/README.md \
+            dist/arm64/opencode-acp/bin/opencode \
+            dist/arm64/opencode-acp/runtime-prerequisites.json \
+            dist/arm64/opencode-acp/LICENSE \
+            dist/arm64/opencode-acp/README.md; do
+            test -f "$f" || { echo "FATAL: $f missing"; exit 1; }
           done
 
       - name: Set up QEMU (for multi-arch manifest)

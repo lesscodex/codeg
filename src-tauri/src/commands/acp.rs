@@ -729,6 +729,12 @@ fn system_agent_is_user_managed(name: &str, install_url: &str) -> AcpError {
     ))
 }
 
+fn packaged_agent_is_codeg_managed(name: &str) -> AcpError {
+    AcpError::protocol(format!(
+        "{name} is packaged with codeg and cannot be installed, upgraded, or removed separately"
+    ))
+}
+
 /// Verify that the agent SDK / binary is installed and usable.
 ///
 /// This is the pre-spawn guard used by the session-page connect path:
@@ -741,6 +747,16 @@ fn system_agent_is_user_managed(name: &str, install_url: &str) -> AcpError {
 /// already cached locally.
 pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), AcpError> {
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::OpenCode {
+        return crate::acp::opencode_backend::packaged_adapter_identity()
+            .map(|_| ())
+            .ok_or_else(|| {
+                AcpError::SdkNotInstalled(
+                    "The packaged OpenCode ACP adapter is missing or failed source identity validation"
+                        .to_string(),
+                )
+            });
+    }
     if agent_type == AgentType::Codex {
         if crate::acp::codex_backend::packaged_adapter_entry().is_none() {
             return Err(AcpError::SdkNotInstalled(
@@ -896,6 +912,10 @@ async fn npm_list_version(
 
 async fn detect_local_version(agent_type: AgentType) -> Option<String> {
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::OpenCode {
+        return crate::acp::opencode_backend::packaged_adapter_identity()
+            .map(|identity| identity.version);
+    }
     if matches!(agent_type, AgentType::Codex | AgentType::Pi) {
         let _packaged_entry = if agent_type == AgentType::Codex {
             crate::acp::codex_backend::packaged_adapter_entry()
@@ -1033,7 +1053,7 @@ struct AgentDiag {
     package: Option<String>,
     node_required: Option<String>,
     /// Distribution-appropriate launchability, mirroring `verify_agent_installed`:
-    /// packaged Codex → staged entry; npx → `resolve_npx_command`; binary →
+    /// packaged adapter → staged entry; npx → `resolve_npx_command`; binary →
     /// cached/system binary; uvx →
     /// `uvx_agent_launchable`. `None` = the agent cannot launch right now. This
     /// (NOT `resolve_npx`) is what the verdict uses for non-npx agents, so a
@@ -1043,7 +1063,7 @@ struct AgentDiag {
     /// `launchable` names (see [`crate::acp::qoder`]), or why it could not be
     /// found. Resolved with the app's env; connect applies the agent's own.
     direct_launch: Option<Result<String, String>>,
-    /// The packaged Codex entry or `resolve_npx_command(cmd)` for npx agents;
+    /// The packaged Node adapter entry or `resolve_npx_command(cmd)` for npx agents;
     /// `None` for binary/uvx.
     resolve_npx: Option<String>,
     /// `<npm prefix -g>/bin/<cmd>` when it exists.
@@ -1343,27 +1363,33 @@ async fn collect_agent_diag(
         }
         registry::AgentDistribution::Binary { cmd, platforms, .. } => {
             diag.cmd = cmd.to_string();
-            diag.distribution = "binary";
-            // Mirror verify_agent_installed exactly: it first rejects unsupported
-            // platforms, then evaluates
-            // `find_best_cached_binary_for_agent(..)?.is_some() || system`. So
-            // an unsupported platform — and a cache-read *error* — both FAIL
-            // the gate (the latter propagated via `?`) rather than falling
-            // through to the system binary. Reflect both here so diagnostics
-            // never reports "ok" for a case where connect errors out.
-            let supported = platforms
-                .iter()
-                .any(|p| p.platform == registry::current_platform());
-            diag.launchable = if !supported {
-                None
+            if agent_type == AgentType::OpenCode {
+                diag.distribution = "packaged";
+                diag.launchable = crate::acp::opencode_backend::packaged_adapter_entry()
+                    .map(|path| path.to_string_lossy().into_owned());
             } else {
-                match binary_cache::find_best_cached_binary_for_agent(agent_type, cmd) {
-                    Ok(Some((path, _version))) => Some(path),
-                    Ok(None) => resolve_system_agent_binary_for(agent_type, cmd),
-                    Err(_) => None,
-                }
-                .map(|p| p.to_string_lossy().to_string())
-            };
+                diag.distribution = "binary";
+                // Mirror verify_agent_installed exactly: it first rejects unsupported
+                // platforms, then evaluates
+                // `find_best_cached_binary_for_agent(..)?.is_some() || system`. So
+                // an unsupported platform — and a cache-read *error* — both FAIL
+                // the gate (the latter propagated via `?`) rather than falling
+                // through to the system binary. Reflect both here so diagnostics
+                // never reports "ok" for a case where connect errors out.
+                let supported = platforms
+                    .iter()
+                    .any(|p| p.platform == registry::current_platform());
+                diag.launchable = if !supported {
+                    None
+                } else {
+                    match binary_cache::find_best_cached_binary_for_agent(agent_type, cmd) {
+                        Ok(Some((path, _version))) => Some(path),
+                        Ok(None) => resolve_system_agent_binary_for(agent_type, cmd),
+                        Err(_) => None,
+                    }
+                    .map(|p| p.to_string_lossy().to_string())
+                };
+            }
         }
         registry::AgentDistribution::Uvx {
             cmd,
@@ -1501,10 +1527,10 @@ fn compute_verdict(inp: &DiagInputs) -> DiagnosticsVerdict {
         Some(a) => a,
     };
 
-    // The packaged Codex adapter uses Node plus its staged entry; npm and
-    // globally-installed `codex-acp` commands are not launch dependencies.
+    // Packaged Node adapters use their staged entry and Node; packaged native
+    // adapters have no Node requirement. System/global copies are irrelevant.
     if agent.distribution == "packaged" {
-        if inp.node.path.is_none() {
+        if agent.node_required.is_some() && inp.node.path.is_none() {
             return diag_verdict(
                 DiagLevel::Fail,
                 "node_missing",
@@ -1528,13 +1554,13 @@ fn compute_verdict(inp: &DiagInputs) -> DiagnosticsVerdict {
             diag_verdict(
                 DiagLevel::Ok,
                 "ok",
-                "The packaged Codex ACP adapter is launchable.",
+                &format!("The packaged {} ACP adapter is launchable.", agent.name),
             )
         } else {
             diag_verdict(
                 DiagLevel::Fail,
                 "packaged_adapter_missing",
-                "The repository-packaged Codex ACP adapter is missing.",
+                &format!("The packaged {} ACP adapter is missing.", agent.name),
             )
         };
     }
@@ -2203,6 +2229,23 @@ mod diagnostics_tests {
             ..Default::default()
         });
         assert_eq!(compute_verdict(&inp).code, "ok");
+    }
+
+    #[test]
+    fn verdict_packaged_opencode_does_not_require_node() {
+        let mut inp = base_inputs();
+        inp.node = CmdProbe::default();
+        inp.npm = CmdProbe::default();
+        inp.agent = Some(AgentDiag {
+            name: "OpenCode".to_string(),
+            cmd: "opencode".to_string(),
+            distribution: "packaged",
+            launchable: Some("/bundle/opencode-acp/bin/opencode".to_string()),
+            ..Default::default()
+        });
+        let verdict = compute_verdict(&inp);
+        assert_eq!(verdict.code, "ok");
+        assert!(verdict.summary.contains("OpenCode"));
     }
 
     #[test]
@@ -12878,23 +12921,29 @@ pub(crate) async fn acp_get_agent_status_core(
             dir_entry,
             ..
         } => {
-            let mut detected = binary_cache::detect_installed_version(agent_type, cmd)
-                .ok()
-                .flatten();
-            // A system install is launchable via the connect path's PATH
-            // fallback, and the frontend gates connect on a non-null
-            // installed_version — report the probed system version so such an
-            // install isn't blocked as "not installed". Dir-tree agents
-            // (Cursor) keep their dedicated probe; everyone else (custom or
-            // built-in) goes through the per-agent probe cache.
-            if detected.is_none() {
-                if dir_entry.is_some() {
-                    detected = system_dir_agent_version(cmd).await;
-                } else if let Some(bin) = resolve_system_agent_binary_for(agent_type, cmd) {
-                    detected = system_probed_version(agent_type, &bin, None).await;
+            if agent_type == AgentType::OpenCode {
+                let version = crate::acp::opencode_backend::packaged_adapter_identity()
+                    .map(|identity| identity.version);
+                (version.is_some(), version)
+            } else {
+                let mut detected = binary_cache::detect_installed_version(agent_type, cmd)
+                    .ok()
+                    .flatten();
+                // A system install is launchable via the connect path's PATH
+                // fallback, and the frontend gates connect on a non-null
+                // installed_version — report the probed system version so such an
+                // install isn't blocked as "not installed". Dir-tree agents
+                // (Cursor) keep their dedicated probe; everyone else (custom or
+                // built-in) goes through the per-agent probe cache.
+                if detected.is_none() {
+                    if dir_entry.is_some() {
+                        detected = system_dir_agent_version(cmd).await;
+                    } else if let Some(bin) = resolve_system_agent_binary_for(agent_type, cmd) {
+                        detected = system_probed_version(agent_type, &bin, None).await;
+                    }
                 }
+                (platforms.iter().any(|p| p.platform == platform), detected)
             }
-            (platforms.iter().any(|p| p.platform == platform), detected)
         }
         registry::AgentDistribution::Uvx {
             cmd, system_cmd, ..
@@ -13003,25 +13052,31 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
                 dir_entry,
                 ..
             } => {
-                let mut detected = binary_cache::detect_installed_version(agent_type, cmd)
-                    .ok()
-                    .flatten();
-                // Mirror the status path: a system install counts as installed
-                // (cached probes — no per-list subprocess after the first
-                // call). Without this, the list would also persist
-                // `installed_version = None` over the detected value.
-                if detected.is_none() {
-                    if dir_entry.is_some() {
-                        detected = system_dir_agent_version(cmd).await;
-                    } else if let Some(bin) = resolve_system_agent_binary_for(agent_type, cmd) {
-                        detected = system_probed_version(agent_type, &bin, None).await;
+                if agent_type == AgentType::OpenCode {
+                    let version = crate::acp::opencode_backend::packaged_adapter_identity()
+                        .map(|identity| identity.version);
+                    (version.is_some(), "packaged", version)
+                } else {
+                    let mut detected = binary_cache::detect_installed_version(agent_type, cmd)
+                        .ok()
+                        .flatten();
+                    // Mirror the status path: a system install counts as installed
+                    // (cached probes — no per-list subprocess after the first
+                    // call). Without this, the list would also persist
+                    // `installed_version = None` over the detected value.
+                    if detected.is_none() {
+                        if dir_entry.is_some() {
+                            detected = system_dir_agent_version(cmd).await;
+                        } else if let Some(bin) = resolve_system_agent_binary_for(agent_type, cmd) {
+                            detected = system_probed_version(agent_type, &bin, None).await;
+                        }
                     }
+                    (
+                        platforms.iter().any(|p| p.platform == platform),
+                        "binary",
+                        detected,
+                    )
                 }
-                (
-                    platforms.iter().any(|p| p.platform == platform),
-                    "binary",
-                    detected,
-                )
             }
             registry::AgentDistribution::Uvx {
                 cmd, system_cmd, ..
@@ -13175,7 +13230,8 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
             agent_type,
             registry_id: registry::registry_id_for(agent_type).to_string(),
             registry_version: meta.registry_version().map(ToString::to_string),
-            supports_custom_version: meta.supports_custom_version(),
+            supports_custom_version: agent_type != AgentType::OpenCode
+                && meta.supports_custom_version(),
             name: meta.name.to_string(),
             description: meta.description.to_string(),
             available,
@@ -14264,6 +14320,16 @@ pub(crate) async fn acp_download_agent_binary_core(
     emit_agent_install_event(emitter, &task_id, AgentInstallEventKind::Started, "");
 
     let meta = registry::get_agent_meta(agent_type);
+    if agent_type == AgentType::OpenCode {
+        let error = packaged_agent_is_codeg_managed(meta.name);
+        emit_agent_install_event(
+            emitter,
+            &task_id,
+            AgentInstallEventKind::Failed,
+            error.to_string(),
+        );
+        return Err(error);
+    }
     let result = match meta.distribution {
         registry::AgentDistribution::Binary {
             version,
@@ -15140,15 +15206,20 @@ pub(crate) async fn acp_uninstall_agent_core(
     emit_agent_install_event(emitter, &task_id, AgentInstallEventKind::Started, "");
 
     let meta = registry::get_agent_meta(agent_type);
-    if matches!(agent_type, AgentType::Codex | AgentType::Pi) {
+    if matches!(
+        agent_type,
+        AgentType::Codex | AgentType::Pi | AgentType::OpenCode
+    ) {
         let adapter_name = if agent_type == AgentType::Codex {
             "Codex"
+        } else if agent_type == AgentType::OpenCode {
+            "OpenCode"
         } else {
             "Pi"
         };
         let error = AcpError::protocol(
             format!(
-                "{adapter_name} ACP is repository-packaged and cannot be uninstalled with npm"
+                "{adapter_name} ACP is packaged with codeg and cannot be uninstalled separately"
             ),
         );
         emit_agent_install_event(
