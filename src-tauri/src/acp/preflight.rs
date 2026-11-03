@@ -93,6 +93,8 @@ pub async fn run_preflight_with_env(
 ) -> PreflightResult {
     let meta = registry::get_agent_meta(agent_type);
     debug_assert_eq!(meta.agent_type, agent_type);
+    let maintained_opencode = agent_type == AgentType::OpenCode
+        && crate::acp::opencode_backend::maintained_adapter_available().await;
     let mut checks = if agent_type == AgentType::Codex {
         check_packaged_codex_environment(match &meta.distribution {
             AgentDistribution::Npx { node_required, .. } => *node_required,
@@ -108,6 +110,8 @@ pub async fn run_preflight_with_env(
             runtime_env,
         )
         .await
+    } else if maintained_opencode {
+        check_packaged_opencode_environment().await
     } else {
         match &meta.distribution {
             AgentDistribution::Npx { node_required, .. } => {
@@ -415,6 +419,29 @@ async fn check_packaged_pi_environment(
     });
 
     checks.push(check_pi_runtime(runtime_env).await);
+    checks
+}
+
+async fn check_packaged_opencode_environment() -> Vec<CheckItem> {
+    let mut checks = Vec::new();
+    let identity = crate::acp::opencode_backend::packaged_adapter_identity();
+    checks.push(CheckItem {
+        check_id: "opencode_adapter_packaged".into(),
+        label: "OpenCode ACP adapter".into(),
+        status: if identity.is_some() {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        message: match identity {
+            Some(identity) => format!(
+                "Maintained OpenCode ACP adapter {}@{} is available",
+                identity.name, identity.version
+            ),
+            None => "Maintained OpenCode ACP adapter bundle is missing".into(),
+        },
+        fixes: vec![],
+    });
     checks
 }
 

@@ -2232,6 +2232,24 @@ async fn build_agent(
         return Ok((agent, prompt_usage_mode));
     }
 
+    if agent_type == AgentType::OpenCode {
+        if let Some(agent) = crate::acp::opencode_backend::build_agent(
+            meta.clone(),
+            runtime_env,
+            stderr_tail,
+            scratch,
+        )
+        .await?
+        {
+            let agent = if cwd.is_dir() {
+                agent.with_current_dir(cwd)
+            } else {
+                agent
+            };
+            return Ok((agent, prompt_usage_mode));
+        }
+    }
+
     let agent = match meta.distribution {
         AgentDistribution::Npx { cmd, args, env, .. } => {
             let mut merged_env = merge_agent_env(env, runtime_env, scratch);

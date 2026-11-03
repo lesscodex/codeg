@@ -6,3 +6,7 @@
 	path = src-tauri/vendor/pi-acp
 	url = ../codeg.git
 	branch = pi-acp
+[submodule "src-tauri/vendor/opencode-acp"]
+	path = src-tauri/vendor/opencode-acp
+	url = ../codeg.git
+	branch = opencode-acp

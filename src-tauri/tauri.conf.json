@@ -29,7 +29,8 @@
     "resources": {
       "../out": "web/",
       "build/staging/codex-acp": "codex-acp/",
-      "build/staging/pi-acp": "pi-acp/"
+      "build/staging/pi-acp": "pi-acp/",
+      "build/staging/opencode-acp": "opencode-acp/"
     },
     "externalBin": [
       "binaries/codeg-mcp",
