@@ -169,6 +169,12 @@ describe("acp turn events over the wire", () => {
       textDelta(sessionID, "msg_stale", "stale"),
     )
     await acp.waitForUpdate(({ update }) => JSON.stringify(update).includes("first reaction"))
+    const submissions = acp.server.submissions.length
+    expect(await acp.steer(sessionID, "redirect background")).toEqual({
+      outcome: "promptRequired",
+      reason: "noRunningTurn",
+    })
+    expect(acp.server.submissions).toHaveLength(submissions)
 
     expect((await acp.prompt(sessionID, "chat")).stopReason).toBe("end_turn")
     acp.server.send(
@@ -256,7 +262,7 @@ describe("acp turn events over the wire", () => {
     expect(acp.elicitations).toEqual([])
   })
 
-  test("steers a running session and leaves an idle one alone", async () => {
+  test("does not steer a core session without an owning ACP prompt", async () => {
     await using acp = await startSession()
     const steer = () =>
       acp.requestExt("_session/steering", { sessionId: acp.sessionId, prompt: [{ type: "text", text: "redirect" }] })
@@ -265,8 +271,8 @@ describe("acp turn events over the wire", () => {
     expect(acp.server.submissions).toEqual([])
 
     acp.server.active.add(acp.sessionId)
-    expect(await steer()).toEqual({ outcome: "injected" })
-    expect(acp.server.prompts).toEqual([expect.objectContaining({ text: "redirect", delivery: "steer", resume: false })])
+    expect(await steer()).toEqual({ outcome: "promptRequired", reason: "noRunningTurn" })
+    expect(acp.server.submissions).toEqual([])
   })
 })
 
