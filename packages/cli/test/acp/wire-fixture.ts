@@ -33,6 +33,7 @@ import { createTwoFilesPatch } from "diff"
 import { Duration, Effect, Exit, Logger, Option, Schema, Scope } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { ACP } from "../../src/acp/agent"
+import { ACPSteering } from "../../src/acp/steering"
 import { ACPTurn } from "../../src/acp/turn"
 
 // The fake server sends and stores the wire form of each value.
@@ -141,6 +142,7 @@ export type WireOptions = {
     readonly signal: AbortSignal
   }>
   readonly onInterrupt?: Hook<{ readonly sessionID: string }>
+  readonly onInboxCancel?: Hook<{ readonly sessionID: string; readonly inboxID: string }>
   readonly onFormCancel?: Hook<{ readonly sessionID: string; readonly formID: string }>
   readonly onFormReply?: Hook<FormReply>
   readonly permission?: (
@@ -546,6 +548,12 @@ export async function startWire(options: WireOptions = {}) {
         { sessionId, prompt: typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt },
         signal,
       ),
+    steer: (sessionId: string, prompt: string | ContentBlock[]) =>
+      connection.agent.request<ACPSteering.Response, ACPSteering.Params>(ACPSteering.Method, {
+        sessionId,
+        prompt: typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt,
+        _meta: { steering: { idleBehavior: "promptRequired" } },
+      }),
     waitForUpdate: (predicate: (update: SessionNotification) => boolean, description = "session/update") =>
       until(() => updates.find(predicate), description),
     async [Symbol.asyncDispose]() {
@@ -598,6 +606,7 @@ function startServer(options: WireOptions, changed: () => void) {
   const submissions: Submission[] = []
   const selections: Selection[] = []
   const interrupts: string[] = []
+  const cancelledInbox: Array<{ readonly sessionID: string; readonly inboxID: string }> = []
   const replies: Array<{ readonly sessionID: string; readonly requestID: string; readonly decision: string }> = []
   const cancelledForms: Array<{ readonly sessionID: string; readonly formID: string; readonly message?: string }> = []
   const repliedForms: FormReply[] = []
@@ -614,6 +623,7 @@ function startServer(options: WireOptions, changed: () => void) {
     selections,
     active: new Set<string>(),
     interrupts,
+    cancelledInbox,
     replies,
     cancelledForms,
     repliedForms,
@@ -830,6 +840,14 @@ function startServer(options: WireOptions, changed: () => void) {
           fake.interrupts.push(sessionID)
           if (!fake.sessions.has(sessionID)) return notFound(sessionID)
           return Response.json({ interrupted: (await emit(options.onInterrupt?.({ sessionID }))) > 0 })
+        }),
+      },
+      "/api/session/:sessionID/inbox/:inboxID": {
+        DELETE: route(async (req) => {
+          const item = { sessionID: req.params.sessionID, inboxID: req.params.inboxID }
+          fake.cancelledInbox.push(item)
+          await emit(options.onInboxCancel?.(item) ?? [durableEvent("session.inbox.cancelled", item)])
+          return noContent()
         }),
       },
       "/api/session/:sessionID/permission/:requestID/reply": {

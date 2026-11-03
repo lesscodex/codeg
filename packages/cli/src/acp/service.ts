@@ -43,6 +43,7 @@ import { ACPDirectories } from "./directories"
 import { ACPError } from "./error"
 import { ACPReplay } from "./replay"
 import type { ACPSessions, Attached, SupportedMcpServer } from "./sessions"
+import type { ACPSteering } from "./steering"
 import type { ACPTurn } from "./turn"
 
 const AuthMethodID = "opencode-login"
@@ -62,7 +63,7 @@ export interface Interface {
   ) => Effect.Effect<SetSessionConfigOptionResponse, ACPError.Failure>
   readonly setSessionMode: (input: SetSessionModeRequest) => Effect.Effect<SetSessionModeResponse, ACPError.Failure>
   readonly prompt: (input: PromptRequest, signal: AbortSignal) => Effect.Effect<PromptResponse, ACPError.Failure>
-  readonly steer: (input: ACPTurn.SteeringRequest) => Effect.Effect<ACPTurn.SteeringResponse, ACPError.Failure>
+  readonly steer: (input: ACPSteering.Params) => Effect.Effect<ACPSteering.Response, ACPError.Failure>
   readonly cancel: (input: CancelNotification) => Effect.Effect<void>
 }
 
