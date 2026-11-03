@@ -1,5 +1,7 @@
 import type { CancelNotification, PromptRequest, PromptResponse, RequestError } from "@agentclientprotocol/sdk"
 import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client/effect"
+import type { Session } from "@opencode/schema/session"
+import type { SessionMessage } from "@opencode/schema/session-message"
 import { TokenUsage } from "@opencode/schema/token-usage"
 import {
   Cause,
@@ -13,6 +15,7 @@ import {
   Option,
   Queue,
   Ref,
+  Semaphore,
   Scope,
   Stream,
 } from "effect"
@@ -27,10 +30,12 @@ import { ACPError } from "./error"
 import { ACPPermission } from "./permission"
 import { ACPPrompt } from "./prompt"
 import type { ACPSessions, Attached } from "./sessions"
+import { ACPSteering } from "./steering"
 import { ACPTranslate } from "./translate"
 
 export interface Interface {
   readonly prompt: (input: PromptRequest, signal: AbortSignal) => Effect.Effect<PromptResponse, ACPError.Failure>
+  readonly steer: (input: ACPSteering.Params) => Effect.Effect<ACPSteering.Response, ACPError.Failure>
   readonly cancel: (input: CancelNotification) => Effect.Effect<void>
   /** Unlike `cancel`, interrupts an idle session too, since server work can outlive its turn. */
   readonly close: (sessionID: string) => Effect.Effect<void, ACPError.Error | RequestError>
@@ -53,7 +58,23 @@ type Turn = {
   readonly state: Ref.Ref<ACPTranslate.TurnState>
   readonly subscription: Subscription
   readonly cancelled: Deferred.Deferred<void>
+  readonly owner: Owner
   readonly background: boolean
+}
+
+type AcceptedSteer = {
+  readonly id: SessionMessage.ID
+  readonly completion: Deferred.Deferred<ACPSteering.Response, ACPError.Failure>
+  state: "pending" | "cancelling" | "delivered" | "cancelled"
+}
+
+type Owner = {
+  readonly lock: Semaphore.Semaphore
+  readonly accepted: Map<string, AcceptedSteer>
+  coreSessionID?: Session.ID
+  running: boolean
+  cancelled: boolean
+  terminal?: ACPTranslate.Terminal
 }
 
 export const make = Effect.fnUntraced(function* (input: {
@@ -66,8 +87,13 @@ export const make = Effect.fnUntraced(function* (input: {
   const scope = yield* Effect.scope
   const drainTimeout = yield* CancelDrainTimeout
   const turns = yield* FiberMap.make<string, PromptResponse, ACPError.Failure>()
+  const owners = new Map<string, Owner>()
 
-  const open = Effect.fnUntraced(function* (ctx: ACPTranslate.TurnContext, state: Ref.Ref<ACPTranslate.TurnState>) {
+  const open = Effect.fnUntraced(function* (
+    ctx: ACPTranslate.TurnContext,
+    state: Ref.Ref<ACPTranslate.TurnState>,
+    owner: Owner,
+  ) {
     // Parented to the service scope; the session scope may already be closed.
     const subscriptionScope = yield* Scope.fork(scope)
     const subscription: Subscription = {
@@ -86,7 +112,14 @@ export const make = Effect.fnUntraced(function* (input: {
       Effect.forever,
       Effect.forkIn(subscriptionScope),
     )
-    return { ctx, state, subscription, cancelled: yield* Deferred.make<void>(), background: false } satisfies Turn
+    return {
+      ctx,
+      state,
+      subscription,
+      cancelled: yield* Deferred.make<void>(),
+      owner,
+      background: false,
+    } satisfies Turn
   })
 
   const take = (subscription: Subscription) =>
@@ -146,9 +179,7 @@ export const make = Effect.fnUntraced(function* (input: {
           return yield* input.connection.extNotification(ACPChild.UpdateMethod, { ...output.update, update })
         }).pipe(
           Effect.catchCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.void
-              : Effect.logWarning("ACP child session update failed", cause),
+            Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logWarning("ACP child session update failed", cause),
           ),
         )
       case "PermissionAsk": {
@@ -193,6 +224,67 @@ export const make = Effect.fnUntraced(function* (input: {
     }
   }
 
+  const cancelUndelivered = (turn: Turn, pending: readonly AcceptedSteer[]) =>
+    Effect.forEach(
+      pending,
+      (accepted) =>
+        input.client.session.inbox.cancel({ sessionID: turn.ctx.sessionID, inboxID: accepted.id }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("ACP steering cancellation was not confirmed; waiting for its inbox outcome", {
+              error,
+              inboxID: accepted.id,
+            }),
+          ),
+        ),
+      { discard: true },
+    )
+
+  const steeringEvent = Effect.fnUntraced(function* (
+    turn: Turn,
+    event: OpenCodeEvent,
+    terminal: ACPTranslate.Terminal | undefined,
+  ) {
+    if (turn.background) return terminal
+    const plan = yield* turn.owner.lock.withPermits(1)(
+      Effect.sync(() => {
+        if (event.type === "session.inbox.delivered" && event.data.sessionID === turn.ctx.sessionID) {
+          if (event.data.inboxID === turn.ctx.start.id) turn.owner.running = true
+          const accepted = turn.owner.accepted.get(event.data.inboxID)
+          if (accepted && accepted.state !== "delivered" && accepted.state !== "cancelled") {
+            accepted.state = "delivered"
+            turn.owner.running = true
+            turn.owner.terminal = undefined
+            Deferred.doneUnsafe(accepted.completion, Effect.succeed(ACPSteering.Injected))
+          }
+          return { terminal: undefined, cancel: [] as AcceptedSteer[] }
+        }
+        if (event.type === "session.inbox.cancelled" && event.data.sessionID === turn.ctx.sessionID) {
+          const accepted = turn.owner.accepted.get(event.data.inboxID)
+          if (accepted && accepted.state !== "delivered" && accepted.state !== "cancelled") {
+            accepted.state = "cancelled"
+            Deferred.doneUnsafe(accepted.completion, Effect.succeed(ACPSteering.PromptRequired))
+          }
+          const pending = [...turn.owner.accepted.values()].some(
+            (item) => item.state === "pending" || item.state === "cancelling",
+          )
+          const stored = pending ? undefined : turn.owner.terminal
+          if (stored) turn.owner.terminal = undefined
+          return { terminal: stored, cancel: [] as AcceptedSteer[] }
+        }
+        if (!terminal) return { terminal, cancel: [] as AcceptedSteer[] }
+        turn.owner.running = false
+        const pending = [...turn.owner.accepted.values()].filter((item) => item.state === "pending")
+        const cancelling = [...turn.owner.accepted.values()].some((item) => item.state === "cancelling")
+        if (!pending.length && !cancelling) return { terminal, cancel: [] as AcceptedSteer[] }
+        turn.owner.terminal = terminal
+        pending.forEach((item) => (item.state = "cancelling"))
+        return { terminal: undefined, cancel: pending }
+      }),
+    )
+    if (plan.cancel.length) yield* cancelUndelivered(turn, plan.cancel)
+    return plan.terminal
+  })
+
   const advance = Effect.fnUntraced(function* (turn: Turn) {
     const event = yield* take(turn.subscription)
     const folded = yield* Ref.modify(turn.state, (current) => {
@@ -203,7 +295,7 @@ export const make = Effect.fnUntraced(function* (input: {
       return [next, next.state]
     })
     yield* Effect.forEach(folded.outputs, (output) => interpret(turn, output), { discard: true })
-    return folded
+    return { ...folded, terminal: yield* steeringEvent(turn, event, folded.terminal) }
   })
 
   const consume = Effect.fnUntraced(function* (turn: Turn) {
@@ -349,8 +441,9 @@ export const make = Effect.fnUntraced(function* (input: {
   )
 
   // Forked uninterruptible: interruption lands only in `execute` and the last check in `settle`, so a response follows.
-  const run = Effect.fn("cli.acp.turn.run")(function* (params: PromptRequest) {
+  const run = Effect.fn("cli.acp.turn.run")(function* (params: PromptRequest, owner: Owner) {
     const attached = yield* input.sessions.require(params.sessionId)
+    yield* owner.lock.withPermits(1)(Effect.sync(() => (owner.coreSessionID = attached.id)))
     const prompt = yield* ACPPrompt.prepare(yield* input.catalog.get(attached.cwd), params.prompt)
     const capabilities = yield* Ref.get(input.capabilities)
     const state = yield* Ref.make(ACPTranslate.initial)
@@ -364,6 +457,7 @@ export const make = Effect.fnUntraced(function* (input: {
           compaction: capabilities.compaction,
         },
         state,
+        owner,
       ),
       (turn) => execute(attached, prompt, turn),
       (turn, exit) => handoff(attached, turn, exit),
@@ -371,9 +465,51 @@ export const make = Effect.fnUntraced(function* (input: {
     return yield* settle(attached, yield* Ref.get(state), exit)
   })
 
+  const stopOwner = Effect.fnUntraced(function* (clientSessionID: string) {
+    const owner = owners.get(clientSessionID)
+    if (!owner) return
+    const pending = yield* owner.lock.withPermits(1)(
+      Effect.sync(() => {
+        owner.cancelled = true
+        owner.running = false
+        return [...owner.accepted.values()].filter(
+          (accepted) => accepted.state === "pending" || accepted.state === "cancelling",
+        )
+      }),
+    )
+    for (const accepted of pending) {
+      Deferred.doneUnsafe(
+        accepted.completion,
+        Effect.fail(
+          new ACPError.ServiceFailureError({
+            safeMessage: "The owning OpenCode prompt was cancelled",
+            service: "session",
+          }),
+        ),
+      )
+    }
+    if (!owner.coreSessionID) return
+    yield* Effect.forEach(
+      pending,
+      (accepted) =>
+        input.client.session.inbox
+          .cancel({ sessionID: owner.coreSessionID!, inboxID: accepted.id })
+          .pipe(
+            Effect.catchCause((cause) => Effect.logWarning("ACP steering cleanup failed during cancel", { cause })),
+          ),
+      { discard: true },
+    )
+  })
+
   return {
     prompt: Effect.fnUntraced(function* (params, signal) {
       // Synchronous and before setup, so concurrent prompts cannot both register and an early cancel still applies.
+      const owner: Owner = {
+        lock: Semaphore.makeUnsafe(1),
+        accepted: new Map(),
+        running: false,
+        cancelled: false,
+      }
       const turn = yield* Effect.withFiber((fiber) => {
         if (FiberMap.hasUnsafe(turns, params.sessionId)) {
           return Effect.fail(
@@ -383,19 +519,73 @@ export const make = Effect.fnUntraced(function* (input: {
             }),
           )
         }
-        const forked = Effect.runForkWith(fiber.context)(run(params), { uninterruptible: true })
+        owners.set(params.sessionId, owner)
+        const forked = Effect.runForkWith(fiber.context)(run(params, owner), { uninterruptible: true })
         FiberMap.setUnsafe(turns, params.sessionId, forked)
         return Effect.succeed(forked)
       })
       // A `$/cancel_request` for this prompt cancels its turn like `session/cancel`, rather than failing the request.
       yield* aborted(signal).pipe(Effect.andThen(Fiber.interrupt(turn)), Effect.forkChild)
-      return yield* Fiber.join(turn)
+      return yield* Fiber.join(turn).pipe(
+        Effect.ensuring(
+          owner.lock.withPermits(1)(
+            Effect.sync(() => {
+              if (owners.get(params.sessionId) === owner) owners.delete(params.sessionId)
+              owner.running = false
+              for (const accepted of owner.accepted.values()) {
+                if (accepted.state === "delivered" || accepted.state === "cancelled") continue
+                Deferred.doneUnsafe(
+                  accepted.completion,
+                  Effect.fail(
+                    new ACPError.ServiceFailureError({
+                      safeMessage: "The owning OpenCode prompt ended before steering settled",
+                      service: "session",
+                    }),
+                  ),
+                )
+              }
+            }),
+          ),
+        ),
+      )
+    }),
+    steer: Effect.fnUntraced(function* (params) {
+      const attached = yield* input.sessions.require(params.sessionId)
+      const prompt = yield* ACPPrompt.prepare(yield* input.catalog.get(attached.cwd), params.prompt)
+      const owner = owners.get(params.sessionId)
+      if (!owner) return ACPSteering.PromptRequired
+      const result: { readonly outcome: ACPSteering.Response } | { readonly completion: AcceptedSteer["completion"] } =
+        yield* owner.lock.withPermits(1)(
+          Effect.gen(function* () {
+            if (!owner.running || owner.cancelled || owner.terminal) return { outcome: ACPSteering.PromptRequired }
+            const completion = yield* Deferred.make<ACPSteering.Response, ACPError.Failure>()
+            const accepted: AcceptedSteer = { id: prompt.start.id, completion, state: "pending" }
+            owner.accepted.set(accepted.id, accepted)
+            const text = [...prompt.synthetic, prompt.text].filter(Boolean).join("\n\n")
+            const admitted = yield* Effect.exit(
+              input.client.session
+                .prompt({ sessionID: attached.id, id: accepted.id, text, files: prompt.files, delivery: "steer" })
+                .pipe(Effect.catch(ACPClient.classify)),
+            )
+            if (Exit.isFailure(admitted)) {
+              owner.accepted.delete(accepted.id)
+              return yield* Effect.failCause(admitted.cause)
+            }
+            return { completion }
+          }),
+        )
+      if ("completion" in result) return yield* Deferred.await(result.completion)
+      return result.outcome
     }),
     cancel: Effect.fnUntraced(function* (params) {
+      yield* stopOwner(params.sessionId)
       yield* FiberMap.remove(turns, params.sessionId)
     }),
     close: Effect.fn("cli.acp.turn.close")(function* (sessionID) {
-      if (FiberMap.hasUnsafe(turns, sessionID)) return yield* FiberMap.remove(turns, sessionID)
+      if (FiberMap.hasUnsafe(turns, sessionID)) {
+        yield* stopOwner(sessionID)
+        return yield* FiberMap.remove(turns, sessionID)
+      }
       yield* ACPClient.decodeSessionID(sessionID).pipe(
         Effect.flatMap((id) => input.client.session.interrupt({ sessionID: id })),
         Effect.catchTag(["ACPInvalidRequestError", "SessionNotFoundError"], () => Effect.void),

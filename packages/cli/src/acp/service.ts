@@ -43,6 +43,7 @@ import { ACPDirectories } from "./directories"
 import { ACPError } from "./error"
 import { ACPReplay } from "./replay"
 import type { ACPSessions, Attached, SupportedMcpServer } from "./sessions"
+import type { ACPSteering } from "./steering"
 import type { ACPTurn } from "./turn"
 
 const AuthMethodID = "opencode-login"
@@ -62,6 +63,7 @@ export interface Interface {
   ) => Effect.Effect<SetSessionConfigOptionResponse, ACPError.Failure>
   readonly setSessionMode: (input: SetSessionModeRequest) => Effect.Effect<SetSessionModeResponse, ACPError.Failure>
   readonly prompt: (input: PromptRequest, signal: AbortSignal) => Effect.Effect<PromptResponse, ACPError.Failure>
+  readonly steer: (input: ACPSteering.Params) => Effect.Effect<ACPSteering.Response, ACPError.Failure>
   readonly cancel: (input: CancelNotification) => Effect.Effect<void>
 }
 
@@ -127,6 +129,7 @@ export function make(input: {
         },
         authMethods: [authMethod],
         agentInfo: { name: "OpenCode", version: OPENCODE_VERSION },
+        _meta: { steering: { supported: true } },
       }
     }),
     authenticate: Effect.fnUntraced(function* (params) {
@@ -236,6 +239,7 @@ export function make(input: {
       return {}
     }),
     prompt: input.turn.prompt,
+    steer: input.turn.steer,
     cancel: input.turn.cancel,
   }
 }
