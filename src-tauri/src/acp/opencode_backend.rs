@@ -28,7 +28,8 @@ const RUNTIME_PREREQUISITES: &str = "runtime-prerequisites.json";
 const DOCKER_OPENCODE_ACP_DIR: &str = "/opt/codeg/opencode-acp";
 
 /// The maintained source identity is part of the launch gate. A staged
-/// manifest must prove both values before the bundled executable is selected.
+/// manifest must prove both values before OpenCode can opt into native
+/// steering. Missing or invalid source proof is fatal.
 pub(crate) const OPENCODE_SOURCE_GITLINK: Option<&str> =
     Some("2cfbac2686718fef890e03748a8a66d6946c7de0");
 pub(crate) const OPENCODE_SOURCE_DIGEST: Option<&str> =
@@ -163,7 +164,7 @@ pub(crate) async fn build_agent(
     runtime_env: &BTreeMap<String, String>,
     stderr_tail: &Arc<StderrTail>,
     scratch: Option<&Path>,
-) -> Result<AcpAgent, AcpError> {
+) -> Result<(AcpAgent, MaintainedAdapterIdentity), AcpError> {
     if meta.agent_type != AgentType::OpenCode {
         return Err(AcpError::SpawnFailed(
             "OpenCode ACP backend received metadata for a different agent".to_string(),
@@ -177,7 +178,7 @@ pub(crate) async fn build_agent(
         ));
     };
 
-    packaged_adapter_identity().ok_or_else(|| {
+    let identity = packaged_adapter_identity().ok_or_else(|| {
         AcpError::SdkNotInstalled(
             "The bundled OpenCode ACP adapter is missing or failed source identity validation"
                 .to_string(),
@@ -201,7 +202,7 @@ pub(crate) async fn build_agent(
     let agent = AcpAgent::from_args(&refs)
         .map(|agent| agent.with_debug(agent_debug_callback(agent_name, tail, false)))
         .map_err(|err| AcpError::SpawnFailed(err.to_string()))?;
-    Ok(agent)
+    Ok((agent, identity))
 }
 
 #[cfg(test)]
