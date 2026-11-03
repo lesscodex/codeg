@@ -43,7 +43,18 @@ COPY src-tauri/vendor/pi-acp/src/ src-tauri/vendor/pi-acp/src/
 RUN node src-tauri/scripts/stage-pi-acp.mjs \
     --source-gitlink=922aa67fc2208b8a4d56aa9a29394434234b1b30
 
-# Stage 4: Build Rust server binary + codeg-mcp companion + codeg-cli
+# Stage 4: Build the maintained OpenCode ACP adapter from official source
+FROM oven/bun:1.4.4 AS opencode-acp
+WORKDIR /app
+COPY src-tauri/scripts/acp-adapter-versions.mjs \
+     src-tauri/scripts/stage-opencode-acp.mjs \
+     src-tauri/scripts/
+COPY src-tauri/src/acp/registry.rs src-tauri/src/acp/registry.rs
+COPY src-tauri/vendor/opencode-acp/ src-tauri/vendor/opencode-acp/
+RUN bun src-tauri/scripts/stage-opencode-acp.mjs \
+    --source-gitlink=2945a705158d4201db079e7295b498cce634ed2e
+
+# Stage 5: Build Rust server binary + codeg-mcp companion + codeg-cli
 FROM rust:slim-bookworm AS backend
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/src-tauri
@@ -82,6 +93,7 @@ COPY --from=backend /app/src-tauri/target/release/codeg-mcp /usr/local/bin/codeg
 COPY --from=backend /app/src-tauri/target/release/codeg-cli /usr/local/bin/codeg-cli
 COPY --from=codex-acp /app/src-tauri/build/staging/codex-acp /opt/codeg/codex-acp
 COPY --from=pi-acp /app/src-tauri/build/staging/pi-acp /opt/codeg/pi-acp
+COPY --from=opencode-acp /app/src-tauri/build/staging/opencode-acp /opt/codeg/opencode-acp
 COPY --from=frontend /app/out /app/web
 
 ENV CODEG_STATIC_DIR=/app/web

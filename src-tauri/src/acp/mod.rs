@@ -41,6 +41,7 @@ pub mod minimax_code;
 pub(crate) mod npm_package;
 pub mod one_shot;
 pub mod opencode_catalog;
+pub(crate) mod opencode_backend;
 pub(crate) mod opencode_config;
 pub(crate) mod opencode_credentials;
 pub mod opencode_launch;
