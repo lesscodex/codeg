@@ -879,6 +879,38 @@ describe("getAgentChecks adapter ordering", () => {
 })
 
 describe("buildVersionCheck", () => {
+  it("does not offer version management for a packaged agent", () => {
+    const agent = makeAgent({
+      agent_type: "opencode" as AgentType,
+      distribution_type: "packaged",
+      registry_version: "2.2.7",
+      installed_version: "2.2.7",
+      supports_custom_version: true,
+    })
+
+    expect(buildVersionCheck(agent)).toBeNull()
+    expect(
+      getAgentChecks(agent, {
+        result: {
+          agent_type: "opencode" as AgentType,
+          agent_name: "OpenCode",
+          passed: true,
+          checks: [
+            {
+              check_id: "opencode_adapter_packaged",
+              label: "OpenCode ACP adapter",
+              status: "pass",
+              message:
+                "Maintained OpenCode ACP adapter OpenCode@2.2.7 is available",
+              fixes: [],
+            },
+          ],
+          adapter: null,
+        },
+      }).some((check) => check.check_id === "version_status")
+    ).toBe(false)
+  })
+
   // A manually written definition has no registry behind it — its stored
   // version is user-typed — so the check must show the local side alone and
   // never manufacture an "upgrade available" against that noise.
