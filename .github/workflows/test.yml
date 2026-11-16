@@ -186,7 +186,10 @@ jobs:
         # compile coverage here; Linux/macOS desktop and Windows server cells
         # run the executable test suites.
         working-directory: src-tauri
-        run: cargo test ${{ matrix.cargo_args }} ${{ (matrix.os == 'windows-latest' && matrix.mode == 'desktop') && '--no-run' || '' }}
+        run: >-
+          cargo test ${{ matrix.cargo_args }}
+          ${{ (matrix.os == 'ubuntu-22.04' && matrix.mode == 'desktop') && '--jobs 1' || '' }}
+          ${{ (matrix.os == 'windows-latest' && matrix.mode == 'desktop') && '--no-run' || '' }}
 
       - name: cargo clippy
         # Clippy on each (os, mode) cell — desktop covers tauri-only code
@@ -194,7 +197,10 @@ jobs:
         # code. Treat warnings as errors now that the 8 pre-existing
         # advisories are cleared.
         working-directory: src-tauri
-        run: cargo clippy ${{ matrix.clippy_args }} -- -D warnings
+        run: >-
+          cargo clippy ${{ matrix.clippy_args }}
+          ${{ (matrix.os == 'ubuntu-22.04' && matrix.mode == 'desktop') && '--jobs 1' || '' }}
+          -- -D warnings
 
       - name: Web handlers must route through commands/*_core
         # Lock in the dedup from Phase 8: web/handlers/{folders,conversations}.rs
