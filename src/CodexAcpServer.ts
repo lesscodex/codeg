@@ -812,14 +812,21 @@ export class CodexAcpServer {
 
     captureSessionCreationPublication(sessionId: string): () => void {
         const release = this.clientDelivery.captureSessionSetupRelease(sessionId);
-        return () => {
-            // A client may drop every update for an unknown session before the response.
-            const v2 = AcpV2Connection.of(this.connection);
-            void v2?.snapshotForegroundState(sessionId, true).catch(error => {
-                logger.error(`Failed to send initial foreground state for session ${sessionId}`, error);
+        const ready = this.clientDelivery.sessionSetupReady(sessionId);
+        const v2 = AcpV2Connection.of(this.connection);
+        if (v2 && ready) {
+            // A client may drop every update for an unknown session before the response. Queue
+            // the snapshot before later runtime events, but publish it only after the response.
+            void this.codexAcpClient.enqueueSessionTransition(sessionId, async () => {
+                await ready;
+                try {
+                    await v2.snapshotForegroundState(sessionId, true);
+                } catch (error) {
+                    logger.error(`Failed to send initial foreground state for session ${sessionId}`, error);
+                }
             });
-            release();
-        };
+        }
+        return release;
     }
 
     captureSessionSetupPublication(sessionId: string): () => Promise<void> {
