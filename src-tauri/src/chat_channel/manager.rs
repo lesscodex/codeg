@@ -1,28 +1,34 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sea_orm::DatabaseConnection;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OwnedRwLockReadGuard, RwLock};
 
 use super::error::ChatChannelError;
 use super::session_bridge::SessionBridge;
 use super::traits::ChatChannelBackend;
 use super::types::*;
 use crate::acp::manager::ConnectionManager;
-use crate::db::service::thread_binding_service;
+use crate::db::service::{chat_channel_service, thread_binding_service};
 use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
 
 struct ActiveChannel {
     id: i32,
     name: String,
     channel_type: ChannelType,
+    generation: u64,
     backend: Arc<dyn ChatChannelBackend>,
 }
 
 /// Inner state shared across clones.
 struct Inner {
     channels: Mutex<HashMap<i32, ActiveChannel>>,
+    generations: Mutex<HashMap<i32, u64>>,
+    command_gates: Mutex<HashMap<i32, Arc<RwLock<()>>>>,
+    lifecycle: Mutex<()>,
     command_tx: mpsc::Sender<IncomingCommand>,
     command_rx: Mutex<Option<mpsc::Receiver<IncomingCommand>>>,
     broadcaster: Mutex<Option<Arc<WebEventBroadcaster>>>,
@@ -44,6 +50,9 @@ impl ChatChannelManager {
         Self {
             inner: Arc::new(Inner {
                 channels: Mutex::new(HashMap::new()),
+                generations: Mutex::new(HashMap::new()),
+                command_gates: Mutex::new(HashMap::new()),
+                lifecycle: Mutex::new(()),
                 command_tx,
                 command_rx: Mutex::new(Some(command_rx)),
                 broadcaster: Mutex::new(None),
@@ -87,6 +96,40 @@ impl ChatChannelManager {
         channel_type: ChannelType,
         backend: Box<dyn ChatChannelBackend>,
     ) -> Result<(), ChatChannelError> {
+        let gate = self.command_gate(id).await;
+        let _commands = gate.write().await;
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.add_channel_locked(id, name, channel_type, backend)
+            .await
+    }
+
+    pub async fn add_channel_with_factory<F, Fut, E>(&self, id: i32, factory: F) -> Result<(), E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(i32, String, ChannelType, Box<dyn ChatChannelBackend>), E>>,
+        E: From<ChatChannelError>,
+    {
+        let gate = self.command_gate(id).await;
+        let _commands = gate.write().await;
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let (actual_id, name, channel_type, backend) = factory().await?;
+        if actual_id != id {
+            return Err(E::from(ChatChannelError::ConfigurationInvalid(
+                "channel factory returned a different channel ID".to_string(),
+            )));
+        }
+        self.add_channel_locked(id, name, channel_type, backend)
+            .await
+            .map_err(E::from)
+    }
+
+    async fn add_channel_locked(
+        &self,
+        id: i32,
+        name: String,
+        channel_type: ChannelType,
+        backend: Box<dyn ChatChannelBackend>,
+    ) -> Result<(), ChatChannelError> {
         let backend: Arc<dyn ChatChannelBackend> = Arc::from(backend);
 
         // Stop existing channel if present (prevents task leak on duplicate connect)
@@ -95,23 +138,71 @@ impl ChatChannelManager {
             let _ = existing.backend.stop().await;
         }
 
+        let generation = self.next_generation(id).await;
+        backend.set_runtime_generation(generation);
+
         let command_tx = self.inner.command_tx.clone();
         backend.start(command_tx).await?;
 
+        let status_backend = backend.clone();
         let channel = ActiveChannel {
             id,
             name,
             channel_type,
+            generation,
             backend,
         };
 
         self.inner.channels.lock().await.insert(id, channel);
-        self.emit_status_event(id, "connected").await;
+        let status = if channel_type == ChannelType::QqBot {
+            "connecting"
+        } else {
+            "connected"
+        };
+        self.emit_status_event(id, status).await;
+        if channel_type == ChannelType::QqBot {
+            drop(self.spawn_status_watcher(id, generation, status_backend));
+        }
         Ok(())
     }
 
+    fn spawn_status_watcher(
+        &self,
+        channel_id: i32,
+        generation: u64,
+        backend: Arc<dyn ChatChannelBackend>,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = self.clone_ref();
+        tokio::spawn(async move {
+            let mut previous = ChannelConnectionStatus::Connecting;
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let status = backend.status().await;
+                let _lifecycle = manager.inner.lifecycle.lock().await;
+                let current = manager.inner.channels.lock().await;
+                if !current
+                    .get(&channel_id)
+                    .is_some_and(|channel| channel.generation == generation)
+                {
+                    break;
+                }
+                drop(current);
+                if status != previous {
+                    previous = status;
+                    manager
+                        .emit_status_event(channel_id, channel_status_name(status))
+                        .await;
+                }
+            }
+        })
+    }
+
     pub async fn remove_channel(&self, id: i32) -> Result<(), ChatChannelError> {
+        let gate = self.command_gate(id).await;
+        let _commands = gate.write().await;
+        let _lifecycle = self.inner.lifecycle.lock().await;
         let removed = self.inner.channels.lock().await.remove(&id);
+        self.next_generation(id).await;
         if let Some(channel) = removed {
             channel.backend.stop().await?;
             self.emit_status_event(id, "disconnected").await;
@@ -120,13 +211,160 @@ impl ChatChannelManager {
     }
 
     pub async fn stop_all(&self) {
-        let drained: Vec<ActiveChannel> = {
+        loop {
+            let mut ids: Vec<i32> = self.inner.channels.lock().await.keys().copied().collect();
+            ids.sort_unstable();
+            let mut guards = Vec::with_capacity(ids.len());
+            for id in &ids {
+                guards.push(self.command_gate(*id).await.write_owned().await);
+            }
+            let _lifecycle = self.inner.lifecycle.lock().await;
             let mut channels = self.inner.channels.lock().await;
-            channels.drain().map(|(_, ch)| ch).collect()
-        };
-        for channel in drained {
-            let _ = channel.backend.stop().await;
+            if channels.keys().any(|id| ids.binary_search(id).is_err()) {
+                continue;
+            }
+            let drained: Vec<ActiveChannel> = channels.drain().map(|(_, ch)| ch).collect();
+            drop(channels);
+            for channel in drained {
+                self.next_generation(channel.id).await;
+                let _ = channel.backend.stop().await;
+            }
+            break;
         }
+    }
+
+    /// Immediately stop and remove a backend whose QQBot configuration has
+    /// changed. The generation is advanced even when no backend is active so
+    /// commands already queued by an older runtime cannot be accepted later.
+    pub async fn invalidate_channel(&self, id: i32) -> Result<(), ChatChannelError> {
+        let gate = self.command_gate(id).await;
+        let _commands = gate.write().await;
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.invalidate_channel_locked(id).await
+    }
+
+    pub async fn update_with_lifecycle<C, Check, F, Fut, T, E>(
+        &self,
+        id: i32,
+        check: C,
+        update: F,
+    ) -> Result<T, E>
+    where
+        C: FnOnce() -> Check,
+        Check: Future<Output = Result<bool, E>>,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+        E: From<ChatChannelError>,
+    {
+        let gate = self.command_gate(id).await;
+        let _commands = gate.write().await;
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        if check().await? {
+            self.invalidate_channel_locked(id).await.map_err(E::from)?;
+        }
+        update().await
+    }
+
+    async fn invalidate_channel_locked(&self, id: i32) -> Result<(), ChatChannelError> {
+        let removed = self.inner.channels.lock().await.remove(&id);
+        self.next_generation(id).await;
+        if let Some(channel) = removed {
+            channel.backend.stop().await?;
+            self.emit_status_event(id, "disconnected").await;
+        }
+        Ok(())
+    }
+
+    async fn next_generation(&self, id: i32) -> u64 {
+        let mut generations = self.inner.generations.lock().await;
+        let generation = generations.entry(id).or_insert(0);
+        *generation = generation.saturating_add(1);
+        *generation
+    }
+
+    async fn command_gate(&self, channel_id: i32) -> Arc<RwLock<()>> {
+        self.inner
+            .command_gates
+            .lock()
+            .await
+            .entry(channel_id)
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+
+    /// The read guard admits this generation until all command effects finish.
+    /// Lifecycle operations acquire the channel's write guard before lifecycle.
+    pub(super) async fn qqbot_execution_lease(
+        &self,
+        channel_id: i32,
+        generation: u64,
+    ) -> Option<OwnedRwLockReadGuard<()>> {
+        let lease = self.command_gate(channel_id).await.read_owned().await;
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let channels = self.inner.channels.lock().await;
+        if channels.get(&channel_id).is_some_and(|channel| {
+            channel.channel_type == ChannelType::QqBot && channel.generation == generation
+        }) {
+            Some(lease)
+        } else {
+            None
+        }
+    }
+
+    pub async fn is_runtime_current(&self, channel_id: i32, generation: u64) -> bool {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.inner
+            .channels
+            .lock()
+            .await
+            .get(&channel_id)
+            .is_some_and(|channel| channel.generation == generation)
+    }
+
+    #[cfg(test)]
+    pub async fn runtime_generation(&self, channel_id: i32) -> Option<u64> {
+        self.inner
+            .channels
+            .lock()
+            .await
+            .get(&channel_id)
+            .map(|channel| channel.generation)
+    }
+
+    /// Keep the runtime identity check, durable binding, and confirmation
+    /// within the same lifecycle as channel replacement and config updates.
+    pub async fn bind_qqbot_owner_for_runtime(
+        &self,
+        db: &DatabaseConnection,
+        channel_id: i32,
+        owner_openid: &str,
+        identity: &ChannelRuntimeIdentity,
+    ) -> Result<(), ChatChannelError> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let backend = {
+            let channels = self.inner.channels.lock().await;
+            let channel = channels
+                .get(&channel_id)
+                .ok_or(ChatChannelError::NotFound(channel_id))?;
+            if channel.generation != identity.generation
+                || channel.channel_type != ChannelType::QqBot
+            {
+                return Err(ChatChannelError::ConnectionFailed(
+                    "QQBot runtime was replaced before owner binding".to_string(),
+                ));
+            }
+            channel.backend.clone()
+        };
+        chat_channel_service::bind_qqbot_owner_for_runtime(
+            db,
+            channel_id,
+            owner_openid,
+            &identity.app_id,
+            identity.owner_openid.as_deref(),
+        )
+        .await
+        .map_err(|error| ChatChannelError::Other(error.to_string()))?;
+        backend.confirm_owner_binding(owner_openid).await
     }
 
     pub async fn send_to_channel(
@@ -425,6 +663,46 @@ impl ChatChannelManager {
                     }
                 };
 
+            if channel_type == ChannelType::QqBot {
+                let result = self
+                    .add_channel_with_factory(ch.id, || async {
+                        let current = chat_channel_service::get_by_id(db_conn, ch.id)
+                            .await
+                            .map_err(|error| ChatChannelError::Other(error.to_string()))?
+                            .ok_or(ChatChannelError::NotFound(ch.id))?;
+                        if !current.enabled
+                            || (current.channel_type != "qqbot" && current.channel_type != "qq_bot")
+                        {
+                            return Err(ChatChannelError::ConfigurationInvalid(
+                                "QQBot channel is no longer enabled".to_string(),
+                            ));
+                        }
+                        let config =
+                            serde_json::from_str(&current.config_json).map_err(|error| {
+                                ChatChannelError::ConfigurationInvalid(error.to_string())
+                            })?;
+                        let token =
+                            crate::keyring_store::get_channel_token(ch.id).ok_or_else(|| {
+                                ChatChannelError::ConfigurationInvalid("Token not set".to_string())
+                            })?;
+                        let backend = super::backends::create_backend(
+                            ch.id,
+                            ChannelType::QqBot,
+                            &config,
+                            token,
+                        )?;
+                        Ok((ch.id, current.name, ChannelType::QqBot, backend))
+                    })
+                    .await;
+                if let Err(error) = result {
+                    tracing::error!(
+                        "[ChatChannel] failed to auto-connect QQBot {}: {error}",
+                        ch.id
+                    );
+                }
+                continue;
+            }
+
             let config: serde_json::Value = match serde_json::from_str(&ch.config_json) {
                 Ok(v) => v,
                 Err(e) => {
@@ -476,4 +754,304 @@ impl ChatChannelManager {
 
 fn topic_title_for_conversation(conversation_id: i32, title: &str) -> String {
     format!("#{conversation_id} {title}").chars().take(128).collect()
+}
+
+fn channel_status_name(status: ChannelConnectionStatus) -> &'static str {
+    match status {
+        ChannelConnectionStatus::Connected => "connected",
+        ChannelConnectionStatus::Connecting => "connecting",
+        ChannelConnectionStatus::Disconnected => "disconnected",
+        ChannelConnectionStatus::Error => "error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct TestBackend {
+        stopped: Arc<AtomicBool>,
+        status: ChannelConnectionStatus,
+        pause_status: Option<Arc<StatusPause>>,
+    }
+
+    struct StatusPause {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl ChatChannelBackend for TestBackend {
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::QqBot
+        }
+
+        async fn start(
+            &self,
+            _command_tx: mpsc::Sender<IncomingCommand>,
+        ) -> Result<(), ChatChannelError> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), ChatChannelError> {
+            self.stopped.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn status(&self) -> ChannelConnectionStatus {
+            if let Some(pause) = &self.pause_status {
+                if pause.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return ChannelConnectionStatus::Connecting;
+                }
+                pause.entered.notify_one();
+                pause.resume.notified().await;
+            }
+            self.status
+        }
+
+        async fn send_message(&self, _text: &str) -> Result<SentMessageId, ChatChannelError> {
+            Ok(SentMessageId("test".to_string()))
+        }
+
+        async fn send_rich_message(
+            &self,
+            _message: &RichMessage,
+        ) -> Result<SentMessageId, ChatChannelError> {
+            Ok(SentMessageId("test".to_string()))
+        }
+
+        async fn test_connection(&self) -> Result<(), ChatChannelError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidating_connected_channel_advances_runtime_generation() {
+        let manager = ChatChannelManager::new();
+        let first_stopped = Arc::new(AtomicBool::new(false));
+        manager
+            .add_channel(
+                7,
+                "QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: first_stopped.clone(),
+                    status: ChannelConnectionStatus::Connected,
+                    pause_status: None,
+                }),
+            )
+            .await
+            .expect("add first backend");
+        let first_generation = manager.runtime_generation(7).await.expect("generation");
+
+        manager.invalidate_channel(7).await.expect("invalidate");
+        assert!(first_stopped.load(Ordering::Acquire));
+        assert!(!manager.is_runtime_current(7, first_generation).await);
+
+        manager
+            .add_channel(
+                7,
+                "QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: Arc::new(AtomicBool::new(false)),
+                    status: ChannelConnectionStatus::Connected,
+                    pause_status: None,
+                }),
+            )
+            .await
+            .expect("add replacement backend");
+        let replacement_generation = manager.runtime_generation(7).await.expect("generation");
+        assert!(replacement_generation > first_generation);
+        assert!(manager.is_runtime_current(7, replacement_generation).await);
+        assert!(!manager.is_runtime_current(7, first_generation).await);
+    }
+
+    #[tokio::test]
+    async fn qqbot_admitted_command_delays_only_its_channel_reset() {
+        let manager = ChatChannelManager::new();
+        let stopped = Arc::new(AtomicBool::new(false));
+        manager
+            .add_channel(
+                7,
+                "QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: stopped.clone(),
+                    status: ChannelConnectionStatus::Connected,
+                    pause_status: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let generation = manager.runtime_generation(7).await.unwrap();
+        let lease = manager.qqbot_execution_lease(7, generation).await.unwrap();
+        let gate = manager.command_gate(7).await;
+        let reset_manager = manager.clone_ref();
+        let reset = tokio::spawn(async move {
+            reset_manager
+                .update_with_lifecycle(
+                    7,
+                    || async { Ok::<_, ChatChannelError>(true) },
+                    || async { Ok::<_, ChatChannelError>(()) },
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gate.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reset waiting for admitted command");
+        assert!(!stopped.load(Ordering::Acquire));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.add_channel(
+                8,
+                "Other QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: Arc::new(AtomicBool::new(false)),
+                    status: ChannelConnectionStatus::Connected,
+                    pause_status: None,
+                }),
+            ),
+        )
+        .await
+        .expect("other channel must not wait for reset")
+        .unwrap();
+
+        drop(lease);
+        reset.await.unwrap().expect("reset runtime");
+        assert!(stopped.load(Ordering::Acquire));
+        assert!(manager.qqbot_execution_lease(7, generation).await.is_none());
+        assert!(manager.runtime_generation(8).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn qqbot_stop_all_waits_for_admitted_commands() {
+        let manager = ChatChannelManager::new();
+        let stopped = Arc::new(AtomicBool::new(false));
+        manager
+            .add_channel(
+                7,
+                "QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: stopped.clone(),
+                    status: ChannelConnectionStatus::Connected,
+                    pause_status: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let generation = manager.runtime_generation(7).await.unwrap();
+        let lease = manager.qqbot_execution_lease(7, generation).await.unwrap();
+        let gate = manager.command_gate(7).await;
+        let stop_manager = manager.clone_ref();
+        let stop = tokio::spawn(async move { stop_manager.stop_all().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gate.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown waiting for admitted command");
+        assert!(!stopped.load(Ordering::Acquire));
+
+        drop(lease);
+        stop.await.expect("stop all");
+        assert!(stopped.load(Ordering::Acquire));
+        assert!(manager.qqbot_execution_lease(7, generation).await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn qqbot_watcher_emits_connected_when_backend_is_already_ready() {
+        let manager = ChatChannelManager::new();
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let mut events = broadcaster.subscribe();
+        *manager.inner.broadcaster.lock().await = Some(broadcaster);
+        manager
+            .add_channel(
+                7,
+                "QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: Arc::new(AtomicBool::new(false)),
+                    status: ChannelConnectionStatus::Connected,
+                    pause_status: None,
+                }),
+            )
+            .await
+            .expect("connect QQBot");
+        assert_eq!(events.recv().await.unwrap().payload["status"], "connecting");
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(250)).await;
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("connected event timeout")
+            .expect("connected event");
+        assert_eq!(event.payload["channel_id"], 7);
+        assert_eq!(event.payload["status"], "connected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn qqbot_watcher_drops_status_sample_from_replaced_runtime() {
+        let manager = ChatChannelManager::new();
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let mut events = broadcaster.subscribe();
+        *manager.inner.broadcaster.lock().await = Some(broadcaster);
+        manager
+            .add_channel(
+                7,
+                "QQBot".to_string(),
+                ChannelType::QqBot,
+                Box::new(TestBackend {
+                    stopped: Arc::new(AtomicBool::new(false)),
+                    status: ChannelConnectionStatus::Connecting,
+                    pause_status: None,
+                }),
+            )
+            .await
+            .expect("connect QQBot");
+        assert_eq!(events.recv().await.unwrap().payload["status"], "connecting");
+        let generation = manager.runtime_generation(7).await.unwrap();
+        let pause = Arc::new(StatusPause {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        let watcher = manager.spawn_status_watcher(
+            7,
+            generation,
+            Arc::new(TestBackend {
+                stopped: Arc::new(AtomicBool::new(false)),
+                status: ChannelConnectionStatus::Connected,
+                pause_status: Some(pause.clone()),
+            }),
+        );
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(250)).await;
+        pause.entered.notified().await;
+        manager
+            .invalidate_channel(7)
+            .await
+            .expect("invalidate runtime");
+        assert_eq!(
+            events.recv().await.unwrap().payload["status"],
+            "disconnected"
+        );
+        pause.resume.notify_one();
+        watcher.await.expect("watcher task");
+        assert!(events.try_recv().is_err());
+    }
 }

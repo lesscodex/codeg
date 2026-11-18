@@ -81,20 +81,27 @@ export function AddChatChannelDialog({
       setError(t("tokenRequired"))
       return
     }
-    if (channelType !== "weixin" && !chatId.trim()) {
+    if (channelType !== "weixin" && channelType !== "qqbot" && !chatId.trim()) {
       setError(t("chatIdRequired"))
+      return
+    }
+    if ((channelType === "lark" || channelType === "qqbot") && !appId.trim()) {
+      setError(t("appIdRequired"))
       return
     }
 
     setLoading(true)
     setError(null)
     try {
+      const normalizedAppId = appId.trim()
       const configJson =
         channelType === "weixin"
           ? JSON.stringify({ base_url: baseUrl })
           : channelType === "lark"
             ? JSON.stringify({ app_id: appId, chat_id: chatId })
-            : JSON.stringify({ chat_id: chatId, topic_mode: topicMode })
+            : channelType === "qqbot"
+              ? JSON.stringify({ app_id: normalizedAppId })
+              : JSON.stringify({ chat_id: chatId, topic_mode: topicMode })
 
       const channel = await createChatChannel({
         name: name.trim(),
@@ -162,17 +169,20 @@ export function AddChatChannelDialog({
                 <SelectItem value="telegram">Telegram</SelectItem>
                 <SelectItem value="lark">{t("lark")}</SelectItem>
                 <SelectItem value="weixin">{t("weixin")}</SelectItem>
+                <SelectItem value="qqbot">{t("qqbot")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
-          {channelType === "lark" && (
+          {(channelType === "lark" || channelType === "qqbot") && (
             <div className="space-y-1.5">
               <label className="text-xs font-medium">App ID</label>
               <Input
                 value={appId}
                 onChange={(e) => setAppId(e.target.value)}
-                placeholder="cli_xxxxx"
+                placeholder={
+                  channelType === "qqbot" ? "123456789" : "cli_xxxxx"
+                }
               />
             </div>
           )}
@@ -193,7 +203,7 @@ export function AddChatChannelDialog({
             </div>
           )}
 
-          {channelType !== "weixin" && (
+          {channelType !== "weixin" && channelType !== "qqbot" && (
             <div className="space-y-1.5">
               <label className="text-xs font-medium">Chat ID</label>
               <Input
@@ -229,6 +239,12 @@ export function AddChatChannelDialog({
           {channelType === "weixin" && (
             <p className="text-xs text-muted-foreground">
               {t("weixinScanDescription")}
+            </p>
+          )}
+
+          {channelType === "qqbot" && (
+            <p className="text-xs text-muted-foreground">
+              {t("qqbotBindingHint")}
             </p>
           )}
 

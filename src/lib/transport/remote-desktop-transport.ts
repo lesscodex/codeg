@@ -70,9 +70,9 @@ interface RustError {
   i18n_params?: Record<string, string> | null
 }
 
-function isAuthenticationFailed(err: unknown): boolean {
+function isRemoteWorkspaceAuthenticationFailed(err: unknown): boolean {
   if (err && typeof err === "object" && "code" in err) {
-    return (err as RustError).code === "authentication_failed"
+    return (err as RustError).code === "remote_authentication_failed"
   }
   return false
 }
@@ -200,11 +200,9 @@ export class RemoteDesktopTransport implements Transport {
       return result
     } catch (err) {
       if (this.destroyed) throw err
-      // The Rust proxy returns 401 from the remote server as
-      // `AppErrorCode::AuthenticationFailed`. Surface the connection-expired
-      // UI in just the calling window (the rest stay live until they
-      // themselves hit a 401 — per design we don't broadcast).
-      if (isAuthenticationFailed(err)) {
+      // Only the proxy's dedicated remote-token rejection expires the
+      // connection. Business commands use `authentication_failed` instead.
+      if (isRemoteWorkspaceAuthenticationFailed(err)) {
         if (this.wsOpen) this.resetReady()
         this.wsOpen = false
         this.setConnectionState("disconnected")

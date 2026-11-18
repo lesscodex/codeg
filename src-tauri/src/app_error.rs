@@ -128,6 +128,7 @@ pub enum AppErrorCode {
     DependencyMissing,
     NetworkError,
     AuthenticationFailed,
+    RemoteAuthenticationFailed,
     DatabaseError,
     IoError,
     ExternalCommandFailed,
@@ -226,6 +227,10 @@ impl AppCommandError {
 
     pub fn authentication_failed(message: impl Into<String>) -> Self {
         Self::new(AppErrorCode::AuthenticationFailed, message)
+    }
+
+    pub fn remote_authentication_failed(message: impl Into<String>) -> Self {
+        Self::new(AppErrorCode::RemoteAuthenticationFailed, message)
     }
 
     pub fn database_error(message: impl Into<String>) -> Self {

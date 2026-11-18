@@ -60,6 +60,127 @@ pub async fn update_chat_channel_core(
     daily_report_enabled: Option<bool>,
     daily_report_time: Option<Option<String>>,
 ) -> Result<ChatChannelInfo, AppCommandError> {
+    update_chat_channel_core_inner(
+        db,
+        None,
+        id,
+        name,
+        enabled,
+        config_json,
+        event_filter_json,
+        daily_report_enabled,
+        daily_report_time,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_chat_channel_core_with_manager(
+    db: &AppDatabase,
+    manager: &ChatChannelManager,
+    id: i32,
+    name: Option<String>,
+    enabled: Option<bool>,
+    config_json: Option<String>,
+    event_filter_json: Option<Option<String>>,
+    daily_report_enabled: Option<bool>,
+    daily_report_time: Option<Option<String>>,
+) -> Result<ChatChannelInfo, AppCommandError> {
+    update_chat_channel_core_inner(
+        db,
+        Some(manager),
+        id,
+        name,
+        enabled,
+        config_json,
+        event_filter_json,
+        daily_report_enabled,
+        daily_report_time,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+struct UpdateTestPause {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_chat_channel_core_inner(
+    db: &AppDatabase,
+    manager: Option<&ChatChannelManager>,
+    id: i32,
+    name: Option<String>,
+    enabled: Option<bool>,
+    config_json: Option<String>,
+    event_filter_json: Option<Option<String>>,
+    daily_report_enabled: Option<bool>,
+    daily_report_time: Option<Option<String>>,
+    #[cfg(test)] pause: Option<UpdateTestPause>,
+) -> Result<ChatChannelInfo, AppCommandError> {
+    if let Some(manager) = manager {
+        let current = chat_channel_service::get_by_id(&db.conn, id)
+            .await
+            .map_err(AppCommandError::from)?;
+        if current.is_none() && config_json.is_some() {
+            return Err(AppCommandError::not_found(format!(
+                "Chat channel {id} not found"
+            )));
+        }
+        #[cfg(test)]
+        if let Some(pause) = pause {
+            let _ = pause.entered.send(());
+            let _ = pause.resume.await;
+        }
+        if current.as_ref().is_some_and(|channel| {
+            channel.channel_type == "qqbot" || channel.channel_type == "qq_bot"
+        }) {
+            let next_config = config_json.clone();
+            let model = manager
+                .update_with_lifecycle(
+                    id,
+                    || async {
+                        let current = chat_channel_service::get_by_id(&db.conn, id)
+                            .await
+                            .map_err(AppCommandError::from)?
+                            .ok_or_else(|| {
+                                AppCommandError::not_found(format!("Chat channel {id} not found"))
+                            })?;
+                        if let Some(next_config) = &next_config {
+                            chat_channel_service::qqbot_config_requires_runtime_reset(
+                                &current.config_json,
+                                next_config,
+                            )
+                            .map_err(AppCommandError::from)
+                        } else {
+                            Ok(false)
+                        }
+                    },
+                    || async {
+                        chat_channel_service::update(
+                            &db.conn,
+                            id,
+                            name,
+                            enabled,
+                            config_json,
+                            event_filter_json,
+                            daily_report_enabled,
+                            daily_report_time,
+                        )
+                        .await
+                        .map_err(AppCommandError::from)
+                    },
+                )
+                .await?;
+            return Ok(ChatChannelInfo::from(model));
+        }
+    }
+
     let model = chat_channel_service::update(
         &db.conn,
         id,
@@ -94,44 +215,49 @@ pub async fn connect_chat_channel_core(
     manager: &ChatChannelManager,
     id: i32,
 ) -> Result<(), AppCommandError> {
-    let model = chat_channel_service::get_by_id(&db.conn, id)
-        .await
-        .map_err(AppCommandError::from)?
-        .ok_or_else(|| AppCommandError::not_found(format!("Chat channel {id} not found")))?;
-
-    let channel_type: ChannelType = serde_json::from_value(serde_json::Value::String(
-        model.channel_type.clone(),
-    ))
-    .map_err(|_| {
-        AppCommandError::configuration_invalid(format!(
-            "Invalid channel type: {}",
-            model.channel_type
-        ))
-    })?;
-
-    let config: serde_json::Value = serde_json::from_str(&model.config_json).map_err(|e| {
-        AppCommandError::configuration_invalid("Invalid config JSON").with_detail(e.to_string())
-    })?;
-
-    let token = crate::keyring_store::get_channel_token(id).ok_or_else(|| {
-        tracing::info!("[connect_chat_channel] channel {id}: Token not set in keyring");
-        AppCommandError::configuration_missing("Token not set")
-    })?;
-
-    tracing::info!(
-        "[connect_chat_channel] channel {id}: creating {channel_type} backend, config={}",
-        model.config_json
-    );
-
-    let backend = crate::chat_channel::backends::create_backend(id, channel_type, &config, token)
-        .map_err(AppCommandError::from)?;
-
     manager
-        .add_channel(id, model.name, channel_type, backend)
+        .add_channel_with_factory(id, || async move {
+            let model = chat_channel_service::get_by_id(&db.conn, id)
+                .await
+                .map_err(AppCommandError::from)?
+                .ok_or_else(|| {
+                    AppCommandError::not_found(format!("Chat channel {id} not found"))
+                })?;
+
+            let channel_type: ChannelType =
+                serde_json::from_value(serde_json::Value::String(model.channel_type.clone()))
+                    .map_err(|_| {
+                        AppCommandError::configuration_invalid(format!(
+                            "Invalid channel type: {}",
+                            model.channel_type
+                        ))
+                    })?;
+
+            let config: serde_json::Value =
+                serde_json::from_str(&model.config_json).map_err(|e| {
+                    AppCommandError::configuration_invalid("Invalid config JSON")
+                        .with_detail(e.to_string())
+                })?;
+
+            let token = crate::keyring_store::get_channel_token(id).ok_or_else(|| {
+                tracing::info!("[connect_chat_channel] channel {id}: Token not set in keyring");
+                AppCommandError::configuration_missing("Token not set")
+            })?;
+
+            tracing::info!(
+                "[connect_chat_channel] channel {id}: creating {channel_type} backend, config={}",
+                model.config_json
+            );
+
+            let backend =
+                crate::chat_channel::backends::create_backend(id, channel_type, &config, token)
+                    .map_err(AppCommandError::from)?;
+            Ok((id, model.name, channel_type, backend))
+        })
         .await
-        .map_err(|e| {
-            tracing::error!("[connect_chat_channel] channel {id}: add_channel failed: {e}");
-            AppCommandError::from(e)
+        .map_err(|error: AppCommandError| {
+            tracing::error!("[connect_chat_channel] channel {id}: add_channel failed: {error}");
+            error
         })?;
 
     tracing::info!("[connect_chat_channel] channel {id}: connected successfully");
@@ -521,6 +647,7 @@ pub async fn create_chat_channel(
 #[tauri::command]
 pub async fn update_chat_channel(
     db: tauri::State<'_, AppDatabase>,
+    manager: tauri::State<'_, ChatChannelManager>,
     id: i32,
     name: Option<String>,
     enabled: Option<bool>,
@@ -529,8 +656,9 @@ pub async fn update_chat_channel(
     daily_report_enabled: Option<bool>,
     daily_report_time: Option<Option<String>>,
 ) -> Result<ChatChannelInfo, AppCommandError> {
-    update_chat_channel_core(
+    update_chat_channel_core_with_manager(
         &db,
+        &manager,
         id,
         name,
         enabled,
@@ -724,7 +852,193 @@ pub async fn weixin_check_qrcode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_channel::error::ChatChannelError;
+    use crate::chat_channel::traits::ChatChannelBackend;
+    use crate::chat_channel::types::{
+        ChannelConnectionStatus, IncomingCommand, RichMessage, SentMessageId,
+    };
     use crate::db::test_helpers::fresh_in_memory_db;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
+
+    struct QqBotTestBackend {
+        app_id: String,
+        stopped: Arc<AtomicBool>,
+        connected_app_id: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ChatChannelBackend for QqBotTestBackend {
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::QqBot
+        }
+
+        async fn start(&self, _: mpsc::Sender<IncomingCommand>) -> Result<(), ChatChannelError> {
+            *self.connected_app_id.lock().await = Some(self.app_id.clone());
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), ChatChannelError> {
+            self.stopped.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn status(&self) -> ChannelConnectionStatus {
+            ChannelConnectionStatus::Connecting
+        }
+
+        async fn send_message(&self, _: &str) -> Result<SentMessageId, ChatChannelError> {
+            Ok(SentMessageId("test".to_string()))
+        }
+
+        async fn send_rich_message(
+            &self,
+            _: &RichMessage,
+        ) -> Result<SentMessageId, ChatChannelError> {
+            Ok(SentMessageId("test".to_string()))
+        }
+
+        async fn test_connection(&self) -> Result<(), ChatChannelError> {
+            Ok(())
+        }
+    }
+
+    async fn connect_test_qqbot(
+        db: &AppDatabase,
+        manager: &ChatChannelManager,
+        id: i32,
+        stopped: Arc<AtomicBool>,
+        connected_app_id: Arc<Mutex<Option<String>>>,
+    ) {
+        manager
+            .add_channel_with_factory(id, || async {
+                let row = chat_channel_service::get_by_id(&db.conn, id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let config: serde_json::Value = serde_json::from_str(&row.config_json).unwrap();
+                let backend: Box<dyn ChatChannelBackend> = Box::new(QqBotTestBackend {
+                    app_id: config["app_id"].as_str().unwrap().to_string(),
+                    stopped,
+                    connected_app_id,
+                });
+                Ok::<_, ChatChannelError>((id, row.name, ChannelType::QqBot, backend))
+            })
+            .await
+            .expect("connect test QQBot");
+    }
+
+    #[tokio::test]
+    async fn qqbot_concurrent_updates_cannot_leave_runtime_on_stale_app_id() {
+        let db = fresh_in_memory_db().await;
+        let row = chat_channel_service::create(
+            &db.conn,
+            "QQBot".to_string(),
+            "qqbot".to_string(),
+            r#"{"app_id":"app-a"}"#.to_string(),
+            true,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let manager = ChatChannelManager::new();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let update_db = AppDatabase {
+            conn: db.conn.clone(),
+        };
+        let update_manager = manager.clone_ref();
+        let id = row.id;
+        let update_a = tokio::spawn(async move {
+            update_chat_channel_core_inner(
+                &update_db,
+                Some(&update_manager),
+                id,
+                None,
+                None,
+                Some(r#"{"app_id":"app-a"}"#.to_string()),
+                None,
+                None,
+                None,
+                Some(UpdateTestPause {
+                    entered: entered_tx,
+                    resume: resume_rx,
+                }),
+            )
+            .await
+        });
+
+        entered_rx.await.expect("update A read initial config");
+        update_chat_channel_core_with_manager(
+            &db,
+            &manager,
+            id,
+            None,
+            None,
+            Some(r#"{"app_id":"app-b"}"#.to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("update B");
+        let stopped_b = Arc::new(AtomicBool::new(false));
+        let connected_app_id = Arc::new(Mutex::new(None));
+        connect_test_qqbot(
+            &db,
+            &manager,
+            id,
+            stopped_b.clone(),
+            connected_app_id.clone(),
+        )
+        .await;
+        let generation_b = manager.runtime_generation(id).await.unwrap();
+        assert_eq!(connected_app_id.lock().await.as_deref(), Some("app-b"));
+
+        update_chat_channel_core_with_manager(
+            &db,
+            &manager,
+            id,
+            None,
+            None,
+            Some(r#"{"app_id":" app-b "}"#.to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("same normalized App ID");
+        assert!(!stopped_b.load(Ordering::Acquire));
+        assert_eq!(manager.runtime_generation(id).await, Some(generation_b));
+
+        resume_tx.send(()).expect("resume update A");
+        update_a.await.unwrap().expect("update A");
+        assert!(stopped_b.load(Ordering::Acquire));
+        assert!(!manager.is_runtime_current(id, generation_b).await);
+        assert_eq!(manager.runtime_generation(id).await, None);
+        let persisted = chat_channel_service::get_by_id(&db.conn, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&persisted.config_json).unwrap();
+        assert_eq!(config["app_id"], "app-a");
+
+        connect_test_qqbot(
+            &db,
+            &manager,
+            id,
+            Arc::new(AtomicBool::new(false)),
+            connected_app_id.clone(),
+        )
+        .await;
+        assert_eq!(
+            connected_app_id.lock().await.as_deref(),
+            config["app_id"].as_str()
+        );
+    }
 
     #[tokio::test]
     async fn list_chat_channels_is_empty_on_fresh_db() {

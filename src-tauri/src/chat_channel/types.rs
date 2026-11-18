@@ -6,6 +6,8 @@ pub enum ChannelType {
     Lark,
     Telegram,
     Weixin,
+    #[serde(rename = "qqbot", alias = "qq_bot")]
+    QqBot,
 }
 
 // ── Per-channel strong typed configs ──
@@ -28,12 +30,20 @@ pub struct WeixinConfig {
     pub base_url: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct QqBotConfig {
+    pub app_id: String,
+    #[serde(default)]
+    pub owner_openid: Option<String>,
+}
+
 impl std::fmt::Display for ChannelType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChannelType::Lark => write!(f, "lark"),
             ChannelType::Telegram => write!(f, "telegram"),
             ChannelType::Weixin => write!(f, "weixin"),
+            ChannelType::QqBot => write!(f, "qqbot"),
         }
     }
 }
@@ -50,6 +60,13 @@ pub enum ChannelConnectionStatus {
 #[derive(Debug, Clone)]
 pub struct SentMessageId(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelRuntimeIdentity {
+    pub generation: u64,
+    pub app_id: String,
+    pub owner_openid: Option<String>,
+}
+
 pub struct IncomingCommand {
     pub channel_id: i32,
     pub sender_id: String,
@@ -57,6 +74,12 @@ pub struct IncomingCommand {
     pub callback_data: Option<String>,
     pub target: ChannelMessageTarget,
     pub metadata: serde_json::Value,
+    /// True for a QQBot private message that must pass the durable owner
+    /// binding check before the dispatcher executes it.
+    pub owner_binding: bool,
+    /// Identity of the runtime that received this command. QQBot uses this
+    /// to reject commands queued by a backend that has since been replaced.
+    pub runtime_identity: Option<ChannelRuntimeIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +126,16 @@ impl ChannelMessageTarget {
         }
     }
 
+    pub fn qqbot_c2c(channel_id: i32, owner_openid: impl Into<String>) -> Self {
+        Self {
+            channel_id,
+            chat_id: Some(owner_openid.into()),
+            thread_key: None,
+            thread_kind: Some(QQBOT_C2C_THREAD_KIND.to_string()),
+            provider_payload: None,
+        }
+    }
+
     pub fn is_telegram_forum_topic(&self) -> bool {
         self.thread_kind.as_deref() == Some(TELEGRAM_FORUM_THREAD_KIND)
             && self.thread_key.is_some()
@@ -122,6 +155,7 @@ impl ChannelMessageTarget {
 
 pub const TELEGRAM_FORUM_THREAD_KIND: &str = "telegram_forum_topic";
 pub const TELEGRAM_GENERAL_THREAD_KIND: &str = "telegram_general_topic";
+pub const QQBOT_C2C_THREAD_KIND: &str = "qqbot_c2c";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

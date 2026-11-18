@@ -12,6 +12,7 @@ fn status_for_app_error_code(code: AppErrorCode) -> StatusCode {
         AppErrorCode::NotFound => StatusCode::NOT_FOUND,
         AppErrorCode::AlreadyExists | AppErrorCode::TurnInProgress => StatusCode::CONFLICT,
         AppErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
+        AppErrorCode::RemoteAuthenticationFailed => StatusCode::UNAUTHORIZED,
         AppErrorCode::ConfigurationMissing
         | AppErrorCode::ConfigurationInvalid
         | AppErrorCode::DependencyMissing
@@ -42,6 +43,14 @@ mod tests {
         assert_eq!(
             status_for_app_error_code(AppErrorCode::AuthenticationFailed),
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn remote_workspace_authentication_failures_are_unauthorized() {
+        assert_eq!(
+            status_for_app_error_code(AppErrorCode::RemoteAuthenticationFailed),
+            StatusCode::UNAUTHORIZED
         );
     }
 }

@@ -96,8 +96,9 @@ pub async fn update_chat_channel(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<UpdateChatChannelParams>,
 ) -> Result<Json<ChatChannelInfo>, AppCommandError> {
-    let result = cc_commands::update_chat_channel_core(
+    let result = cc_commands::update_chat_channel_core_with_manager(
         &state.db,
+        &state.chat_channel_manager,
         params.id,
         params.name,
         params.enabled,

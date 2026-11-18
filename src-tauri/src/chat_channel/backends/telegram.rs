@@ -349,6 +349,8 @@ impl ChatChannelBackend for TelegramBackend {
                                                     callback_data: None,
                                                     target,
                                                     metadata: update.clone(),
+                                                    owner_binding: false,
+                                                    runtime_identity: None,
                                                 })
                                                 .await;
                                             if let Err(e) = send_result {
@@ -410,6 +412,8 @@ impl ChatChannelBackend for TelegramBackend {
                                                 callback_data: Some(data.to_string()),
                                                 target,
                                                 metadata: update.clone(),
+                                                owner_binding: false,
+                                                runtime_identity: None,
                                             })
                                             .await;
                                         if let Err(e) = send_result {

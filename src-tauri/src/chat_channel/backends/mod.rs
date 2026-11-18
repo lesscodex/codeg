@@ -1,4 +1,5 @@
 pub mod lark;
+pub mod qqbot;
 pub mod telegram;
 pub mod weixin;
 
@@ -60,6 +61,22 @@ pub fn create_backend(
                 cfg.app_id,
                 token,
                 cfg.chat_id,
+            )))
+        }
+        ChannelType::QqBot => {
+            let cfg: QqBotConfig = serde_json::from_value(config.clone()).map_err(|e| {
+                ChatChannelError::ConfigurationInvalid(format!("Invalid QQBot config: {e}"))
+            })?;
+            if cfg.app_id.trim().is_empty() {
+                return Err(ChatChannelError::ConfigurationInvalid(
+                    "app_id is required".into(),
+                ));
+            }
+            Ok(Box::new(qqbot::QqBotBackend::new(
+                channel_id,
+                cfg.app_id.trim().to_string(),
+                token,
+                cfg.owner_openid,
             )))
         }
     }

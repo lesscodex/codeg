@@ -8094,7 +8094,7 @@ export interface OfficecliInstallEvent {
 
 // ─── Chat Channels ───
 
-export type ChannelType = "lark" | "telegram" | "weixin"
+export type ChannelType = "lark" | "telegram" | "weixin" | "qqbot"
 
 /** One configured event-notification webhook sink. */
 export interface WebhookConfig {
