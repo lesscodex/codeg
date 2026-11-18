@@ -694,8 +694,8 @@ describe("RemoteDesktopTransport connection health", () => {
     const listener = vi.fn()
     transport.subscribeConnection(listener)
     const error = {
-      code: "authentication_failed",
-      message: "Invalid remote token",
+      code: "remote_authentication_failed",
+      message: "Remote Workspace token is invalid",
     }
     invokeMock.mockRejectedValueOnce(error)
 
@@ -706,6 +706,27 @@ describe("RemoteDesktopTransport connection health", () => {
     expect(onUnauthorized.mock.calls).toEqual([[]])
     stream.attach("agent-connection", {}, attachHandlers())
     expect(sentFrames()).toEqual([])
+  })
+
+  it("keeps the remote connection alive for command authentication failures", async () => {
+    const onUnauthorized = vi.fn()
+    const transport = createTransport({ onUnauthorized })
+    transport.eventStream()
+    await flush()
+    ready()
+    const listener = vi.fn()
+    transport.subscribeConnection(listener)
+    const error = {
+      code: "authentication_failed",
+      message: "QQBot access token request failed",
+    }
+    invokeMock.mockRejectedValueOnce(error)
+
+    await expect(transport.call("connect_chat_channel")).rejects.toBe(error)
+
+    expect(transport.getConnectionSnapshot()).toBe("connected")
+    expect(listener).not.toHaveBeenCalled()
+    expect(onUnauthorized).not.toHaveBeenCalled()
   })
 
   it("does not label an ordinary HTTP failure as rejected credentials", async () => {

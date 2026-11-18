@@ -41,6 +41,10 @@ export function EditChatChannelDialog({
   const [error, setError] = useState<string | null>(null)
 
   const config = JSON.parse(channel.config_json || "{}")
+  const ownerOpenId =
+    typeof config.owner_openid === "string" ? config.owner_openid : ""
+  const configuredAppId =
+    typeof config.app_id === "string" ? config.app_id.trim() : ""
   const [name, setName] = useState(channel.name)
   const [token, setToken] = useState("")
   const [chatId, setChatId] = useState(config.chat_id ?? "")
@@ -54,6 +58,10 @@ export function EditChatChannelDialog({
     channel.daily_report_time || "18:00"
   )
   const [hasToken, setHasToken] = useState(false)
+  const [resetOwnerBindingChannelId, setResetOwnerBindingChannelId] = useState<
+    ChatChannelInfo["id"] | null
+  >(null)
+  const resetOwnerBinding = resetOwnerBindingChannelId === channel.id
   const topicModeId = useId()
 
   useEffect(() => {
@@ -64,25 +72,60 @@ export function EditChatChannelDialog({
     }
   }, [open, channel.id])
 
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen) setResetOwnerBindingChannelId(null)
+      onOpenChange(nextOpen)
+    },
+    [onOpenChange]
+  )
+
   const handleSubmit = useCallback(async () => {
     if (!name.trim()) {
       setError(t("nameRequired"))
       return
     }
-    if (channel.channel_type !== "weixin" && !chatId.trim()) {
+    if (
+      channel.channel_type !== "weixin" &&
+      channel.channel_type !== "qqbot" &&
+      !chatId.trim()
+    ) {
       setError(t("chatIdRequired"))
+      return
+    }
+    if (
+      (channel.channel_type === "lark" || channel.channel_type === "qqbot") &&
+      !appId.trim()
+    ) {
+      setError(t("appIdRequired"))
+      return
+    }
+    const qqbotAppIdChanged =
+      channel.channel_type === "qqbot" &&
+      configuredAppId !== appId.trim() &&
+      ownerOpenId.length > 0
+    if (qqbotAppIdChanged && !resetOwnerBinding) {
+      setError(t("qqbotResetRequired"))
       return
     }
 
     setLoading(true)
     setError(null)
     try {
+      const normalizedAppId = appId.trim()
       const configJson =
         channel.channel_type === "weixin"
           ? JSON.stringify({ base_url: baseUrl })
           : channel.channel_type === "lark"
             ? JSON.stringify({ app_id: appId, chat_id: chatId })
-            : JSON.stringify({ chat_id: chatId, topic_mode: topicMode })
+            : channel.channel_type === "qqbot"
+              ? JSON.stringify({
+                  app_id: normalizedAppId,
+                  ...(!resetOwnerBinding && ownerOpenId
+                    ? { owner_openid: ownerOpenId }
+                    : {}),
+                })
+              : JSON.stringify({ chat_id: chatId, topic_mode: topicMode })
 
       await updateChatChannel({
         id: channel.id,
@@ -96,7 +139,7 @@ export function EditChatChannelDialog({
         await saveChatChannelToken(channel.id, token.trim())
       }
 
-      onOpenChange(false)
+      handleOpenChange(false)
       onChannelUpdated()
       toast.success(t("editSuccess"))
     } catch (err: unknown) {
@@ -110,18 +153,21 @@ export function EditChatChannelDialog({
     token,
     chatId,
     channel,
+    ownerOpenId,
+    configuredAppId,
+    resetOwnerBinding,
     appId,
     baseUrl,
     topicMode,
     dailyReportEnabled,
     dailyReportTime,
-    onOpenChange,
+    handleOpenChange,
     onChannelUpdated,
     t,
   ])
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{t("editChannel")}</DialogTitle>
@@ -137,13 +183,16 @@ export function EditChatChannelDialog({
             />
           </div>
 
-          {channel.channel_type === "lark" && (
+          {(channel.channel_type === "lark" ||
+            channel.channel_type === "qqbot") && (
             <div className="space-y-1.5">
               <label className="text-xs font-medium">App ID</label>
               <Input
                 value={appId}
                 onChange={(e) => setAppId(e.target.value)}
-                placeholder="cli_xxxxx"
+                placeholder={
+                  channel.channel_type === "qqbot" ? "123456789" : "cli_xxxxx"
+                }
               />
             </div>
           )}
@@ -166,20 +215,21 @@ export function EditChatChannelDialog({
             </div>
           )}
 
-          {channel.channel_type !== "weixin" && (
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium">Chat ID</label>
-              <Input
-                value={chatId}
-                onChange={(e) => setChatId(e.target.value)}
-                placeholder={
-                  channel.channel_type === "telegram"
-                    ? "-100123456789"
-                    : "oc_xxxxx"
-                }
-              />
-            </div>
-          )}
+          {channel.channel_type !== "weixin" &&
+            channel.channel_type !== "qqbot" && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Chat ID</label>
+                <Input
+                  value={chatId}
+                  onChange={(e) => setChatId(e.target.value)}
+                  placeholder={
+                    channel.channel_type === "telegram"
+                      ? "-100123456789"
+                      : "oc_xxxxx"
+                  }
+                />
+              </div>
+            )}
 
           {channel.channel_type === "telegram" && (
             <div className="rounded-md border border-border/70 p-3">
@@ -205,6 +255,31 @@ export function EditChatChannelDialog({
             <div className="space-y-1.5">
               <label className="text-xs font-medium">Base URL</label>
               <Input value={baseUrl} disabled />
+            </div>
+          )}
+
+          {channel.channel_type === "qqbot" && (
+            <div className="rounded-md border border-border/70 p-3 space-y-2">
+              <p className="text-xs text-muted-foreground">
+                {ownerOpenId && !resetOwnerBinding
+                  ? t("qqbotOwnerBound")
+                  : t("qqbotOwnerUnbound")}
+              </p>
+              {ownerOpenId && !resetOwnerBinding && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setResetOwnerBindingChannelId(channel.id)}
+                >
+                  {t("qqbotResetOwner")}
+                </Button>
+              )}
+              {resetOwnerBinding && (
+                <p className="text-xs text-muted-foreground">
+                  {t("qqbotResetOwnerHint")}
+                </p>
+              )}
             </div>
           )}
 
@@ -239,7 +314,7 @@ export function EditChatChannelDialog({
         <DialogFooter>
           <Button
             variant="outline"
-            onClick={() => onOpenChange(false)}
+            onClick={() => handleOpenChange(false)}
             disabled={loading}
           >
             {t("cancel")}

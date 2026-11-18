@@ -361,7 +361,7 @@ impl Default for RemoteProxyState {
 ///
 /// Error mapping:
 ///
-/// - HTTP 401 → `AppErrorCode::AuthenticationFailed` ("token expired"). The
+/// - HTTP 401 → `AppErrorCode::RemoteAuthenticationFailed` ("token expired"). The
 ///   frontend recognises this code and surfaces the connection-expired UI
 ///   in just the calling window — by design we don't broadcast to siblings.
 /// - Other non-2xx with a structured `AppCommandError` body → forwarded
@@ -416,7 +416,7 @@ pub async fn remote_http_call(
     let status = response.status();
 
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(AppCommandError::authentication_failed(
+        return Err(AppCommandError::remote_authentication_failed(
             "Remote Workspace token is invalid",
         ));
     }

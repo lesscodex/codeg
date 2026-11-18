@@ -515,6 +515,8 @@ async fn handle_lark_event(
                 callback_data: None,
                 target: ChannelMessageTarget::channel(channel_id),
                 metadata: event.clone(),
+                owner_binding: false,
+                runtime_identity: None,
             })
             .await;
     }

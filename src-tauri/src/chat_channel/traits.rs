@@ -8,6 +8,10 @@ use super::types::*;
 pub trait ChatChannelBackend: Send + Sync + 'static {
     fn channel_type(&self) -> ChannelType;
 
+    /// Set the manager generation associated with this backend instance.
+    /// Backends without runtime-scoped inbound commands do not need it.
+    fn set_runtime_generation(&self, _generation: u64) {}
+
     /// Start the receiving loop. `command_tx` forwards incoming IM messages
     /// to the central command dispatcher.
     async fn start(
@@ -90,4 +94,12 @@ pub trait ChatChannelBackend: Send + Sync + 'static {
 
     /// Test the connection (used by "Test Connection" button in UI).
     async fn test_connection(&self) -> Result<(), ChatChannelError>;
+
+    /// Confirm a provider-specific owner binding after it has been persisted.
+    /// Backends that do not use durable owner bindings leave the default.
+    async fn confirm_owner_binding(&self, _owner_openid: &str) -> Result<(), ChatChannelError> {
+        Err(ChatChannelError::Unsupported(
+            "owner binding is not supported by this channel".to_string(),
+        ))
+    }
 }
