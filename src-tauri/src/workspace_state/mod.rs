@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use notify::event::ModifyKind;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, WatchMode, Watcher};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -418,6 +418,11 @@ fn is_codeg_edit_temp_path(path: &Path) -> bool {
             name.starts_with(".codeg-edit-") && name.ends_with(".tmp")
         })
         .unwrap_or(false)
+}
+
+fn is_node_modules_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "node_modules")
 }
 
 fn git_check_ignored_paths(
@@ -1364,7 +1369,7 @@ pub async fn start_workspace_state_stream_core(
     let root_canonical_for_error = root_canonical.clone();
     let dropped_events_for_callback = Arc::clone(&dropped_events);
     let mut watcher = Some(
-        notify::recommended_watcher(
+        RecommendedWatcher::new(
             move |result: Result<notify::Event, notify::Error>| match result {
                 Ok(event) => match event_tx.try_send(event) {
                     Ok(()) => {}
@@ -1388,6 +1393,9 @@ pub async fn start_workspace_state_stream_core(
                     );
                 }
             },
+            notify::Config::default()
+                .with_follow_symlinks(true)
+                .with_ignored(|path, _kind| is_node_modules_path(path)),
         )
         .map_err(|e| {
             AppCommandError::io_error("Failed to create workspace state watcher")
@@ -1408,7 +1416,7 @@ pub async fn start_workspace_state_stream_core(
     let watch_git_dirs = git_watch_dirs.clone();
     let watch_root_display = root_path.clone();
     let registered = tokio::task::spawn_blocking(move || {
-        let watch_result = created_watcher.watch(&watch_root, RecursiveMode::Recursive);
+        let watch_result = created_watcher.watch(&watch_root, WatchMode::recursive());
         if watch_result.is_ok() {
             // Root watch is live; also watch the linked worktree's external
             // git metadata dirs (private index/HEAD + shared refs) so commit /
@@ -1419,7 +1427,7 @@ pub async fn start_workspace_state_stream_core(
             // unwatches every registered path — no separate bookkeeping
             // needed.
             for dir in &watch_git_dirs {
-                if let Err(err) = created_watcher.watch(&dir.path, RecursiveMode::Recursive) {
+                if let Err(err) = created_watcher.watch(&dir.path, WatchMode::recursive()) {
                     tracing::info!(
                         "[workspace-state-watch] worktree git-dir watch failed for {} ({}): {}",
                         watch_root_display,
@@ -2347,6 +2355,23 @@ mod tests {
             classify_watch_path(&root.join("src/app.rs"), root, &dirs),
             Some("src/app.rs".to_string())
         );
+    }
+
+    #[test]
+    fn node_modules_watch_filter_matches_exact_path_components() {
+        for path in [
+            "/ws/node_modules/package/index.js",
+            "/ws/packages/app/node_modules/package/index.js",
+        ] {
+            assert!(is_node_modules_path(Path::new(path)), "{path}");
+        }
+
+        for path in [
+            "/ws/node_modules_backup/package/index.js",
+            "/ws/packages/app/src/index.js",
+        ] {
+            assert!(!is_node_modules_path(Path::new(path)), "{path}");
+        }
     }
 
     #[test]

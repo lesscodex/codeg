@@ -231,7 +231,7 @@ toml = "0.8"
 # clobbering comments/layout). Already in the lock tree via `toml` 0.8.
 toml_edit = "0.19"
 serde_yaml = "0.9"
-notify = "6"
+notify = { package = "rolldown-notify", version = "=11.0.1" }
 base64 = "0.22"
 kill_tree = { version = "0.2", features = ["tokio"] }
 which = "7"
