@@ -1,8 +1,10 @@
 "use client"
 
-import { useState } from "react"
-import { useTranslations } from "next-intl"
+import { useId, useState } from "react"
+import { useLocale, useTranslations } from "next-intl"
+import { ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Calendar } from "@/components/ui/calendar"
 import {
   Dialog,
   DialogContent,
@@ -12,8 +14,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import { dateFnsLocale } from "@/lib/date-fns-locale"
+import {
+  formatScheduleDay,
+  joinDateAndTime,
   parseDateTimeLocalValue,
+  splitDateTimeLocalValue,
   toDateTimeLocalValue,
 } from "@/lib/task-schedule"
 
@@ -57,26 +69,35 @@ function OpenScheduledMessageDialog({
   onConfirm,
 }: Omit<ScheduledMessageDialogProps, "open">) {
   const t = useTranslations("Folder.chat.scheduledMessages")
+  const tSchedule = useTranslations("Tasks")
+  const locale = useLocale()
+  const id = useId()
   const [openedAt] = useState(() => Date.now())
-  const [value, setValue] = useState(() =>
-    toDateTimeLocalValue(
-      new Date(initialScheduledAt ?? defaultScheduledAt(openedAt))
+  const [{ date, time }, setDateTime] = useState(() =>
+    splitDateTimeLocalValue(
+      toDateTimeLocalValue(
+        new Date(initialScheduledAt ?? defaultScheduledAt(openedAt))
+      )
     )
   )
-  const minValue = toDateTimeLocalValue(new Date(openedAt + 60_000))
+  const selectedDay = new Date(`${date}T00:00`)
+  const min = splitDateTimeLocalValue(
+    toDateTimeLocalValue(new Date(openedAt + 60_000))
+  )
+  const [calendarOpen, setCalendarOpen] = useState(false)
   const [invalid, setInvalid] = useState(false)
   const [confirming, setConfirming] = useState(false)
 
   const confirm = async () => {
     if (confirming) return
-    const date = parseDateTimeLocalValue(value)
-    if (!date || date.getTime() <= Date.now()) {
+    const scheduledAt = parseDateTimeLocalValue(joinDateAndTime(date, time))
+    if (!scheduledAt || scheduledAt.getTime() <= Date.now()) {
       setInvalid(true)
       return
     }
     setConfirming(true)
     try {
-      if (await onConfirm(date.getTime())) onOpenChange(false)
+      if (await onConfirm(scheduledAt.getTime())) onOpenChange(false)
     } finally {
       setConfirming(false)
     }
@@ -95,17 +116,68 @@ function OpenScheduledMessageDialog({
           </div>
         )}
         <div className="space-y-1.5">
-          <Input
-            type="datetime-local"
-            aria-label={t("dialogTitle")}
-            value={value}
-            min={minValue}
-            onChange={(event) => {
-              setValue(event.target.value)
-              setInvalid(false)
-            }}
-            aria-invalid={invalid}
-          />
+          <div className="flex items-end gap-2">
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <Label htmlFor={`${id}-date`}>
+                {tSchedule("scheduleDateLabel")}
+              </Label>
+              <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    id={`${id}-date`}
+                    type="button"
+                    variant="outline"
+                    className="h-9 w-full justify-between px-3 font-normal"
+                    aria-invalid={invalid}
+                  >
+                    <span className="truncate">
+                      {formatScheduleDay(date, locale)}
+                    </span>
+                    <ChevronDown
+                      className="size-4 shrink-0 opacity-50"
+                      aria-hidden="true"
+                    />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-auto p-0">
+                  <Calendar
+                    mode="single"
+                    autoFocus
+                    locale={dateFnsLocale(locale)}
+                    selected={selectedDay}
+                    defaultMonth={selectedDay}
+                    disabled={{ before: new Date(`${min.date}T00:00`) }}
+                    onSelect={(picked) => {
+                      if (!picked) return
+                      setDateTime({
+                        date: toDateTimeLocalValue(picked).slice(0, 10),
+                        time,
+                      })
+                      setCalendarOpen(false)
+                      setInvalid(false)
+                    }}
+                  />
+                </PopoverContent>
+              </Popover>
+            </div>
+            <div className="flex w-32 shrink-0 flex-col gap-1.5">
+              <Label htmlFor={`${id}-time`}>
+                {tSchedule("scheduleTimeLabel")}
+              </Label>
+              <Input
+                id={`${id}-time`}
+                type="time"
+                value={time}
+                min={date === min.date ? min.time : undefined}
+                onChange={(event) => {
+                  setDateTime({ date, time: event.target.value })
+                  setInvalid(false)
+                }}
+                aria-invalid={invalid}
+                className="px-3 [&::-webkit-calendar-picker-indicator]:hidden"
+              />
+            </div>
+          </div>
           {invalid && (
             <p className="text-xs text-destructive">
               {t("futureTimeRequired")}

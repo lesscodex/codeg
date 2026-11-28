@@ -311,9 +311,18 @@ describe("MessageInput (RichComposer integration)", () => {
         name: enMessages.Folder.chat.messageInput.scheduleSend,
       })
     )
-    fireEvent.change(document.querySelector('input[type="datetime-local"]')!, {
-      target: { value: "2099-01-01T10:00" },
-    })
+    const scheduledAt = new Date()
+    scheduledAt.setMinutes(0, 0, 0)
+    scheduledAt.setHours(scheduledAt.getHours() + 1)
+    scheduledAt.setMinutes(30)
+    fireEvent.change(
+      screen.getByLabelText(enMessages.Tasks.scheduleTimeLabel),
+      {
+        target: {
+          value: `${String(scheduledAt.getHours()).padStart(2, "0")}:30`,
+        },
+      }
+    )
     await user.click(
       screen.getByRole("button", {
         name: enMessages.Folder.chat.scheduledMessages.confirm,
@@ -322,7 +331,7 @@ describe("MessageInput (RichComposer integration)", () => {
 
     expect(onSchedule).toHaveBeenCalledWith(
       expect.objectContaining({ displayText: "send later" }),
-      new Date("2099-01-01T10:00").getTime()
+      scheduledAt.getTime()
     )
     expect(editor.getText()).toBe("")
   })
